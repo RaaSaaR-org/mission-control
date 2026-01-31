@@ -5,37 +5,274 @@ use std::path::Path;
 use std::process::Command;
 
 // ---------------------------------------------------------------------------
-// Embedded templates (single source of truth: ../../templates/)
+// Embedded templates (kept in sync with templates/*.md)
 // ---------------------------------------------------------------------------
 
-const TEMPLATE_CUSTOMER: &str = include_str!(concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../../templates/customer.md"
-));
-const TEMPLATE_PROJECT: &str = include_str!(concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../../templates/project.md"
-));
-const TEMPLATE_MEETING: &str = include_str!(concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../../templates/meeting.md"
-));
-const TEMPLATE_RESEARCH: &str = include_str!(concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../../templates/research.md"
-));
-const TEMPLATE_TASK: &str = include_str!(concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../../templates/task.md"
-));
+const TEMPLATE_CUSTOMER: &str = r#"---
+id: "CUST-NNN"
+name: ""
+slug: ""
+status: "active"          # active | inactive | prospect | churned
+owner: ""
+contacts:
+  - name: ""
+    role: ""
+    email: ""
+    phone: ""
+tags: []
+projects: []
+contracts: []
+notes: ""
+created: "YYYY-MM-DD"
+updated: "YYYY-MM-DD"
+---
+
+# {{ name }}
+
+## Overview
+
+<!-- Brief description of the customer, their industry, and relationship. -->
+
+## Key Details
+
+- **Industry:**
+- **Size:**
+- **Region:**
+- **Engagement Start:**
+
+## Notes
+
+<!-- Ongoing notes about the customer relationship. -->
+"#;
+
+const TEMPLATE_PROJECT: &str = r#"---
+id: "PROJ-NNN"
+name: ""
+slug: ""
+status: "active"          # active | on-hold | completed | cancelled
+owner: ""
+customers: []             # e.g., ["CUST-001"]
+tags: []
+start_date: "YYYY-MM-DD"
+target_date: "YYYY-MM-DD"
+created: "YYYY-MM-DD"
+updated: "YYYY-MM-DD"
+---
+
+# {{ name }}
+
+## Overview
+
+<!-- Brief description of the project, its goals, and scope. -->
+
+## Objectives
+
+1. Objective 1
+2. Objective 2
+
+## Stakeholders
+
+| Name | Role | Contact |
+|------|------|---------|
+|      |      |         |
+
+## Notes
+
+<!-- Ongoing project notes. -->
+"#;
+
+const TEMPLATE_MEETING: &str = r#"---
+id: "MTG-NNN"
+title: ""
+date: "YYYY-MM-DD"
+time: "HH:MM"
+duration: ""              # e.g., "30m", "1h"
+customers: []             # e.g., ["CUST-001"]
+projects: []              # e.g., ["PROJ-001"]
+attendees:
+  - name: ""
+    role: ""
+    company: ""
+recording: ""             # path or URL to recording
+tags: []
+status: "scheduled"       # scheduled | completed | cancelled
+---
+
+# {{ title }}
+
+## Agenda
+
+- [ ] Item 1
+- [ ] Item 2
+
+## Notes
+
+<!-- Meeting notes go here. -->
+
+## Action Items
+
+- [ ] **@owner** -- Description (due: YYYY-MM-DD)
+
+## Decisions
+
+- Decision 1: Rationale.
+"#;
+
+const TEMPLATE_RESEARCH: &str = r#"---
+id: "RES-NNN"
+title: ""
+slug: ""
+status: "draft"           # draft | in-progress | final | outdated
+owner: ""
+customers: []             # e.g., ["CUST-001"]
+projects: []              # e.g., ["PROJ-001"]
+tags: []
+created: "YYYY-MM-DD"
+updated: "YYYY-MM-DD"
+agents: []                # e.g., [claude, gemini]
+summary: ""
+---
+
+# {{ title }}
+
+## Research Goal
+
+<!-- What question or topic is this research investigating? -->
+
+## Agent Reports
+
+| Agent | Status | Date | Notes |
+|-------|--------|------|-------|
+| Claude | pending | | |
+| Gemini | pending | | |
+| ChatGPT | pending | | |
+| Perplexity | pending | | |
+
+## Final Report
+
+Not yet merged. See `final/` once agent reports are reviewed and consolidated.
+"#;
+
+const TEMPLATE_TASK: &str = r#"---
+id: "TASK-NNN"
+title: ""
+slug: ""
+status: "backlog"             # backlog | todo | in-progress | review | done | cancelled
+priority: 3                   # 1=critical, 2=high, 3=medium, 4=low
+owner: ""
+projects: []                  # e.g., ["PROJ-001"]
+customers: []                 # e.g., ["CUST-001"]
+tags: []
+sprint: ""                    # e.g., "2026-W05"
+depends_on: []                # e.g., ["TASK-001"]
+due_date: ""                  # YYYY-MM-DD
+created: "YYYY-MM-DD"
+updated: "YYYY-MM-DD"
+---
+
+# {{ title }}
+
+## Description
+<!-- What needs to be done -->
+
+## Acceptance Criteria
+- [ ] Criterion 1
+
+## Notes
+"#;
+
+const TEMPLATE_SPRINT: &str = r#"---
+id: "SPR-NNN"
+title: ""
+status: "planning"        # planning | active | review | completed | cancelled
+goal: ""
+start_date: "YYYY-MM-DD"
+end_date: "YYYY-MM-DD"
+owner: ""
+projects: []              # e.g., ["PROJ-001"]
+tags: []
+created: "YYYY-MM-DD"
+updated: "YYYY-MM-DD"
+---
+
+# {{ title }}
+
+## Sprint Goal
+
+<!-- What is the main objective for this sprint? -->
+
+## Notes
+
+<!-- General sprint notes and decisions -->
+"#;
 
 // ---------------------------------------------------------------------------
 // Embedded repo files
 // ---------------------------------------------------------------------------
 
-const GITIGNORE: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../.gitignore"));
-const GITATTRIBUTES: &str =
-    include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../.gitattributes"));
+const GITIGNORE: &str = r#"# OS files
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Editor files
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
+*.sublime-workspace
+*.sublime-project
+
+# Secrets and environment
+.env
+.env.*
+*.pem
+*.key
+*.secret
+
+# Dependencies
+node_modules/
+vendor/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+
+# Logs
+*.log
+
+# Rust build artifacts
+tools/mc/target/
+
+# Generated indexes (rebuilt by `mc index`)
+data/*.json
+
+# Temp files
+tmp/
+.tmp/
+"#;
+
+const GITATTRIBUTES: &str = r#"# Git LFS tracking for binary files
+*.mp3 filter=lfs diff=lfs merge=lfs -text
+*.mp4 filter=lfs diff=lfs merge=lfs -text
+*.wav filter=lfs diff=lfs merge=lfs -text
+*.pdf filter=lfs diff=lfs merge=lfs -text
+*.png filter=lfs diff=lfs merge=lfs -text
+*.jpg filter=lfs diff=lfs merge=lfs -text
+*.jpeg filter=lfs diff=lfs merge=lfs -text
+*.gif filter=lfs diff=lfs merge=lfs -text
+*.zip filter=lfs diff=lfs merge=lfs -text
+*.tar.gz filter=lfs diff=lfs merge=lfs -text
+*.pptx filter=lfs diff=lfs merge=lfs -text
+*.docx filter=lfs diff=lfs merge=lfs -text
+*.xlsx filter=lfs diff=lfs merge=lfs -text
+"#;
 
 // ---------------------------------------------------------------------------
 // Config YAML templates
@@ -54,6 +291,7 @@ paths:
   meetings: meetings/
   research: research/
   tasks: tasks/
+  sprints: sprints/
   notes: notes/
   data: data/
   templates: templates/
@@ -66,6 +304,7 @@ id_prefixes:
   meeting: MTG
   research: RES
   task: TASK
+  sprint: SPR
 
 statuses:
   customer:
@@ -93,6 +332,12 @@ statuses:
     - in-progress
     - review
     - done
+    - cancelled
+  sprint:
+    - planning
+    - active
+    - review
+    - completed
     - cancelled
 
 priorities:
@@ -159,6 +404,7 @@ const FULL_DIRS: &[&str] = &[
     "research",
     "tasks/todo",
     "tasks/done",
+    "sprints",
     "notes/how-tos",
     "notes/playbooks",
     "data",
@@ -266,12 +512,13 @@ pub fn run(
         write_if_missing_or_force(&templates_dir.join("research.md"), TEMPLATE_RESEARCH, force)?;
         write_if_missing_or_force(&templates_dir.join("task.md"), TEMPLATE_TASK, force)?;
     } else {
-        // Full: all 5 templates
+        // Full: all 6 templates
         write_if_missing_or_force(&templates_dir.join("customer.md"), TEMPLATE_CUSTOMER, force)?;
         write_if_missing_or_force(&templates_dir.join("project.md"), TEMPLATE_PROJECT, force)?;
         write_if_missing_or_force(&templates_dir.join("meeting.md"), TEMPLATE_MEETING, force)?;
         write_if_missing_or_force(&templates_dir.join("research.md"), TEMPLATE_RESEARCH, force)?;
         write_if_missing_or_force(&templates_dir.join("task.md"), TEMPLATE_TASK, force)?;
+        write_if_missing_or_force(&templates_dir.join("sprint.md"), TEMPLATE_SPRINT, force)?;
     }
 
     // Write .gitignore and .gitattributes
@@ -420,12 +667,16 @@ mod tests {
         assert!(root.join("assets").is_dir());
         assert!(root.join("archive").is_dir());
 
-        // All 5 templates
+        // Sprints dir
+        assert!(root.join("sprints").is_dir());
+
+        // All 6 templates
         assert!(root.join("templates/customer.md").is_file());
         assert!(root.join("templates/project.md").is_file());
         assert!(root.join("templates/meeting.md").is_file());
         assert!(root.join("templates/research.md").is_file());
         assert!(root.join("templates/task.md").is_file());
+        assert!(root.join("templates/sprint.md").is_file());
 
         // Repo files
         assert!(root.join(".gitignore").is_file());
@@ -568,8 +819,10 @@ mod tests {
         let cfg = resolve_config_after_init(root);
         assert_eq!(cfg.id_prefixes.customer, "CUST");
         assert_eq!(cfg.id_prefixes.task, "TASK");
+        assert_eq!(cfg.id_prefixes.sprint, "SPR");
         assert_eq!(cfg.statuses.customer.len(), 4);
         assert_eq!(cfg.statuses.task.len(), 6);
+        assert_eq!(cfg.statuses.sprint.len(), 5);
     }
 
     #[test]
