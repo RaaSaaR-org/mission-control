@@ -1,0 +1,34 @@
+[package]
+name = "mc"
+version = "0.1.0"
+edition = "2021"
+description = "CLI tool for managing git-based knowledge repositories with Markdown and YAML frontmatter"
+license = "MIT"
+repository = "https://github.com/emai-immo/mc"
+readme = "README.md"
+keywords = ["cli", "knowledge-management", "markdown", "yaml", "git"]
+categories = ["command-line-utilities"]
+
+[[bin]]
+name = "mc"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_yaml = "0.9"
+serde_json = "1"
+colored = "2"
+dialoguer = { version = "0.11", features = ["fuzzy-select"] }
+walkdir = "2"
+chrono = { version = "0.4", features = ["serde"] }
+regex = "1"
+zip = "2"
+thiserror = "2"
+axum = "0.8"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net"] }
+pulldown-cmark = "0.12"
+genpdf = { version = "0.2", default-features = false }
+rmcp = { version = "0.14", features = ["server", "transport-io"] }
+schemars = "1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
