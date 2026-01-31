@@ -16,7 +16,9 @@ use clap::{Parser, Subcommand};
   mc task move TASK-001 in-progress  Change task status
   mc task next                       Show next actionable task
   mc validate                        Check repo structure
-  mc index                           Rebuild JSON indexes"
+  mc index                           Rebuild JSON indexes
+  mc init                            Initialize a new MissionControl repo
+  mc init --project                  Initialize a lightweight project repo"
 )]
 pub struct Cli {
     /// Path to repo root (auto-detected if omitted)
@@ -98,6 +100,30 @@ pub enum Command {
     },
     /// Start an MCP (Model Context Protocol) server over stdio
     Mcp,
+    /// Initialize a new MissionControl repository
+    #[command(after_help = "\x1b[1mExamples:\x1b[0m
+  mc init                            Full setup (customers, projects, meetings, etc.)
+  mc init --project                  Lightweight project setup (tasks, meetings, research)
+  mc init --name \"My Project\"        Set the repo name
+  mc init /path/to/dir               Initialize in a specific directory
+  mc -y init                         Skip prompts, use defaults
+  mc init --force                    Reinitialize even if config exists")]
+    Init {
+        /// Create a lightweight project-only repo (tasks, meetings, research)
+        #[arg(long)]
+        project: bool,
+
+        /// Repository or project name
+        #[arg(long)]
+        name: Option<String>,
+
+        /// Target directory (defaults to current directory)
+        path: Option<String>,
+
+        /// Overwrite existing config/config.yml
+        #[arg(long)]
+        force: bool,
+    },
     /// Task management commands (board, move, next)
     #[command(after_help = "\x1b[1mExamples:\x1b[0m
   mc task board                           Show kanban board

@@ -28,6 +28,21 @@ fn main() {
 }
 
 fn run(cli: &Cli) -> McResult<()> {
+    // Init is handled before config loading (config doesn't exist yet)
+    if let Command::Init {
+        project,
+        name,
+        path,
+        force,
+    } = &cli.command
+    {
+        let target = match path {
+            Some(p) => std::path::PathBuf::from(p),
+            None => std::env::current_dir()?,
+        };
+        return commands::init::run(&target, *project, name.as_deref(), *force, cli.yes);
+    }
+
     // Determine repo root
     let root = match &cli.root {
         Some(path) => std::path::PathBuf::from(path),
@@ -37,6 +52,7 @@ fn run(cli: &Cli) -> McResult<()> {
     let cfg = config::load_config(&root)?;
 
     match &cli.command {
+        Command::Init { .. } => unreachable!(),
         Command::New { entity } => commands::new::run(entity, &cfg, cli.yes),
         Command::List { entity } => commands::list::run(entity, &cfg),
         Command::Show { id } => commands::show::run(id, &cfg),

@@ -27,6 +27,9 @@ pub enum McError {
     #[error("Validation failed: {0} issue(s) found")]
     ValidationFailed(usize),
 
+    #[error("Already initialized: config/config.yml exists at {0}")]
+    AlreadyInitialized(PathBuf),
+
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
 
@@ -57,7 +60,10 @@ impl McError {
                 "Try 'mc list customers' (or projects, meetings, research) to see available entities.".into(),
             ),
             McError::RepoRootNotFound => Some(
-                "Run mc from inside a MissionControl repo, or pass --root <path>.".into(),
+                "Run mc from inside a MissionControl repo, pass --root <path>, or run 'mc init' to create a new repo.".into(),
+            ),
+            McError::AlreadyInitialized(_) => Some(
+                "Use --force to reinitialize, or run mc init in a different directory.".into(),
             ),
             McError::TemplateNotFound(_) => Some(
                 "Check that your templates/ directory contains the required .md templates.".into(),
