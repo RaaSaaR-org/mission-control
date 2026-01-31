@@ -4,9 +4,15 @@ A command-line tool for managing git-based knowledge repositories. Scaffolds new
 
 ## Installation
 
+### From crates.io
+
+```bash
+cargo install mc
+```
+
 ### Prebuilt binaries
 
-Download the latest release for your platform from the [GitHub Releases](https://github.com/emai-immo/mc/releases) page:
+Download the latest release for your platform from the [GitHub Releases](https://github.com/RaaSaaR-org/mission-control/releases) page:
 
 | Platform | Archive |
 |----------|---------|
@@ -25,14 +31,14 @@ sudo mv mc /usr/local/bin/
 ### Build from source
 
 ```bash
-cargo install --git https://github.com/emai-immo/mc
+cargo install --git https://github.com/RaaSaaR-org/mission-control
 ```
 
 Or clone and build locally:
 
 ```bash
-git clone https://github.com/emai-immo/mc.git
-cd mc
+git clone https://github.com/RaaSaaR-org/mission-control.git
+cd mission-control
 cargo build --release
 # Binary is at target/release/mc
 ```
@@ -380,6 +386,49 @@ Once connected, you can ask your assistant things like:
 - **Server failed to connect** -- check that the binary path is absolute and the file exists.
 - **Server not responding** -- ensure `--root` comes before `mcp` in the args array.
 - **Tools not appearing** -- restart the editor or assistant after changing the config file.
+
+## CI/CD
+
+### Continuous integration
+
+Every push to `main` and every pull request runs the CI pipeline (`.github/workflows/ci.yml`):
+
+1. `cargo fmt --check` -- formatting
+2. `cargo clippy -- -D warnings` -- lints
+3. `cargo test` -- tests
+4. `cargo build --release` -- build
+
+### Releasing a new version
+
+Releases are fully automated via `.github/workflows/release.yml`. When you push a version tag, the pipeline builds platform binaries, creates a GitHub Release, and publishes to crates.io.
+
+**Steps to release:**
+
+1. Bump the version in `Cargo.toml`:
+   ```toml
+   version = "0.2.0"
+   ```
+2. Commit and push:
+   ```bash
+   git add Cargo.toml Cargo.lock
+   git commit -m "Bump version to 0.2.0"
+   git push
+   ```
+3. Tag and push the tag:
+   ```bash
+   git tag v0.2.0
+   git push origin v0.2.0
+   ```
+
+The release workflow then:
+
+| Job | What it does |
+|-----|--------------|
+| **build** | Cross-compiles binaries for Linux (amd64, arm64) and macOS (amd64, arm64) |
+| **release** | Attaches the `.tar.gz` archives to a GitHub Release with auto-generated notes |
+| **publish** | Publishes the crate to [crates.io](https://crates.io/crates/mc) |
+
+**One-time setup:** Add your crates.io API token as the GitHub secret `CARGO_REGISTRY_TOKEN` in repo **Settings > Secrets and variables > Actions**. Get the token from [crates.io/settings/tokens](https://crates.io/settings/tokens).
 
 ## Project structure
 

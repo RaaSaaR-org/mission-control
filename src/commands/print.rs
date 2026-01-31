@@ -422,12 +422,13 @@ pub fn print_research_programmatic(
 
     let mut report_files = collect_report_files(&final_dir, file);
 
-    if report_files.is_empty() && file.is_some() {
-        return Err(McError::Other(format!(
-            "File '{}' not found in {}/final/",
-            file.unwrap(),
-            id
-        )));
+    if report_files.is_empty() {
+        if let Some(f) = file {
+            return Err(McError::Other(format!(
+                "File '{}' not found in {}/final/",
+                f, id
+            )));
+        }
     }
 
     if report_files.is_empty() {
