@@ -1,13 +1,18 @@
 [package]
 name = "mc"
 version = "0.1.0"
+authors = ["RaaSaaR <info@raasaar.com>"]
 edition = "2021"
-description = "CLI tool for managing git-based knowledge repositories with Markdown and YAML frontmatter"
+rust-version = "1.70"
+description = "Git-based knowledge management CLI — manage customers, projects, meetings, research and tasks with Markdown + YAML frontmatter"
 license = "MIT"
-repository = "https://github.com/emai-immo/mc"
+repository = "https://github.com/RaaSaaR-org/mission-control"
+homepage = "https://github.com/RaaSaaR-org/mission-control"
+documentation = "https://github.com/RaaSaaR-org/mission-control#readme"
 readme = "README.md"
-keywords = ["cli", "knowledge-management", "markdown", "yaml", "git"]
+keywords = ["cli", "knowledge-management", "markdown", "crm", "project-management"]
 categories = ["command-line-utilities"]
+exclude = ["tests/", "data/"]
 
 [[bin]]
 name = "mc"
