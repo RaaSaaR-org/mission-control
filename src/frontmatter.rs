@@ -60,7 +60,7 @@ pub fn serialize_document(frontmatter: &Value, body: &str) -> String {
 /// Get a string field from a YAML Mapping Value.
 pub fn get_str<'a>(val: &'a Value, key: &str) -> Option<&'a str> {
     val.as_mapping()
-        .and_then(|m| m.get(&Value::String(key.to_string())))
+        .and_then(|m| m.get(Value::String(key.to_string())))
         .and_then(|v| v.as_str())
 }
 
@@ -72,7 +72,7 @@ pub fn get_str_or<'a>(val: &'a Value, key: &str, default: &'a str) -> &'a str {
 /// Get a sequence of strings from a YAML value.
 pub fn get_string_list(val: &Value, key: &str) -> Vec<String> {
     val.as_mapping()
-        .and_then(|m| m.get(&Value::String(key.to_string())))
+        .and_then(|m| m.get(Value::String(key.to_string())))
         .and_then(|v| v.as_sequence())
         .map(|seq| {
             seq.iter()
@@ -93,6 +93,7 @@ pub fn set_str(val: &mut Value, key: &str, value: &str) {
 }
 
 /// Set a sequence of strings on a YAML Mapping Value.
+#[allow(dead_code)]
 pub fn set_string_list(val: &mut Value, key: &str, values: &[String]) {
     if let Some(map) = val.as_mapping_mut() {
         let seq: Vec<Value> = values.iter().map(|s| Value::String(s.clone())).collect();

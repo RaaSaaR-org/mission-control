@@ -137,6 +137,7 @@ impl fmt::Display for EntityId {
 }
 
 /// A task location discovered on disk.
+#[allow(dead_code)]
 pub struct TaskLocation {
     pub tasks_dir: PathBuf,
     pub project_id: Option<String>,
@@ -159,7 +160,7 @@ pub fn collect_all_task_dirs(cfg: &ResolvedConfig) -> Vec<TaskLocation> {
     if cfg.projects_dir.is_dir() {
         if let Ok(entries) = std::fs::read_dir(&cfg.projects_dir) {
             for entry in entries.filter_map(|e| e.ok()) {
-                if entry.file_type().map_or(false, |ft| ft.is_dir()) {
+                if entry.file_type().is_ok_and(|ft| ft.is_dir()) {
                     let dir_name = entry.file_name().to_string_lossy().to_string();
                     let proj_id = extract_id_from_dirname(&dir_name, &cfg.id_prefixes.project);
                     let tasks_subdir = entry.path().join("tasks");
@@ -177,7 +178,7 @@ pub fn collect_all_task_dirs(cfg: &ResolvedConfig) -> Vec<TaskLocation> {
     if cfg.customers_dir.is_dir() {
         if let Ok(entries) = std::fs::read_dir(&cfg.customers_dir) {
             for entry in entries.filter_map(|e| e.ok()) {
-                if entry.file_type().map_or(false, |ft| ft.is_dir()) {
+                if entry.file_type().is_ok_and(|ft| ft.is_dir()) {
                     let dir_name = entry.file_name().to_string_lossy().to_string();
                     let cust_id = extract_id_from_dirname(&dir_name, &cfg.id_prefixes.customer);
                     let tasks_subdir = entry.path().join("tasks");
@@ -237,7 +238,7 @@ pub fn next_id(kind: EntityKind, cfg: &ResolvedConfig) -> McResult<EntityId> {
             if base.is_dir() {
                 for entry in WalkDir::new(base).into_iter().filter_map(|e| e.ok()) {
                     let path = entry.path();
-                    if path.extension().map_or(false, |e| e == "md") {
+                    if path.extension().is_some_and(|e| e == "md") {
                         if let Ok(content) = std::fs::read_to_string(path) {
                             if let Some((fm_str, _)) = frontmatter::split_frontmatter(&content) {
                                 if let Ok(val) = frontmatter::parse_raw(&fm_str) {

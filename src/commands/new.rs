@@ -141,10 +141,7 @@ fn prompt_input_optional(label: &str, yes: bool) -> String {
         .with_prompt(format!("{} (blank to skip)", label))
         .allow_empty(true)
         .interact_text();
-    match result {
-        Ok(val) => val,
-        _ => String::new(),
-    }
+    result.unwrap_or_default()
 }
 
 fn print_summary(kind: &str, fields: &[(&str, &str)]) {
@@ -170,10 +167,7 @@ fn confirm_creation(yes: bool) -> bool {
         .with_prompt("Create this entity?")
         .default(true)
         .interact();
-    match result {
-        Ok(v) => v,
-        _ => false,
-    }
+    result.unwrap_or_default()
 }
 
 /// Create a directory with a .gitkeep file so git tracks it.
@@ -400,6 +394,7 @@ fn new_project(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn new_meeting(
     cfg: &ResolvedConfig,
     title: &str,
@@ -545,16 +540,14 @@ fn new_research(
         Some(o) => o.to_string(),
         None => prompt_input("Owner", "", yes),
     };
-    let agents: Vec<String> = agents
-        .map(|a| util::parse_comma_list(a))
-        .unwrap_or_else(|| {
-            vec![
-                "claude".into(),
-                "gemini".into(),
-                "chatgpt".into(),
-                "perplexity".into(),
-            ]
-        });
+    let agents: Vec<String> = agents.map(util::parse_comma_list).unwrap_or_else(|| {
+        vec![
+            "claude".into(),
+            "gemini".into(),
+            "chatgpt".into(),
+            "perplexity".into(),
+        ]
+    });
     let tags: Vec<String> = match tags {
         Some(t) => util::parse_comma_list(t),
         None => {
@@ -635,6 +628,7 @@ fn new_research(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn new_task(
     cfg: &ResolvedConfig,
     title: &str,
@@ -674,9 +668,7 @@ fn new_task(
         }
     };
     let sprint = sprint.unwrap_or("").to_string();
-    let depends_on: Vec<String> = depends_on
-        .map(|d| util::parse_comma_list(d))
-        .unwrap_or_default();
+    let depends_on: Vec<String> = depends_on.map(util::parse_comma_list).unwrap_or_default();
     let due_date = due_date.unwrap_or("").to_string();
 
     // Determine project/customer lists
@@ -844,7 +836,7 @@ pub fn create_customer_programmatic(
     let status = status
         .map(|s| s.to_string())
         .unwrap_or_else(|| cfg.statuses.customer.first().cloned().unwrap_or_default());
-    let tags: Vec<String> = tags.map(|t| util::parse_comma_list(t)).unwrap_or_default();
+    let tags: Vec<String> = tags.map(util::parse_comma_list).unwrap_or_default();
 
     let (tmpl_fm, tmpl_body) = template::load_template(&cfg.templates_dir, "customer")?;
 
@@ -906,10 +898,8 @@ pub fn create_project_programmatic(
     let status = status
         .map(|s| s.to_string())
         .unwrap_or_else(|| cfg.statuses.project.first().cloned().unwrap_or_default());
-    let tags: Vec<String> = tags.map(|t| util::parse_comma_list(t)).unwrap_or_default();
-    let customers: Vec<String> = customers
-        .map(|c| util::parse_comma_list(c))
-        .unwrap_or_default();
+    let tags: Vec<String> = tags.map(util::parse_comma_list).unwrap_or_default();
+    let customers: Vec<String> = customers.map(util::parse_comma_list).unwrap_or_default();
 
     let (tmpl_fm, tmpl_body) = template::load_template(&cfg.templates_dir, "project")?;
 
@@ -961,6 +951,7 @@ pub fn create_project_programmatic(
     }))
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn create_meeting_programmatic(
     cfg: &ResolvedConfig,
     title: &str,
@@ -982,13 +973,9 @@ pub fn create_meeting_programmatic(
     let status = status
         .map(|s| s.to_string())
         .unwrap_or_else(|| cfg.statuses.meeting.first().cloned().unwrap_or_default());
-    let tags: Vec<String> = tags.map(|t| util::parse_comma_list(t)).unwrap_or_default();
-    let customers: Vec<String> = customers
-        .map(|c| util::parse_comma_list(c))
-        .unwrap_or_default();
-    let projects: Vec<String> = projects
-        .map(|p| util::parse_comma_list(p))
-        .unwrap_or_default();
+    let tags: Vec<String> = tags.map(util::parse_comma_list).unwrap_or_default();
+    let customers: Vec<String> = customers.map(util::parse_comma_list).unwrap_or_default();
+    let projects: Vec<String> = projects.map(util::parse_comma_list).unwrap_or_default();
 
     let (tmpl_fm, tmpl_body) = template::load_template(&cfg.templates_dir, "meeting")?;
 
@@ -1042,17 +1029,15 @@ pub fn create_research_programmatic(
     let today = util::today_str();
 
     let owner = owner.unwrap_or("").to_string();
-    let agents: Vec<String> = agents
-        .map(|a| util::parse_comma_list(a))
-        .unwrap_or_else(|| {
-            vec![
-                "claude".into(),
-                "gemini".into(),
-                "chatgpt".into(),
-                "perplexity".into(),
-            ]
-        });
-    let tags: Vec<String> = tags.map(|t| util::parse_comma_list(t)).unwrap_or_default();
+    let agents: Vec<String> = agents.map(util::parse_comma_list).unwrap_or_else(|| {
+        vec![
+            "claude".into(),
+            "gemini".into(),
+            "chatgpt".into(),
+            "perplexity".into(),
+        ]
+    });
+    let tags: Vec<String> = tags.map(util::parse_comma_list).unwrap_or_default();
 
     let (tmpl_fm, tmpl_body) = template::load_template(&cfg.templates_dir, "research")?;
 
@@ -1099,6 +1084,7 @@ pub fn create_research_programmatic(
     }))
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn create_task_programmatic(
     cfg: &ResolvedConfig,
     title: &str,
@@ -1121,11 +1107,9 @@ pub fn create_task_programmatic(
         .map(|s| s.to_string())
         .unwrap_or_else(|| cfg.statuses.task.first().cloned().unwrap_or_default());
     let priority = priority.unwrap_or(3);
-    let tags: Vec<String> = tags.map(|t| util::parse_comma_list(t)).unwrap_or_default();
+    let tags: Vec<String> = tags.map(util::parse_comma_list).unwrap_or_default();
     let sprint = sprint.unwrap_or("").to_string();
-    let depends_on: Vec<String> = depends_on
-        .map(|d| util::parse_comma_list(d))
-        .unwrap_or_default();
+    let depends_on: Vec<String> = depends_on.map(util::parse_comma_list).unwrap_or_default();
     let due_date = due_date.unwrap_or("").to_string();
 
     let projects: Vec<String> = project.map(|p| vec![p.to_string()]).unwrap_or_default();

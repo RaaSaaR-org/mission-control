@@ -126,7 +126,7 @@ fn validate_meetings(cfg: &ResolvedConfig, issues: &mut Vec<ValidationIssue>) ->
         .filter_map(|e| e.ok())
     {
         let path = entry.path();
-        if path.is_dir() || path.extension().map_or(true, |e| e != "md") {
+        if path.is_dir() || path.extension().is_none_or(|e| e != "md") {
             continue;
         }
 
@@ -174,7 +174,7 @@ fn validate_tasks(cfg: &ResolvedConfig, issues: &mut Vec<ValidationIssue>) -> Mc
         // Check that only todo/ and done/ subfolders exist
         if let Ok(entries) = std::fs::read_dir(&loc.tasks_dir) {
             for entry in entries.filter_map(|e| e.ok()) {
-                if entry.file_type().map_or(false, |ft| ft.is_dir()) {
+                if entry.file_type().is_ok_and(|ft| ft.is_dir()) {
                     let name = entry.file_name().to_string_lossy().to_string();
                     if name != "todo" && name != "done" {
                         issues.push(ValidationIssue {
@@ -202,7 +202,7 @@ fn validate_tasks(cfg: &ResolvedConfig, issues: &mut Vec<ValidationIssue>) -> Mc
             if let Ok(entries) = std::fs::read_dir(&dir) {
                 for entry in entries.filter_map(|e| e.ok()) {
                     let path = entry.path();
-                    if path.extension().map_or(true, |e| e != "md") {
+                    if path.extension().is_none_or(|e| e != "md") {
                         continue;
                     }
 
@@ -345,7 +345,7 @@ fn validate_task_frontmatter_file(
 
     // Priority validity (1-4)
     if let Some(priority) = data::get_number(&fm, "priority") {
-        if priority < 1 || priority > 4 {
+        if !(1..=4).contains(&priority) {
             issues.push(ValidationIssue {
                 path: path_str.clone(),
                 check: "priority-range".into(),

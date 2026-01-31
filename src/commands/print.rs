@@ -558,6 +558,7 @@ fn push_document_footer(doc: &mut genpdf::Document) {
 }
 
 /// Branded cover page for meeting/research PDFs.
+#[allow(clippy::too_many_arguments)]
 fn push_cover_page(
     doc: &mut genpdf::Document,
     brand: &str,
@@ -662,7 +663,7 @@ struct Attendee {
 fn get_attendees(fm: &serde_yaml::Value) -> Vec<Attendee> {
     let seq = fm
         .as_mapping()
-        .and_then(|m| m.get(&serde_yaml::Value::String("attendees".into())))
+        .and_then(|m| m.get(serde_yaml::Value::String("attendees".into())))
         .and_then(|v| v.as_sequence());
 
     let Some(seq) = seq else {
@@ -673,17 +674,17 @@ fn get_attendees(fm: &serde_yaml::Value) -> Vec<Attendee> {
         .filter_map(|item| {
             if let Some(map) = item.as_mapping() {
                 let name = map
-                    .get(&serde_yaml::Value::String("name".into()))
+                    .get(serde_yaml::Value::String("name".into()))
                     .and_then(|v| v.as_str())
                     .unwrap_or("")
                     .to_string();
                 let role = map
-                    .get(&serde_yaml::Value::String("role".into()))
+                    .get(serde_yaml::Value::String("role".into()))
                     .and_then(|v| v.as_str())
                     .unwrap_or("")
                     .to_string();
                 let company = map
-                    .get(&serde_yaml::Value::String("company".into()))
+                    .get(serde_yaml::Value::String("company".into()))
                     .and_then(|v| v.as_str())
                     .unwrap_or("")
                     .to_string();
@@ -692,14 +693,12 @@ fn get_attendees(fm: &serde_yaml::Value) -> Vec<Attendee> {
                     role,
                     company,
                 })
-            } else if let Some(s) = item.as_str() {
-                Some(Attendee {
+            } else {
+                item.as_str().map(|s| Attendee {
                     name: s.to_string(),
                     role: String::new(),
                     company: String::new(),
                 })
-            } else {
-                None
             }
         })
         .collect()
@@ -717,11 +716,11 @@ fn collect_report_files(final_dir: &Path, specific_file: Option<&str>) -> Vec<Pa
     entries
         .filter_map(|e| e.ok())
         .map(|e| e.path())
-        .filter(|p| p.extension().map_or(false, |ext| ext == "md"))
+        .filter(|p| p.extension().is_some_and(|ext| ext == "md"))
         .filter(|p| {
             if let Some(target) = specific_file {
                 p.file_name()
-                    .map_or(false, |name| name.to_string_lossy().contains(target))
+                    .is_some_and(|name| name.to_string_lossy().contains(target))
             } else {
                 true
             }

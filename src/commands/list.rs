@@ -199,6 +199,7 @@ fn list_standard(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn list_tasks(
     cfg: &ResolvedConfig,
     status: &Option<String>,

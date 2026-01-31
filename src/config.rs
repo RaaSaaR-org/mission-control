@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 
 #[derive(Debug, Deserialize)]
 pub struct RawConfig {
+    #[allow(dead_code)]
     pub site: Option<SiteConfig>,
     pub paths: Option<HashMap<String, String>>,
     pub id_prefixes: Option<HashMap<String, String>>,
@@ -24,6 +25,7 @@ pub struct BrandConfig {
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 pub struct SiteConfig {
     pub name: Option<String>,
     pub description: Option<String>,
@@ -38,6 +40,7 @@ pub struct ResolvedConfig {
     pub meetings_dir: PathBuf,
     pub research_dir: PathBuf,
     pub tasks_dir: PathBuf,
+    #[allow(dead_code)]
     pub notes_dir: PathBuf,
     pub data_dir: PathBuf,
     pub templates_dir: PathBuf,
@@ -52,6 +55,7 @@ pub struct ResolvedConfig {
 pub struct ResolvedBrand {
     pub name: String,
     pub tagline: String,
+    #[allow(dead_code)]
     pub logo: Option<PathBuf>,
     pub fonts_dir: Option<PathBuf>,
     pub font_name: String,

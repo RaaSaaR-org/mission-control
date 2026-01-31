@@ -62,7 +62,7 @@ pub fn collect_entities(kind: EntityKind, cfg: &ResolvedConfig) -> McResult<Vec<
 
     for entry in WalkDir::new(base).into_iter().filter_map(|e| e.ok()) {
         let path = entry.path();
-        if path.extension().map_or(true, |e| e != "md") {
+        if path.extension().is_none_or(|e| e != "md") {
             continue;
         }
 
@@ -113,7 +113,7 @@ pub fn collect_tasks(cfg: &ResolvedConfig) -> McResult<Vec<EntityRecord>> {
             if let Ok(entries) = std::fs::read_dir(&dir) {
                 for entry in entries.filter_map(|e| e.ok()) {
                     let path = entry.path();
-                    if path.extension().map_or(true, |e| e != "md") {
+                    if path.extension().is_none_or(|e| e != "md") {
                         continue;
                     }
                     if let Ok(content) = std::fs::read_to_string(&path) {
@@ -153,7 +153,7 @@ pub fn collect_tasks_filtered(
     if let Some(status) = filter.status {
         tasks.retain(|e| {
             frontmatter::get_str(&e.frontmatter, "status")
-                .map_or(false, |s| s.eq_ignore_ascii_case(status))
+                .is_some_and(|s| s.eq_ignore_ascii_case(status))
         });
     }
     if let Some(tag) = filter.tag {
@@ -178,18 +178,18 @@ pub fn collect_tasks_filtered(
         });
     }
     if let Some(priority) = filter.priority {
-        tasks.retain(|e| get_number(&e.frontmatter, "priority").map_or(false, |p| p == priority));
+        tasks.retain(|e| get_number(&e.frontmatter, "priority") == Some(priority));
     }
     if let Some(sprint) = filter.sprint {
         tasks.retain(|e| {
             frontmatter::get_str(&e.frontmatter, "sprint")
-                .map_or(false, |s| s.eq_ignore_ascii_case(sprint))
+                .is_some_and(|s| s.eq_ignore_ascii_case(sprint))
         });
     }
     if let Some(owner) = filter.owner {
         tasks.retain(|e| {
             frontmatter::get_str(&e.frontmatter, "owner")
-                .map_or(false, |o| o.eq_ignore_ascii_case(owner))
+                .is_some_and(|o| o.eq_ignore_ascii_case(owner))
         });
     }
 
@@ -212,7 +212,7 @@ pub fn find_entity_by_id(id: &str, cfg: &ResolvedConfig) -> McResult<EntityRecor
 
     for entry in WalkDir::new(base).into_iter().filter_map(|e| e.ok()) {
         let path = entry.path();
-        if path.extension().map_or(true, |e| e != "md") {
+        if path.extension().is_none_or(|e| e != "md") {
             continue;
         }
         if let Ok(content) = std::fs::read_to_string(path) {
@@ -248,7 +248,7 @@ fn find_task_by_id(id: &str, cfg: &ResolvedConfig) -> McResult<EntityRecord> {
             if let Ok(entries) = std::fs::read_dir(&dir) {
                 for entry in entries.filter_map(|e| e.ok()) {
                     let path = entry.path();
-                    if path.extension().map_or(true, |e| e != "md") {
+                    if path.extension().is_none_or(|e| e != "md") {
                         continue;
                     }
                     if let Ok(content) = std::fs::read_to_string(&path) {
@@ -286,7 +286,7 @@ pub fn collect_filtered(
     if let Some(status) = status {
         entries.retain(|e| {
             frontmatter::get_str(&e.frontmatter, "status")
-                .map_or(false, |s| s.eq_ignore_ascii_case(status))
+                .is_some_and(|s| s.eq_ignore_ascii_case(status))
         });
     }
     if let Some(tag) = tag {
@@ -318,7 +318,7 @@ pub fn count_by_status(kind: EntityKind, cfg: &ResolvedConfig) -> McResult<Statu
 
         for entry in WalkDir::new(base).into_iter().filter_map(|e| e.ok()) {
             let path = entry.path();
-            if path.extension().map_or(true, |e| e != "md") {
+            if path.extension().is_none_or(|e| e != "md") {
                 continue;
             }
 
@@ -398,7 +398,7 @@ pub fn recent_activity(cfg: &ResolvedConfig, limit: usize) -> McResult<Vec<Recen
         }
         for entry in WalkDir::new(dir).into_iter().filter_map(|e| e.ok()) {
             let path = entry.path();
-            if path.extension().map_or(true, |e| e != "md") {
+            if path.extension().is_none_or(|e| e != "md") {
                 continue;
             }
             if let Ok(meta) = path.metadata() {
@@ -442,7 +442,7 @@ pub fn recent_activity(cfg: &ResolvedConfig, limit: usize) -> McResult<Vec<Recen
 /// Get a numeric field from a YAML Mapping Value.
 pub fn get_number(val: &Value, key: &str) -> Option<u32> {
     val.as_mapping()
-        .and_then(|m| m.get(&Value::String(key.to_string())))
+        .and_then(|m| m.get(Value::String(key.to_string())))
         .and_then(|v| v.as_u64())
         .map(|n| n as u32)
 }
