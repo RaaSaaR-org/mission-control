@@ -67,9 +67,8 @@ pub fn collect_entities(kind: EntityKind, cfg: &ResolvedConfig) -> McResult<Vec<
         }
 
         let filename = path.file_name().unwrap_or_default().to_string_lossy();
-        let is_canonical = filename == "_index.md"
-            || filename == "overview.md"
-            || path.parent() == Some(base);
+        let is_canonical =
+            filename == "_index.md" || filename == "overview.md" || path.parent() == Some(base);
 
         if !is_canonical {
             continue;
@@ -121,8 +120,7 @@ pub fn collect_tasks(cfg: &ResolvedConfig) -> McResult<Vec<EntityRecord>> {
                         if let Some((fm_str, body)) = frontmatter::split_frontmatter(&content) {
                             if let Ok(fm) = frontmatter::parse_raw(&fm_str) {
                                 if let Some(id) = frontmatter::get_str(&fm, "id") {
-                                    if id.starts_with(&id_prefix)
-                                        && seen_ids.insert(id.to_string())
+                                    if id.starts_with(&id_prefix) && seen_ids.insert(id.to_string())
                                     {
                                         records.push(EntityRecord {
                                             kind: EntityKind::Task,
@@ -180,9 +178,7 @@ pub fn collect_tasks_filtered(
         });
     }
     if let Some(priority) = filter.priority {
-        tasks.retain(|e| {
-            get_number(&e.frontmatter, "priority").map_or(false, |p| p == priority)
-        });
+        tasks.retain(|e| get_number(&e.frontmatter, "priority").map_or(false, |p| p == priority));
     }
     if let Some(sprint) = filter.sprint {
         tasks.retain(|e| {
@@ -327,9 +323,8 @@ pub fn count_by_status(kind: EntityKind, cfg: &ResolvedConfig) -> McResult<Statu
             }
 
             let filename = path.file_name().unwrap_or_default().to_string_lossy();
-            let is_canonical = filename == "_index.md"
-                || filename == "overview.md"
-                || path.parent() == Some(base);
+            let is_canonical =
+                filename == "_index.md" || filename == "overview.md" || path.parent() == Some(base);
             if !is_canonical {
                 continue;
             }
@@ -411,9 +406,7 @@ pub fn recent_activity(cfg: &ResolvedConfig, limit: usize) -> McResult<Vec<Recen
                     let (id, name) = if let Ok(content) = std::fs::read_to_string(path) {
                         if let Some((fm_str, _)) = frontmatter::split_frontmatter(&content) {
                             if let Ok(fm) = frontmatter::parse_raw(&fm_str) {
-                                let id = frontmatter::get_str(&fm, "id")
-                                    .unwrap_or("")
-                                    .to_string();
+                                let id = frontmatter::get_str(&fm, "id").unwrap_or("").to_string();
                                 let name = frontmatter::get_str(&fm, "name")
                                     .or_else(|| frontmatter::get_str(&fm, "title"))
                                     .unwrap_or("")

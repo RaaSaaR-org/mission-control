@@ -21,7 +21,11 @@ pub fn layout(title: &str, active_nav: &str, body_html: &str) -> String {
     let nav_links: String = nav_items
         .iter()
         .map(|(label, href)| {
-            let class = if *href == active_nav { " class=\"active\"" } else { "" };
+            let class = if *href == active_nav {
+                " class=\"active\""
+            } else {
+                ""
+            };
             format!(r#"<a href="{}"{}>{}</a>"#, href, class, label)
         })
         .collect::<Vec<_>>()
@@ -149,11 +153,9 @@ fn auto_link_entity_ids(html: &str, prefixes: &[&str]) -> String {
 /// CSS class for a status bar segment.
 fn segment_class(status: &str) -> String {
     match status {
-        "active" | "completed" | "final" | "done"
-        | "inactive" | "cancelled" | "churned" | "outdated"
-        | "on-hold" | "draft" | "in-progress" | "review"
-        | "prospect" | "scheduled" | "todo"
-        | "backlog" => format!("seg-{}", status),
+        "active" | "completed" | "final" | "done" | "inactive" | "cancelled" | "churned"
+        | "outdated" | "on-hold" | "draft" | "in-progress" | "review" | "prospect"
+        | "scheduled" | "todo" | "backlog" => format!("seg-{}", status),
         _ => "seg-unknown".to_string(),
     }
 }
@@ -163,10 +165,24 @@ fn initials(name: &str) -> String {
     let parts: Vec<&str> = name.split_whitespace().collect();
     match parts.len() {
         0 => String::new(),
-        1 => parts[0].chars().next().map(|c| c.to_uppercase().to_string()).unwrap_or_default(),
+        1 => parts[0]
+            .chars()
+            .next()
+            .map(|c| c.to_uppercase().to_string())
+            .unwrap_or_default(),
         _ => {
-            let first = parts[0].chars().next().map(|c| c.to_uppercase().to_string()).unwrap_or_default();
-            let last = parts.last().unwrap().chars().next().map(|c| c.to_uppercase().to_string()).unwrap_or_default();
+            let first = parts[0]
+                .chars()
+                .next()
+                .map(|c| c.to_uppercase().to_string())
+                .unwrap_or_default();
+            let last = parts
+                .last()
+                .unwrap()
+                .chars()
+                .next()
+                .map(|c| c.to_uppercase().to_string())
+                .unwrap_or_default();
             format!("{}{}", first, last)
         }
     }
@@ -186,7 +202,9 @@ pub fn dashboard_page(counts: &[StatusCounts], recent: &[RecentFile]) -> String 
   <div class="summary-card-label">{}</div>
   <div class="summary-card-count">{}</div>
   <div class="summary-card-breakdown">"#,
-            sc.label, capitalize(&sc.label), sc.total
+            sc.label,
+            capitalize(&sc.label),
+            sc.total
         ));
         for (status, count) in &sc.by_status {
             body.push_str(&format!(
@@ -205,7 +223,10 @@ pub fn dashboard_page(counts: &[StatusCounts], recent: &[RecentFile]) -> String 
         if sc.by_status.is_empty() {
             continue;
         }
-        body.push_str(&format!(r#"<div class="status-section"><h3>{}</h3>"#, capitalize(&sc.label)));
+        body.push_str(&format!(
+            r#"<div class="status-section"><h3>{}</h3>"#,
+            capitalize(&sc.label)
+        ));
 
         // Build stacked bar
         body.push_str(r#"<div class="stacked-bar-container">"#);
@@ -263,7 +284,10 @@ pub fn dashboard_page(counts: &[StatusCounts], recent: &[RecentFile]) -> String 
                 } else {
                     "entity"
                 };
-                format!(r#"<span class="activity-type-badge">{}</span>"#, entity_type)
+                format!(
+                    r#"<span class="activity-type-badge">{}</span>"#,
+                    entity_type
+                )
             } else {
                 String::new()
             };
@@ -309,7 +333,11 @@ pub fn list_page(
         kind_plural
     ));
     for s in valid_statuses {
-        let selected = if status_filter == Some(s.as_str()) { " selected" } else { "" };
+        let selected = if status_filter == Some(s.as_str()) {
+            " selected"
+        } else {
+            ""
+        };
         body.push_str(&format!(
             "      <option value=\"{}\"{}>{}</option>\n",
             escape_html(s),
@@ -371,8 +399,7 @@ pub fn list_page(
                 tag_badges(&tags)
             ));
         } else {
-            let name = frontmatter::get_str_or(&e.frontmatter, "name", "")
-                .to_string();
+            let name = frontmatter::get_str_or(&e.frontmatter, "name", "").to_string();
             let name = if name.is_empty() {
                 frontmatter::get_str_or(&e.frontmatter, "title", "").to_string()
             } else {
@@ -426,7 +453,11 @@ pub fn detail_page(entity: &EntityRecord, prefixes: &[&str]) -> String {
     body.push_str(&format!(
         "<h2>{}</h2> {} <span class=\"entity-id\">{}</span>",
         escape_html(display_name),
-        if !status.is_empty() { status_badge(status) } else { String::new() },
+        if !status.is_empty() {
+            status_badge(status)
+        } else {
+            String::new()
+        },
         entity_link(&entity.id),
     ));
     body.push_str("</div>\n");
@@ -525,14 +556,20 @@ pub fn tasks_list_page(
     body.push('\n');
 
     // Filter form
-    body.push_str(r#"<form class="filter-form" method="get" action="/tasks">
+    body.push_str(
+        r#"<form class="filter-form" method="get" action="/tasks">
   <div>
     <label for="status">Status</label>
     <select name="status" id="status">
       <option value="">All</option>
-"#);
+"#,
+    );
     for s in valid_statuses {
-        let selected = if status_filter == Some(s.as_str()) { " selected" } else { "" };
+        let selected = if status_filter == Some(s.as_str()) {
+            " selected"
+        } else {
+            ""
+        };
         body.push_str(&format!(
             "      <option value=\"{}\"{}>{}</option>\n",
             escape_html(s),
@@ -540,14 +577,16 @@ pub fn tasks_list_page(
             escape_html(s)
         ));
     }
-    body.push_str(r#"    </select>
+    body.push_str(
+        r#"    </select>
   </div>
   <div>
     <button type="submit">Filter</button>
   </div>
   <a href="/tasks" class="reset-link">Reset</a>
 </form>
-"#);
+"#,
+    );
 
     if entities.is_empty() {
         body.push_str(r#"<div class="empty-state"><span class="empty-state-icon">~</span>No tasks found.</div>"#);
@@ -585,7 +624,11 @@ pub fn tasks_list_page(
         body.push_str(&format!("<td>{}</td>", escape_html(owner)));
         body.push_str(&format!(
             "<td>{}</td>",
-            projects.iter().map(|p| entity_link(p)).collect::<Vec<_>>().join(", ")
+            projects
+                .iter()
+                .map(|p| entity_link(p))
+                .collect::<Vec<_>>()
+                .join(", ")
         ));
         body.push_str(&format!("<td>{}</td>", escape_html(sprint)));
         body.push_str(&format!("<td>{}</td>", tag_badges(&tags)));
@@ -723,10 +766,8 @@ fn format_value_html(value: &Value, prefixes: &[&str]) -> String {
             if seq.is_empty() {
                 "<em>(none)</em>".to_string()
             } else {
-                let items: Vec<String> = seq
-                    .iter()
-                    .map(|v| format_value_html(v, prefixes))
-                    .collect();
+                let items: Vec<String> =
+                    seq.iter().map(|v| format_value_html(v, prefixes)).collect();
                 items.join(", ")
             }
         }

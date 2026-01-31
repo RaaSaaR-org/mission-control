@@ -19,7 +19,14 @@ pub fn run(entity: &NewEntity, cfg: &ResolvedConfig, yes: bool) -> McResult<()> 
             owner,
             status,
             tags,
-        } => new_customer(cfg, name, owner.as_deref(), status.as_deref(), tags.as_deref(), yes),
+        } => new_customer(
+            cfg,
+            name,
+            owner.as_deref(),
+            status.as_deref(),
+            tags.as_deref(),
+            yes,
+        ),
         NewEntity::Project {
             name,
             owner,
@@ -145,7 +152,11 @@ fn print_summary(kind: &str, fields: &[(&str, &str)]) {
     println!("  {} {}", "New".bold(), kind.bold());
     println!("  {}", "────────────────────────────────────".dimmed());
     for (key, value) in fields {
-        let display = if value.is_empty() { "(none)".dimmed().to_string() } else { value.to_string() };
+        let display = if value.is_empty() {
+            "(none)".dimmed().to_string()
+        } else {
+            value.to_string()
+        };
         println!("  {:<14} {}", format!("{}:", key).dimmed(), display);
     }
     println!("  {}", "────────────────────────────────────".dimmed());
@@ -196,18 +207,25 @@ fn new_customer(
         Some(t) => util::parse_comma_list(t),
         None => {
             let input = prompt_input_optional("Tags (comma-separated)", yes);
-            if input.is_empty() { vec![] } else { util::parse_comma_list(&input) }
+            if input.is_empty() {
+                vec![]
+            } else {
+                util::parse_comma_list(&input)
+            }
         }
     };
 
     let tags_display = tags.join(", ");
-    print_summary("customer", &[
-        ("ID", &id.to_string()),
-        ("Name", name),
-        ("Owner", &owner),
-        ("Status", &status),
-        ("Tags", &tags_display),
-    ]);
+    print_summary(
+        "customer",
+        &[
+            ("ID", &id.to_string()),
+            ("Name", name),
+            ("Owner", &owner),
+            ("Status", &status),
+            ("Tags", &tags_display),
+        ],
+    );
 
     if !confirm_creation(yes) {
         println!("{}", "Cancelled.".dimmed());
@@ -245,7 +263,10 @@ fn new_customer(
     let dir_path = cfg.customers_dir.join(&dir_name);
     fs::create_dir_all(&dir_path)?;
     fs::write(dir_path.join("_index.md"), &doc)?;
-    fs::write(dir_path.join("contacts.md"), format!("# {} -- Contacts\n", name))?;
+    fs::write(
+        dir_path.join("contacts.md"),
+        format!("# {} -- Contacts\n", name),
+    )?;
     mkdir_with_gitkeep(&dir_path.join("contracts"))?;
     mkdir_with_gitkeep(&dir_path.join("meetings"))?;
     mkdir_with_gitkeep(&dir_path.join("projects"))?;
@@ -287,27 +308,38 @@ fn new_project(
         Some(t) => util::parse_comma_list(t),
         None => {
             let input = prompt_input_optional("Tags (comma-separated)", yes);
-            if input.is_empty() { vec![] } else { util::parse_comma_list(&input) }
+            if input.is_empty() {
+                vec![]
+            } else {
+                util::parse_comma_list(&input)
+            }
         }
     };
     let customers: Vec<String> = match customers {
         Some(c) => util::parse_comma_list(c),
         None => {
             let input = prompt_input_optional("Link customers (comma-separated IDs)", yes);
-            if input.is_empty() { vec![] } else { util::parse_comma_list(&input) }
+            if input.is_empty() {
+                vec![]
+            } else {
+                util::parse_comma_list(&input)
+            }
         }
     };
 
     let tags_display = tags.join(", ");
     let customers_display = customers.join(", ");
-    print_summary("project", &[
-        ("ID", &id.to_string()),
-        ("Name", name),
-        ("Owner", &owner),
-        ("Status", &status),
-        ("Tags", &tags_display),
-        ("Customers", &customers_display),
-    ]);
+    print_summary(
+        "project",
+        &[
+            ("ID", &id.to_string()),
+            ("Name", name),
+            ("Owner", &owner),
+            ("Status", &status),
+            ("Tags", &tags_display),
+            ("Customers", &customers_display),
+        ],
+    );
 
     if !confirm_creation(yes) {
         println!("{}", "Cancelled.".dimmed());
@@ -345,8 +377,14 @@ fn new_project(
     let dir_path = cfg.projects_dir.join(&dir_name);
     fs::create_dir_all(&dir_path)?;
     fs::write(dir_path.join("overview.md"), &doc)?;
-    fs::write(dir_path.join("roadmap.md"), format!("# {} -- Roadmap\n", name))?;
-    fs::write(dir_path.join("backlog.md"), format!("# {} -- Backlog\n", name))?;
+    fs::write(
+        dir_path.join("roadmap.md"),
+        format!("# {} -- Roadmap\n", name),
+    )?;
+    fs::write(
+        dir_path.join("backlog.md"),
+        format!("# {} -- Backlog\n", name),
+    )?;
     mkdir_with_gitkeep(&dir_path.join("specs"))?;
     mkdir_with_gitkeep(&dir_path.join("releases"))?;
     mkdir_with_gitkeep(&dir_path.join("infra"))?;
@@ -394,38 +432,53 @@ fn new_meeting(
         Some(t) => util::parse_comma_list(t),
         None => {
             let input = prompt_input_optional("Tags (comma-separated)", yes);
-            if input.is_empty() { vec![] } else { util::parse_comma_list(&input) }
+            if input.is_empty() {
+                vec![]
+            } else {
+                util::parse_comma_list(&input)
+            }
         }
     };
     let customers: Vec<String> = match customers {
         Some(c) => util::parse_comma_list(c),
         None => {
             let input = prompt_input_optional("Link customers (comma-separated IDs)", yes);
-            if input.is_empty() { vec![] } else { util::parse_comma_list(&input) }
+            if input.is_empty() {
+                vec![]
+            } else {
+                util::parse_comma_list(&input)
+            }
         }
     };
     let projects: Vec<String> = match projects {
         Some(p) => util::parse_comma_list(p),
         None => {
             let input = prompt_input_optional("Link projects (comma-separated IDs)", yes);
-            if input.is_empty() { vec![] } else { util::parse_comma_list(&input) }
+            if input.is_empty() {
+                vec![]
+            } else {
+                util::parse_comma_list(&input)
+            }
         }
     };
 
     let tags_display = tags.join(", ");
     let customers_display = customers.join(", ");
     let projects_display = projects.join(", ");
-    print_summary("meeting", &[
-        ("ID", &id.to_string()),
-        ("Title", title),
-        ("Date", &date),
-        ("Time", &time),
-        ("Duration", &duration),
-        ("Status", &status),
-        ("Tags", &tags_display),
-        ("Customers", &customers_display),
-        ("Projects", &projects_display),
-    ]);
+    print_summary(
+        "meeting",
+        &[
+            ("ID", &id.to_string()),
+            ("Title", title),
+            ("Date", &date),
+            ("Time", &time),
+            ("Duration", &duration),
+            ("Status", &status),
+            ("Tags", &tags_display),
+            ("Customers", &customers_display),
+            ("Projects", &projects_display),
+        ],
+    );
 
     if !confirm_creation(yes) {
         println!("{}", "Cancelled.".dimmed());
@@ -494,24 +547,38 @@ fn new_research(
     };
     let agents: Vec<String> = agents
         .map(|a| util::parse_comma_list(a))
-        .unwrap_or_else(|| vec!["claude".into(), "gemini".into(), "chatgpt".into(), "perplexity".into()]);
+        .unwrap_or_else(|| {
+            vec![
+                "claude".into(),
+                "gemini".into(),
+                "chatgpt".into(),
+                "perplexity".into(),
+            ]
+        });
     let tags: Vec<String> = match tags {
         Some(t) => util::parse_comma_list(t),
         None => {
             let input = prompt_input_optional("Tags (comma-separated)", yes);
-            if input.is_empty() { vec![] } else { util::parse_comma_list(&input) }
+            if input.is_empty() {
+                vec![]
+            } else {
+                util::parse_comma_list(&input)
+            }
         }
     };
 
     let tags_display = tags.join(", ");
     let agents_display = agents.join(", ");
-    print_summary("research", &[
-        ("ID", &id.to_string()),
-        ("Title", title),
-        ("Owner", &owner),
-        ("Agents", &agents_display),
-        ("Tags", &tags_display),
-    ]);
+    print_summary(
+        "research",
+        &[
+            ("ID", &id.to_string()),
+            ("Title", title),
+            ("Owner", &owner),
+            ("Agents", &agents_display),
+            ("Tags", &tags_display),
+        ],
+    );
 
     if !confirm_creation(yes) {
         println!("{}", "Cancelled.".dimmed());
@@ -599,7 +666,11 @@ fn new_task(
         Some(t) => util::parse_comma_list(t),
         None => {
             let input = prompt_input_optional("Tags (comma-separated)", yes);
-            if input.is_empty() { vec![] } else { util::parse_comma_list(&input) }
+            if input.is_empty() {
+                vec![]
+            } else {
+                util::parse_comma_list(&input)
+            }
         }
     };
     let sprint = sprint.unwrap_or("").to_string();
@@ -623,19 +694,22 @@ fn new_task(
         4 => "4 (low)",
         _ => "3 (medium)",
     };
-    print_summary("task", &[
-        ("ID", &id.to_string()),
-        ("Title", title),
-        ("Status", &status),
-        ("Priority", priority_label),
-        ("Owner", &owner),
-        ("Projects", &projects_display),
-        ("Customers", &customers_display),
-        ("Sprint", &sprint),
-        ("Tags", &tags_display),
-        ("Depends on", &depends_display),
-        ("Due date", &due_date),
-    ]);
+    print_summary(
+        "task",
+        &[
+            ("ID", &id.to_string()),
+            ("Title", title),
+            ("Status", &status),
+            ("Priority", priority_label),
+            ("Owner", &owner),
+            ("Projects", &projects_display),
+            ("Customers", &customers_display),
+            ("Sprint", &sprint),
+            ("Tags", &tags_display),
+            ("Depends on", &depends_display),
+            ("Due date", &due_date),
+        ],
+    );
 
     if !confirm_creation(yes) {
         println!("{}", "Cancelled.".dimmed());
@@ -649,7 +723,10 @@ fn new_task(
     fields.insert("title".into(), Value::String(title.to_string()));
     fields.insert("slug".into(), Value::String(slug.clone()));
     fields.insert("status".into(), Value::String(status));
-    fields.insert("priority".into(), Value::Number(serde_yaml::Number::from(priority as u64)));
+    fields.insert(
+        "priority".into(),
+        Value::Number(serde_yaml::Number::from(priority as u64)),
+    );
     fields.insert("owner".into(), Value::String(owner));
     fields.insert(
         "projects".into(),
@@ -666,7 +743,12 @@ fn new_task(
     fields.insert("sprint".into(), Value::String(sprint));
     fields.insert(
         "depends_on".into(),
-        Value::Sequence(depends_on.iter().map(|d| Value::String(d.clone())).collect()),
+        Value::Sequence(
+            depends_on
+                .iter()
+                .map(|d| Value::String(d.clone()))
+                .collect(),
+        ),
     );
     fields.insert("due_date".into(), Value::String(due_date));
     fields.insert("created".into(), Value::String(today.clone()));
@@ -681,11 +763,9 @@ fn new_task(
     // Determine location based on --project or --customer flag
     let tasks_base = if let Some(proj_id) = project {
         // Find the project directory
-        find_project_dir(cfg, proj_id)?
-            .join("tasks")
+        find_project_dir(cfg, proj_id)?.join("tasks")
     } else if let Some(cust_id) = customer {
-        find_customer_dir(cfg, cust_id)?
-            .join("tasks")
+        find_customer_dir(cfg, cust_id)?.join("tasks")
     } else {
         cfg.tasks_dir.clone()
     };
@@ -764,9 +844,7 @@ pub fn create_customer_programmatic(
     let status = status
         .map(|s| s.to_string())
         .unwrap_or_else(|| cfg.statuses.customer.first().cloned().unwrap_or_default());
-    let tags: Vec<String> = tags
-        .map(|t| util::parse_comma_list(t))
-        .unwrap_or_default();
+    let tags: Vec<String> = tags.map(|t| util::parse_comma_list(t)).unwrap_or_default();
 
     let (tmpl_fm, tmpl_body) = template::load_template(&cfg.templates_dir, "customer")?;
 
@@ -796,7 +874,10 @@ pub fn create_customer_programmatic(
     let dir_path = cfg.customers_dir.join(&dir_name);
     fs::create_dir_all(&dir_path)?;
     fs::write(dir_path.join("_index.md"), &doc)?;
-    fs::write(dir_path.join("contacts.md"), format!("# {} -- Contacts\n", name))?;
+    fs::write(
+        dir_path.join("contacts.md"),
+        format!("# {} -- Contacts\n", name),
+    )?;
     mkdir_with_gitkeep(&dir_path.join("contracts"))?;
     mkdir_with_gitkeep(&dir_path.join("meetings"))?;
     mkdir_with_gitkeep(&dir_path.join("projects"))?;
@@ -825,9 +906,7 @@ pub fn create_project_programmatic(
     let status = status
         .map(|s| s.to_string())
         .unwrap_or_else(|| cfg.statuses.project.first().cloned().unwrap_or_default());
-    let tags: Vec<String> = tags
-        .map(|t| util::parse_comma_list(t))
-        .unwrap_or_default();
+    let tags: Vec<String> = tags.map(|t| util::parse_comma_list(t)).unwrap_or_default();
     let customers: Vec<String> = customers
         .map(|c| util::parse_comma_list(c))
         .unwrap_or_default();
@@ -863,8 +942,14 @@ pub fn create_project_programmatic(
     let dir_path = cfg.projects_dir.join(&dir_name);
     fs::create_dir_all(&dir_path)?;
     fs::write(dir_path.join("overview.md"), &doc)?;
-    fs::write(dir_path.join("roadmap.md"), format!("# {} -- Roadmap\n", name))?;
-    fs::write(dir_path.join("backlog.md"), format!("# {} -- Backlog\n", name))?;
+    fs::write(
+        dir_path.join("roadmap.md"),
+        format!("# {} -- Roadmap\n", name),
+    )?;
+    fs::write(
+        dir_path.join("backlog.md"),
+        format!("# {} -- Backlog\n", name),
+    )?;
     mkdir_with_gitkeep(&dir_path.join("specs"))?;
     mkdir_with_gitkeep(&dir_path.join("releases"))?;
     mkdir_with_gitkeep(&dir_path.join("infra"))?;
@@ -897,9 +982,7 @@ pub fn create_meeting_programmatic(
     let status = status
         .map(|s| s.to_string())
         .unwrap_or_else(|| cfg.statuses.meeting.first().cloned().unwrap_or_default());
-    let tags: Vec<String> = tags
-        .map(|t| util::parse_comma_list(t))
-        .unwrap_or_default();
+    let tags: Vec<String> = tags.map(|t| util::parse_comma_list(t)).unwrap_or_default();
     let customers: Vec<String> = customers
         .map(|c| util::parse_comma_list(c))
         .unwrap_or_default();
@@ -969,9 +1052,7 @@ pub fn create_research_programmatic(
                 "perplexity".into(),
             ]
         });
-    let tags: Vec<String> = tags
-        .map(|t| util::parse_comma_list(t))
-        .unwrap_or_default();
+    let tags: Vec<String> = tags.map(|t| util::parse_comma_list(t)).unwrap_or_default();
 
     let (tmpl_fm, tmpl_body) = template::load_template(&cfg.templates_dir, "research")?;
 
@@ -1040,9 +1121,7 @@ pub fn create_task_programmatic(
         .map(|s| s.to_string())
         .unwrap_or_else(|| cfg.statuses.task.first().cloned().unwrap_or_default());
     let priority = priority.unwrap_or(3);
-    let tags: Vec<String> = tags
-        .map(|t| util::parse_comma_list(t))
-        .unwrap_or_default();
+    let tags: Vec<String> = tags.map(|t| util::parse_comma_list(t)).unwrap_or_default();
     let sprint = sprint.unwrap_or("").to_string();
     let depends_on: Vec<String> = depends_on
         .map(|d| util::parse_comma_list(d))
@@ -1059,7 +1138,10 @@ pub fn create_task_programmatic(
     fields.insert("title".into(), Value::String(title.to_string()));
     fields.insert("slug".into(), Value::String(slug.clone()));
     fields.insert("status".into(), Value::String(status));
-    fields.insert("priority".into(), Value::Number(serde_yaml::Number::from(priority as u64)));
+    fields.insert(
+        "priority".into(),
+        Value::Number(serde_yaml::Number::from(priority as u64)),
+    );
     fields.insert("owner".into(), Value::String(owner));
     fields.insert(
         "projects".into(),
@@ -1076,7 +1158,12 @@ pub fn create_task_programmatic(
     fields.insert("sprint".into(), Value::String(sprint));
     fields.insert(
         "depends_on".into(),
-        Value::Sequence(depends_on.iter().map(|d| Value::String(d.clone())).collect()),
+        Value::Sequence(
+            depends_on
+                .iter()
+                .map(|d| Value::String(d.clone()))
+                .collect(),
+        ),
     );
     fields.insert("due_date".into(), Value::String(due_date));
     fields.insert("created".into(), Value::String(today.clone()));

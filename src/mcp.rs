@@ -5,9 +5,9 @@ use crate::entity::EntityKind;
 use rmcp::handler::server::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{
-    Annotated, CallToolResult, Content, ListResourcesResult, PaginatedRequestParams,
-    RawResource, ReadResourceRequestParams, ReadResourceResult, ResourceContents,
-    ServerCapabilities, ServerInfo,
+    Annotated, CallToolResult, Content, ListResourcesResult, PaginatedRequestParams, RawResource,
+    ReadResourceRequestParams, ReadResourceResult, ResourceContents, ServerCapabilities,
+    ServerInfo,
 };
 use rmcp::service::RequestContext;
 use rmcp::{tool, tool_handler, tool_router, ErrorData as McpError, RoleServer, ServerHandler};
@@ -276,8 +276,10 @@ impl McServer {
         )
         .map_err(mc_err)?;
 
-        let json: Vec<JsonValue> =
-            entities.iter().map(|e| entity_to_json(e, &self.cfg)).collect();
+        let json: Vec<JsonValue> = entities
+            .iter()
+            .map(|e| entity_to_json(e, &self.cfg))
+            .collect();
         let text = serde_json::to_string_pretty(&json).map_err(mc_err)?;
         Ok(CallToolResult::success(vec![Content::text(text)]))
     }
@@ -421,7 +423,9 @@ impl McServer {
         Ok(CallToolResult::success(vec![Content::text(text)]))
     }
 
-    #[tool(description = "List tasks with rich filtering (project, customer, priority, sprint, owner, status, tag)")]
+    #[tool(
+        description = "List tasks with rich filtering (project, customer, priority, sprint, owner, status, tag)"
+    )]
     async fn list_tasks(
         &self,
         Parameters(params): Parameters<ListTasksParams>,
@@ -573,22 +577,10 @@ impl ServerHandler for McServer {
                 RawResource::new("mc://entities/customers", "customers"),
                 None,
             ),
-            Annotated::new(
-                RawResource::new("mc://entities/projects", "projects"),
-                None,
-            ),
-            Annotated::new(
-                RawResource::new("mc://entities/meetings", "meetings"),
-                None,
-            ),
-            Annotated::new(
-                RawResource::new("mc://entities/research", "research"),
-                None,
-            ),
-            Annotated::new(
-                RawResource::new("mc://entities/tasks", "tasks"),
-                None,
-            ),
+            Annotated::new(RawResource::new("mc://entities/projects", "projects"), None),
+            Annotated::new(RawResource::new("mc://entities/meetings", "meetings"), None),
+            Annotated::new(RawResource::new("mc://entities/research", "research"), None),
+            Annotated::new(RawResource::new("mc://entities/tasks", "tasks"), None),
         ];
 
         Ok(ListResourcesResult {
@@ -666,10 +658,7 @@ impl ServerHandler for McServer {
     }
 }
 
-fn collect_entity_json(
-    kind: EntityKind,
-    cfg: &ResolvedConfig,
-) -> Result<Vec<JsonValue>, McpError> {
+fn collect_entity_json(kind: EntityKind, cfg: &ResolvedConfig) -> Result<Vec<JsonValue>, McpError> {
     let entities = data::collect_entities(kind, cfg).map_err(mc_err)?;
     Ok(entities.iter().map(|e| entity_to_json(e, cfg)).collect())
 }

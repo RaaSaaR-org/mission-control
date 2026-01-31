@@ -19,10 +19,13 @@ pub fn run(subcmd: &TaskSubcommand, cfg: &ResolvedConfig) -> McResult<()> {
             project,
             customer,
             sprint,
-        } => run_board(cfg, project.as_deref(), customer.as_deref(), sprint.as_deref()),
-        TaskSubcommand::Move { id, status, sprint } => {
-            run_move(cfg, id, status, sprint.as_deref())
-        }
+        } => run_board(
+            cfg,
+            project.as_deref(),
+            customer.as_deref(),
+            sprint.as_deref(),
+        ),
+        TaskSubcommand::Move { id, status, sprint } => run_move(cfg, id, status, sprint.as_deref()),
         TaskSubcommand::Next { project, customer } => {
             run_next(cfg, project.as_deref(), customer.as_deref())
         }
@@ -66,7 +69,10 @@ fn truncate(s: &str, max: usize) -> String {
     if s.chars().count() <= max {
         s.to_string()
     } else {
-        format!("{}..", s.chars().take(max.saturating_sub(2)).collect::<String>())
+        format!(
+            "{}..",
+            s.chars().take(max.saturating_sub(2)).collect::<String>()
+        )
     }
 }
 
@@ -338,11 +344,7 @@ fn run_move(
     Ok(())
 }
 
-fn run_next(
-    cfg: &ResolvedConfig,
-    project: Option<&str>,
-    customer: Option<&str>,
-) -> McResult<()> {
+fn run_next(cfg: &ResolvedConfig, project: Option<&str>, customer: Option<&str>) -> McResult<()> {
     // Collect all tasks, filtered by project/customer if specified
     let filter = TaskFilter {
         status: None,
@@ -430,10 +432,23 @@ fn run_next(
     };
 
     println!();
-    println!("  {} {} [{}] {}", "->".green().bold(), id.cyan().bold(), pri_label, title.bold());
-    println!("    {} {}  {} {}",
-        "status:".dimmed(), crate::commands::list::format_status(status),
-        "owner:".dimmed(), if owner.is_empty() { "(unassigned)".dimmed().to_string() } else { owner.to_string() },
+    println!(
+        "  {} {} [{}] {}",
+        "->".green().bold(),
+        id.cyan().bold(),
+        pri_label,
+        title.bold()
+    );
+    println!(
+        "    {} {}  {} {}",
+        "status:".dimmed(),
+        crate::commands::list::format_status(status),
+        "owner:".dimmed(),
+        if owner.is_empty() {
+            "(unassigned)".dimmed().to_string()
+        } else {
+            owner.to_string()
+        },
     );
     if !deps.is_empty() {
         let dep_display: Vec<String> = deps

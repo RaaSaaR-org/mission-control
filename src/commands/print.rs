@@ -49,8 +49,7 @@ pub fn run(entity: &PrintEntity, cfg: &ResolvedConfig) -> McResult<()> {
 /// when the font is metrically compatible (Liberation Sans is).
 fn load_fonts(cfg: &ResolvedConfig) -> McResult<fonts::FontFamily<fonts::FontData>> {
     if let Some(ref fonts_dir) = cfg.brand.fonts_dir {
-        match fonts::from_files(fonts_dir, &cfg.brand.font_name, None::<fonts::Builtin>)
-        {
+        match fonts::from_files(fonts_dir, &cfg.brand.font_name, None::<fonts::Builtin>) {
             Ok(family) => return Ok(family),
             Err(e) => {
                 return Err(McError::Pdf(format!(
@@ -457,7 +456,10 @@ pub fn print_research_programmatic(
                     .to_string();
                 doc.push(elements::Paragraph::new(style::StyledString::new(
                     fname,
-                    style::Style::new().bold().with_font_size(H1_SIZE).with_color(pc),
+                    style::Style::new()
+                        .bold()
+                        .with_font_size(H1_SIZE)
+                        .with_color(pc),
                 )));
                 doc.push(elements::Break::new(0.3));
             }
@@ -732,9 +734,7 @@ fn collect_report_files(final_dir: &Path, specific_file: Option<&str>) -> Vec<Pa
 // ---------------------------------------------------------------------------
 
 fn render_markdown(doc: &mut genpdf::Document, markdown: &str, heading_color: style::Color) {
-    let opts = Options::ENABLE_TABLES
-        | Options::ENABLE_STRIKETHROUGH
-        | Options::ENABLE_TASKLISTS;
+    let opts = Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS;
     let parser = Parser::new_ext(markdown, opts);
 
     let mut current_paragraph = elements::Paragraph::default();
@@ -820,7 +820,9 @@ fn render_markdown(doc: &mut genpdf::Document, markdown: &str, heading_color: st
                     let size = heading_font_size(heading_level);
                     current_paragraph.push_styled(
                         s,
-                        style::Style::new().with_font_size(size).with_color(heading_color),
+                        style::Style::new()
+                            .with_font_size(size)
+                            .with_color(heading_color),
                     );
                 } else if in_list_item {
                     current_list_item.push_styled(s, style::Style::new().italic());
@@ -937,13 +939,11 @@ fn render_markdown(doc: &mut genpdf::Document, markdown: &str, heading_color: st
                 if in_list_item {
                     current_list_item.push_styled(
                         marker,
-                        style::Style::new()
-                            .bold()
-                            .with_color(if checked {
-                                style::Color::Rgb(0, 128, 0)
-                            } else {
-                                style::Color::Rgb(160, 160, 160)
-                            }),
+                        style::Style::new().bold().with_color(if checked {
+                            style::Color::Rgb(0, 128, 0)
+                        } else {
+                            style::Color::Rgb(160, 160, 160)
+                        }),
                     );
                 }
             }
@@ -987,11 +987,7 @@ fn flush_paragraph(
     *para = elements::Paragraph::default();
 }
 
-fn render_table(
-    doc: &mut genpdf::Document,
-    rows: &[(Vec<String>, bool)],
-    num_cols: usize,
-) {
+fn render_table(doc: &mut genpdf::Document, rows: &[(Vec<String>, bool)], num_cols: usize) {
     if num_cols == 0 || rows.is_empty() {
         return;
     }

@@ -97,7 +97,10 @@ async fn handle_tasks(
     Query(params): Query<HashMap<String, String>>,
 ) -> Html<String> {
     let cfg = &state.cfg;
-    let status_filter = params.get("status").filter(|s| !s.is_empty()).map(|s| s.as_str());
+    let status_filter = params
+        .get("status")
+        .filter(|s| !s.is_empty())
+        .map(|s| s.as_str());
 
     let filter = TaskFilter {
         status: status_filter,
@@ -120,9 +123,18 @@ async fn handle_tasks_board(
     Query(params): Query<HashMap<String, String>>,
 ) -> Html<String> {
     let cfg = &state.cfg;
-    let project = params.get("project").filter(|s| !s.is_empty()).map(|s| s.as_str());
-    let customer = params.get("customer").filter(|s| !s.is_empty()).map(|s| s.as_str());
-    let sprint = params.get("sprint").filter(|s| !s.is_empty()).map(|s| s.as_str());
+    let project = params
+        .get("project")
+        .filter(|s| !s.is_empty())
+        .map(|s| s.as_str());
+    let customer = params
+        .get("customer")
+        .filter(|s| !s.is_empty())
+        .map(|s| s.as_str());
+    let sprint = params
+        .get("sprint")
+        .filter(|s| !s.is_empty())
+        .map(|s| s.as_str());
 
     let filter = TaskFilter {
         status: None,
@@ -144,11 +156,16 @@ fn handle_list(
     cfg: &ResolvedConfig,
     params: &HashMap<String, String>,
 ) -> Html<String> {
-    let status_filter = params.get("status").filter(|s| !s.is_empty()).map(|s| s.as_str());
-    let tag_filter = params.get("tag").filter(|s| !s.is_empty()).map(|s| s.as_str());
+    let status_filter = params
+        .get("status")
+        .filter(|s| !s.is_empty())
+        .map(|s| s.as_str());
+    let tag_filter = params
+        .get("tag")
+        .filter(|s| !s.is_empty())
+        .map(|s| s.as_str());
 
-    let entities = data::collect_filtered(kind, cfg, status_filter, tag_filter)
-        .unwrap_or_default();
+    let entities = data::collect_filtered(kind, cfg, status_filter, tag_filter).unwrap_or_default();
 
     let valid_statuses = kind.statuses(cfg);
 

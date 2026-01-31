@@ -34,8 +34,7 @@ fn export_customer(cfg: &ResolvedConfig, id_or_slug: &str) -> McResult<()> {
 
     let file = fs::File::create(&zip_path)?;
     let mut zip = ZipWriter::new(file);
-    let options = SimpleFileOptions::default()
-        .compression_method(zip::CompressionMethod::Deflated);
+    let options = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
 
     // Walk the customer directory and add all files
     for entry in WalkDir::new(&dir).into_iter().filter_map(|e| e.ok()) {

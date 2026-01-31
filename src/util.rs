@@ -46,10 +46,7 @@ mod tests {
 
     #[test]
     fn test_parse_comma_list() {
-        assert_eq!(
-            parse_comma_list("a, b, c"),
-            vec!["a", "b", "c"]
-        );
+        assert_eq!(parse_comma_list("a, b, c"), vec!["a", "b", "c"]);
         assert_eq!(parse_comma_list(""), Vec::<String>::new());
     }
 }

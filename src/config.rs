@@ -122,11 +122,26 @@ pub fn load_config(root: &Path) -> McResult<ResolvedConfig> {
         templates_dir: resolve("templates", "templates/"),
         archive_dir: resolve("archive", "archive/"),
         id_prefixes: IdPrefixes {
-            customer: prefixes.get("customer").cloned().unwrap_or_else(|| "CUST".into()),
-            project: prefixes.get("project").cloned().unwrap_or_else(|| "PROJ".into()),
-            meeting: prefixes.get("meeting").cloned().unwrap_or_else(|| "MTG".into()),
-            research: prefixes.get("research").cloned().unwrap_or_else(|| "RES".into()),
-            task: prefixes.get("task").cloned().unwrap_or_else(|| "TASK".into()),
+            customer: prefixes
+                .get("customer")
+                .cloned()
+                .unwrap_or_else(|| "CUST".into()),
+            project: prefixes
+                .get("project")
+                .cloned()
+                .unwrap_or_else(|| "PROJ".into()),
+            meeting: prefixes
+                .get("meeting")
+                .cloned()
+                .unwrap_or_else(|| "MTG".into()),
+            research: prefixes
+                .get("research")
+                .cloned()
+                .unwrap_or_else(|| "RES".into()),
+            task: prefixes
+                .get("task")
+                .cloned()
+                .unwrap_or_else(|| "TASK".into()),
         },
         statuses: StatusConfig {
             customer: statuses
@@ -145,13 +160,16 @@ pub fn load_config(root: &Path) -> McResult<ResolvedConfig> {
                 .get("research")
                 .cloned()
                 .unwrap_or_else(|| vec!["draft".into(), "final".into()]),
-            task: statuses
-                .get("task")
-                .cloned()
-                .unwrap_or_else(|| vec![
-                    "backlog".into(), "todo".into(), "in-progress".into(),
-                    "review".into(), "done".into(), "cancelled".into(),
-                ]),
+            task: statuses.get("task").cloned().unwrap_or_else(|| {
+                vec![
+                    "backlog".into(),
+                    "todo".into(),
+                    "in-progress".into(),
+                    "review".into(),
+                    "done".into(),
+                    "cancelled".into(),
+                ]
+            }),
         },
         brand: resolve_brand(root, raw_brand),
     })

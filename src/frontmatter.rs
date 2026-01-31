@@ -24,11 +24,10 @@ pub fn split_frontmatter(content: &str) -> Option<(String, String)> {
 
 /// Parse raw YAML frontmatter string into a serde_yaml::Value (should be a Mapping).
 pub fn parse_raw(fm_str: &str) -> McResult<Value> {
-    let val: Value =
-        serde_yaml::from_str(fm_str).map_err(|e| McError::Frontmatter {
-            path: "".into(),
-            message: e.to_string(),
-        })?;
+    let val: Value = serde_yaml::from_str(fm_str).map_err(|e| McError::Frontmatter {
+        path: "".into(),
+        message: e.to_string(),
+    })?;
     Ok(val)
 }
 
@@ -37,11 +36,10 @@ pub fn parse_file(path: &Path) -> McResult<(Value, String)> {
     let content = std::fs::read_to_string(path)?;
     match split_frontmatter(&content) {
         Some((fm_str, body)) => {
-            let val: Value =
-                serde_yaml::from_str(&fm_str).map_err(|e| McError::Frontmatter {
-                    path: path.to_path_buf(),
-                    message: e.to_string(),
-                })?;
+            let val: Value = serde_yaml::from_str(&fm_str).map_err(|e| McError::Frontmatter {
+                path: path.to_path_buf(),
+                message: e.to_string(),
+            })?;
             Ok((val, body))
         }
         None => Err(McError::Frontmatter {

@@ -30,7 +30,10 @@ pub fn run(id: &str, cfg: &ResolvedConfig) -> McResult<()> {
 
     println!();
     println!("  {} {} {}", kind_colored, id.cyan().bold(), status_display);
-    println!("  {}", "────────────────────────────────────────────────".dimmed());
+    println!(
+        "  {}",
+        "────────────────────────────────────────────────".dimmed()
+    );
 
     // Print all frontmatter fields
     if let Some(map) = entity.frontmatter.as_mapping() {
@@ -44,8 +47,15 @@ pub fn run(id: &str, cfg: &ResolvedConfig) -> McResult<()> {
         }
     }
 
-    println!("  {}", "------------------------------------------------".dimmed());
-    println!("  {} {}", "source:".dimmed(), entity.source_path.display().to_string().dimmed());
+    println!(
+        "  {}",
+        "------------------------------------------------".dimmed()
+    );
+    println!(
+        "  {} {}",
+        "source:".dimmed(),
+        entity.source_path.display().to_string().dimmed()
+    );
     println!();
 
     // Print body preview (first 20 non-empty lines)

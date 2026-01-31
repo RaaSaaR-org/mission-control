@@ -292,7 +292,10 @@ fn validate_task_frontmatter_file(
         issues.push(ValidationIssue {
             path: path_str.clone(),
             check: "id-consistency".into(),
-            message: format!("ID '{}' does not start with expected prefix '{}-'", id, prefix),
+            message: format!(
+                "ID '{}' does not start with expected prefix '{}-'",
+                id, prefix
+            ),
         });
     }
 
@@ -420,7 +423,10 @@ fn validate_frontmatter_file(
         issues.push(ValidationIssue {
             path: path_str.clone(),
             check: "id-consistency".into(),
-            message: format!("ID '{}' does not start with expected prefix '{}-'", id, prefix),
+            message: format!(
+                "ID '{}' does not start with expected prefix '{}-'",
+                id, prefix
+            ),
         });
     }
 

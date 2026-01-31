@@ -45,12 +45,8 @@ fn list_standard(
     status_filter: &Option<String>,
     tag_filter: &Option<String>,
 ) -> McResult<()> {
-    let entries = data::collect_filtered(
-        kind,
-        cfg,
-        status_filter.as_deref(),
-        tag_filter.as_deref(),
-    )?;
+    let entries =
+        data::collect_filtered(kind, cfg, status_filter.as_deref(), tag_filter.as_deref())?;
 
     let has_filters = status_filter.is_some() || tag_filter.is_some();
 
@@ -291,11 +287,7 @@ fn list_tasks(
         if let Some(t) = tag {
             parts.push(format!("tag = {}", t));
         }
-        println!(
-            "{} Showing tasks with {}\n",
-            "i".blue(),
-            parts.join(", "),
-        );
+        println!("{} Showing tasks with {}\n", "i".blue(), parts.join(", "),);
     }
 
     println!(
@@ -335,9 +327,21 @@ fn list_tasks(
             title_trunc,
             format_status(status),
             pri_display,
-            if owner.is_empty() { "-".dimmed().to_string() } else { truncate(owner, 9).dimmed().to_string() },
-            if proj_display.is_empty() { "-".dimmed().to_string() } else { truncate(proj_display, 9) },
-            if sprint.is_empty() { "-".dimmed().to_string() } else { truncate(sprint, 7) },
+            if owner.is_empty() {
+                "-".dimmed().to_string()
+            } else {
+                truncate(owner, 9).dimmed().to_string()
+            },
+            if proj_display.is_empty() {
+                "-".dimmed().to_string()
+            } else {
+                truncate(proj_display, 9)
+            },
+            if sprint.is_empty() {
+                "-".dimmed().to_string()
+            } else {
+                truncate(sprint, 7)
+            },
         );
     }
 

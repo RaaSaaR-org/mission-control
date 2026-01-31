@@ -75,10 +75,7 @@ pub fn run_quiet(cfg: &ResolvedConfig) -> McResult<IndexResult> {
     )?;
 
     let tasks_data = serde_json::to_string_pretty(&tasks)? + "\n";
-    util::atomic_write(
-        &cfg.data_dir.join("tasks.json"),
-        tasks_data.as_bytes(),
-    )?;
+    util::atomic_write(&cfg.data_dir.join("tasks.json"), tasks_data.as_bytes())?;
 
     Ok(IndexResult {
         customers: customers.len(),
