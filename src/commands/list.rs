@@ -23,6 +23,7 @@ pub fn run(entity: &ListEntity, cfg: &ResolvedConfig) -> McResult<()> {
                 ListEntity::Projects { status, tag } => (EntityKind::Project, status, tag),
                 ListEntity::Meetings { status, tag } => (EntityKind::Meeting, status, tag),
                 ListEntity::Research { status, tag } => (EntityKind::Research, status, tag),
+                ListEntity::Sprints { status, tag } => (EntityKind::Sprint, status, tag),
                 ListEntity::Tasks { .. } => unreachable!(),
             };
             list_standard(kind, cfg, status_filter, tag_filter)
@@ -183,6 +184,35 @@ fn list_standard(
                     id.cyan(),
                     truncate(title, 29),
                     format_status(status),
+                    owner.dimmed()
+                );
+            }
+        }
+        EntityKind::Sprint => {
+            println!(
+                "  {:<10} {:<22} {:<12} {:<12} {:<12} {:<12}",
+                "ID".bold(),
+                "Title".bold(),
+                "Status".bold(),
+                "Start".bold(),
+                "End".bold(),
+                "Owner".bold()
+            );
+            println!("  {}", "─".repeat(80).dimmed());
+            for e in &entries {
+                let id = frontmatter::get_str_or(&e.frontmatter, "id", "");
+                let title = frontmatter::get_str_or(&e.frontmatter, "title", "");
+                let status = frontmatter::get_str_or(&e.frontmatter, "status", "");
+                let start = frontmatter::get_str_or(&e.frontmatter, "start_date", "");
+                let end = frontmatter::get_str_or(&e.frontmatter, "end_date", "");
+                let owner = frontmatter::get_str_or(&e.frontmatter, "owner", "");
+                println!(
+                    "  {:<10} {:<22} {:<12} {:<12} {:<12} {}",
+                    id.cyan(),
+                    truncate(title, 21),
+                    format_status(status),
+                    start,
+                    end,
                     owner.dimmed()
                 );
             }
@@ -355,7 +385,7 @@ pub fn format_status(status: &str) -> colored::ColoredString {
     match status {
         "active" | "completed" | "final" | "done" => status.green(),
         "inactive" | "cancelled" | "churned" | "outdated" => status.red(),
-        "on-hold" | "draft" | "in-progress" | "review" => status.yellow(),
+        "on-hold" | "draft" | "in-progress" | "review" | "planning" => status.yellow(),
         "prospect" | "scheduled" | "todo" => status.blue(),
         "backlog" => status.dimmed(),
         _ => status.normal(),

@@ -16,6 +16,7 @@ pub fn layout(title: &str, active_nav: &str, body_html: &str) -> String {
         ("Meetings", "/meetings"),
         ("Research", "/research"),
         ("Tasks", "/tasks"),
+        ("Sprints", "/sprints"),
     ];
 
     let nav_links: String = nav_items
@@ -66,7 +67,9 @@ pub fn status_badge(status: &str) -> String {
     let class = match status {
         "active" | "completed" | "final" | "done" => format!("badge badge-{}", status),
         "inactive" | "cancelled" | "churned" | "outdated" => format!("badge badge-{}", status),
-        "on-hold" | "draft" | "in-progress" | "review" => format!("badge badge-{}", status),
+        "on-hold" | "draft" | "in-progress" | "review" | "planning" => {
+            format!("badge badge-{}", status)
+        }
         "prospect" | "scheduled" | "todo" => format!("badge badge-{}", status),
         "backlog" => format!("badge badge-{}", status),
         _ => "badge".to_string(),
@@ -155,7 +158,7 @@ fn segment_class(status: &str) -> String {
     match status {
         "active" | "completed" | "final" | "done" | "inactive" | "cancelled" | "churned"
         | "outdated" | "on-hold" | "draft" | "in-progress" | "review" | "prospect"
-        | "scheduled" | "todo" | "backlog" => format!("seg-{}", status),
+        | "scheduled" | "todo" | "backlog" | "planning" => format!("seg-{}", status),
         _ => "seg-unknown".to_string(),
     }
 }
@@ -281,6 +284,8 @@ pub fn dashboard_page(counts: &[StatusCounts], recent: &[RecentFile]) -> String 
                     "research"
                 } else if f.id.starts_with("TSK") {
                     "task"
+                } else if f.id.starts_with("SPR") {
+                    "sprint"
                 } else {
                     "entity"
                 };
@@ -368,11 +373,16 @@ pub fn list_page(
 
     // Determine which columns to show based on kind
     let is_meeting = kind_plural == "meetings";
+    let is_sprint = kind_plural == "sprints";
 
     body.push_str("<table>\n<thead><tr>");
     body.push_str("<th>ID</th>");
     if is_meeting {
         body.push_str("<th>Title</th><th>Date</th><th>Time</th><th>Status</th><th>Tags</th>");
+    } else if is_sprint {
+        body.push_str(
+            "<th>Title</th><th>Status</th><th>Start</th><th>End</th><th>Owner</th><th>Tags</th>",
+        );
     } else {
         body.push_str("<th>Name</th><th>Status</th><th>Owner</th><th>Tags</th>");
     }
@@ -396,6 +406,20 @@ pub fn list_page(
                 escape_html(date),
                 escape_html(time),
                 status_badge(status),
+                tag_badges(&tags)
+            ));
+        } else if is_sprint {
+            let title = frontmatter::get_str_or(&e.frontmatter, "title", "");
+            let start = frontmatter::get_str_or(&e.frontmatter, "start_date", "");
+            let end = frontmatter::get_str_or(&e.frontmatter, "end_date", "");
+            let owner = frontmatter::get_str_or(&e.frontmatter, "owner", "");
+            body.push_str(&format!(
+                "<td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td>",
+                escape_html(title),
+                status_badge(status),
+                escape_html(start),
+                escape_html(end),
+                escape_html(owner),
                 tag_badges(&tags)
             ));
         } else {

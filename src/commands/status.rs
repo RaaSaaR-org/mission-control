@@ -10,6 +10,7 @@ pub fn run(cfg: &ResolvedConfig) -> McResult<()> {
     let meetings = data::count_by_status(EntityKind::Meeting, cfg)?;
     let research = data::count_by_status(EntityKind::Research, cfg)?;
     let tasks = data::count_by_status(EntityKind::Task, cfg)?;
+    let sprints = data::count_by_status(EntityKind::Sprint, cfg)?;
 
     println!();
     println!("  {}", "MissionControl".bold());
@@ -21,6 +22,7 @@ pub fn run(cfg: &ResolvedConfig) -> McResult<()> {
     print_section("Meetings", &meetings.by_status);
     print_section("Research", &research.by_status);
     print_section("Tasks", &tasks.by_status);
+    print_section("Sprints", &sprints.by_status);
 
     // Recent activity
     println!("  {}", "Recent Activity".bold());
@@ -70,7 +72,7 @@ fn print_section(label: &str, counts: &[(String, usize)]) {
         let color_status = match status.as_str() {
             "active" | "completed" | "final" | "done" => status.green(),
             "inactive" | "cancelled" | "churned" | "outdated" => status.red(),
-            "on-hold" | "draft" | "in-progress" | "review" => status.yellow(),
+            "on-hold" | "draft" | "in-progress" | "review" | "planning" => status.yellow(),
             "prospect" | "scheduled" | "todo" => status.blue(),
             "backlog" => status.dimmed(),
             _ => status.normal(),
@@ -78,7 +80,7 @@ fn print_section(label: &str, counts: &[(String, usize)]) {
         let color_bar = match status.as_str() {
             "active" | "completed" | "final" | "done" => bar.green(),
             "inactive" | "cancelled" | "churned" | "outdated" => bar.red(),
-            "on-hold" | "draft" | "in-progress" | "review" => bar.yellow(),
+            "on-hold" | "draft" | "in-progress" | "review" | "planning" => bar.yellow(),
             "prospect" | "scheduled" | "todo" => bar.blue(),
             "backlog" => bar.dimmed(),
             _ => bar.normal(),

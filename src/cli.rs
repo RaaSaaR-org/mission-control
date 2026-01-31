@@ -41,7 +41,8 @@ pub enum Command {
   mc new project \"Data Pipeline\" --owner alice --status active
   mc new meeting \"Weekly Sync\" --date 2025-06-01 --time 14:00
   mc new research \"LLM Benchmarks\" --agents claude,gemini
-  mc new task \"Fix login bug\" --project PROJ-001 --priority 1")]
+  mc new task \"Fix login bug\" --project PROJ-001 --priority 1
+  mc new sprint \"2026-W05\" --start-date 2026-01-27 --end-date 2026-02-07 --goal \"Auth module\"")]
     New {
         #[command(subcommand)]
         entity: NewEntity,
@@ -52,7 +53,8 @@ pub enum Command {
   mc list customers --status active
   mc list projects --tag ml
   mc list meetings --status scheduled
-  mc list tasks --status in-progress --project PROJ-001")]
+  mc list tasks --status in-progress --project PROJ-001
+  mc list sprints --status active")]
     List {
         #[command(subcommand)]
         entity: ListEntity,
@@ -63,9 +65,10 @@ pub enum Command {
   mc show PROJ-001
   mc show MTG-001
   mc show RES-001
-  mc show TASK-001")]
+  mc show TASK-001
+  mc show SPR-001")]
     Show {
-        /// Entity ID (e.g., CUST-001, PROJ-001, MTG-001, RES-001, TASK-001)
+        /// Entity ID (e.g., CUST-001, PROJ-001, MTG-001, RES-001, TASK-001, SPR-001)
         id: String,
     },
     /// Rebuild data/*.json index files
@@ -265,6 +268,36 @@ pub enum NewEntity {
         #[arg(long)]
         due_date: Option<String>,
     },
+    /// Create a new sprint
+    #[command(after_help = "\x1b[1mExamples:\x1b[0m
+  mc new sprint \"2026-W05\"
+  mc new sprint \"2026-W05\" --start-date 2026-01-27 --end-date 2026-02-07
+  mc new sprint \"2026-W05\" --goal \"Complete auth module\" --projects PROJ-001")]
+    Sprint {
+        /// Sprint title (e.g., 2026-W05)
+        title: String,
+        /// Owner
+        #[arg(long)]
+        owner: Option<String>,
+        /// Status (default: planning)
+        #[arg(long)]
+        status: Option<String>,
+        /// Sprint goal
+        #[arg(long)]
+        goal: Option<String>,
+        /// Start date (YYYY-MM-DD, defaults to today)
+        #[arg(long)]
+        start_date: Option<String>,
+        /// End date (YYYY-MM-DD)
+        #[arg(long)]
+        end_date: Option<String>,
+        /// Linked project IDs (comma-separated)
+        #[arg(long)]
+        projects: Option<String>,
+        /// Comma-separated tags
+        #[arg(long)]
+        tags: Option<String>,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -314,6 +347,19 @@ pub enum ListEntity {
   mc list research --status draft
   mc list research --tag ai")]
     Research {
+        /// Filter by status
+        #[arg(long)]
+        status: Option<String>,
+        /// Filter by tag
+        #[arg(long)]
+        tag: Option<String>,
+    },
+    /// List sprints
+    #[command(after_help = "\x1b[1mExamples:\x1b[0m
+  mc list sprints
+  mc list sprints --status active
+  mc list sprints --tag q1")]
+    Sprints {
         /// Filter by status
         #[arg(long)]
         status: Option<String>,

@@ -14,6 +14,7 @@ pub fn run(id: &str, cfg: &ResolvedConfig) -> McResult<()> {
         "meeting" => kind_label.magenta().bold(),
         "research" => kind_label.cyan().bold(),
         "task" => kind_label.purple().bold(),
+        "sprint" => kind_label.yellow().bold(),
         _ => kind_label.bold(),
     };
 

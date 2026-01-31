@@ -173,7 +173,7 @@ body > footer p {
     background-color: var(--mc-red-bg);
     color: var(--mc-red-text);
 }
-.badge-on-hold, .badge-draft, .badge-in-progress, .badge-review {
+.badge-on-hold, .badge-draft, .badge-in-progress, .badge-review, .badge-planning {
     background-color: var(--mc-amber-bg);
     color: var(--mc-amber-text);
 }
@@ -315,7 +315,8 @@ a.entity-link:hover {
 .stacked-bar-segment.seg-on-hold,
 .stacked-bar-segment.seg-draft,
 .stacked-bar-segment.seg-in-progress,
-.stacked-bar-segment.seg-review { background-color: var(--mc-amber); color: #333; }
+.stacked-bar-segment.seg-review,
+.stacked-bar-segment.seg-planning { background-color: var(--mc-amber); color: #333; }
 .stacked-bar-segment.seg-prospect,
 .stacked-bar-segment.seg-scheduled,
 .stacked-bar-segment.seg-todo { background-color: var(--mc-blue); }

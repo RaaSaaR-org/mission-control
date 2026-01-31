@@ -390,6 +390,7 @@ pub fn recent_activity(cfg: &ResolvedConfig, limit: usize) -> McResult<Vec<Recen
         &cfg.meetings_dir,
         &cfg.research_dir,
         &cfg.tasks_dir,
+        &cfg.sprints_dir,
     ];
 
     for dir in &dirs {

@@ -40,6 +40,7 @@ pub struct ResolvedConfig {
     pub meetings_dir: PathBuf,
     pub research_dir: PathBuf,
     pub tasks_dir: PathBuf,
+    pub sprints_dir: PathBuf,
     #[allow(dead_code)]
     pub notes_dir: PathBuf,
     pub data_dir: PathBuf,
@@ -70,6 +71,7 @@ pub struct IdPrefixes {
     pub meeting: String,
     pub research: String,
     pub task: String,
+    pub sprint: String,
 }
 
 #[derive(Debug, Clone)]
@@ -79,6 +81,7 @@ pub struct StatusConfig {
     pub meeting: Vec<String>,
     pub research: Vec<String>,
     pub task: Vec<String>,
+    pub sprint: Vec<String>,
 }
 
 /// Walk up from `start` looking for a directory that contains `config/config.yml`.
@@ -121,6 +124,7 @@ pub fn load_config(root: &Path) -> McResult<ResolvedConfig> {
         meetings_dir: resolve("meetings", "meetings/"),
         research_dir: resolve("research", "research/"),
         tasks_dir: resolve("tasks", "tasks/"),
+        sprints_dir: resolve("sprints", "sprints/"),
         notes_dir: resolve("notes", "notes/"),
         data_dir: resolve("data", "data/"),
         templates_dir: resolve("templates", "templates/"),
@@ -146,6 +150,10 @@ pub fn load_config(root: &Path) -> McResult<ResolvedConfig> {
                 .get("task")
                 .cloned()
                 .unwrap_or_else(|| "TASK".into()),
+            sprint: prefixes
+                .get("sprint")
+                .cloned()
+                .unwrap_or_else(|| "SPR".into()),
         },
         statuses: StatusConfig {
             customer: statuses
@@ -171,6 +179,15 @@ pub fn load_config(root: &Path) -> McResult<ResolvedConfig> {
                     "in-progress".into(),
                     "review".into(),
                     "done".into(),
+                    "cancelled".into(),
+                ]
+            }),
+            sprint: statuses.get("sprint").cloned().unwrap_or_else(|| {
+                vec![
+                    "planning".into(),
+                    "active".into(),
+                    "review".into(),
+                    "completed".into(),
                     "cancelled".into(),
                 ]
             }),

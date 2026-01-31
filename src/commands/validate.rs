@@ -47,6 +47,7 @@ pub fn validate_programmatic(cfg: &ResolvedConfig) -> McResult<Vec<ValidationIss
     validate_entity_dirs(EntityKind::Project, cfg, &mut issues)?;
     validate_meetings(cfg, &mut issues)?;
     validate_entity_dirs(EntityKind::Research, cfg, &mut issues)?;
+    validate_entity_dirs(EntityKind::Sprint, cfg, &mut issues)?;
     validate_tasks(cfg, &mut issues)?;
 
     Ok(issues)
@@ -433,7 +434,7 @@ fn validate_frontmatter_file(
     // Check 6: required name/title field
     let has_name = match kind {
         EntityKind::Customer | EntityKind::Project => frontmatter::get_str(&fm, "name").is_some(),
-        EntityKind::Meeting | EntityKind::Research | EntityKind::Task => {
+        EntityKind::Meeting | EntityKind::Research | EntityKind::Task | EntityKind::Sprint => {
             frontmatter::get_str(&fm, "title").is_some()
         }
     };
@@ -466,7 +467,7 @@ fn validate_frontmatter_file(
     }
 
     // Check 8: slug consistency (for directory-based entities)
-    if kind != EntityKind::Meeting && kind != EntityKind::Task {
+    if kind != EntityKind::Meeting && kind != EntityKind::Task && kind != EntityKind::Sprint {
         if let Some(slug) = frontmatter::get_str(&fm, "slug") {
             // Check that the parent directory contains the slug
             if let Some(parent) = path.parent() {

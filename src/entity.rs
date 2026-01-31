@@ -6,7 +6,7 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
-/// The five entity kinds managed by MissionControl.
+/// The six entity kinds managed by MissionControl.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EntityKind {
     Customer,
@@ -14,6 +14,7 @@ pub enum EntityKind {
     Meeting,
     Research,
     Task,
+    Sprint,
 }
 
 impl EntityKind {
@@ -24,6 +25,7 @@ impl EntityKind {
             EntityKind::Meeting => "meeting",
             EntityKind::Research => "research",
             EntityKind::Task => "task",
+            EntityKind::Sprint => "sprint",
         }
     }
 
@@ -34,6 +36,7 @@ impl EntityKind {
             EntityKind::Meeting => "meetings",
             EntityKind::Research => "research",
             EntityKind::Task => "tasks",
+            EntityKind::Sprint => "sprints",
         }
     }
 
@@ -44,6 +47,7 @@ impl EntityKind {
             EntityKind::Meeting => &cfg.id_prefixes.meeting,
             EntityKind::Research => &cfg.id_prefixes.research,
             EntityKind::Task => &cfg.id_prefixes.task,
+            EntityKind::Sprint => &cfg.id_prefixes.sprint,
         }
     }
 
@@ -54,6 +58,7 @@ impl EntityKind {
             EntityKind::Meeting => &cfg.meetings_dir,
             EntityKind::Research => &cfg.research_dir,
             EntityKind::Task => &cfg.tasks_dir,
+            EntityKind::Sprint => &cfg.sprints_dir,
         }
     }
 
@@ -64,6 +69,7 @@ impl EntityKind {
             EntityKind::Meeting => &cfg.statuses.meeting,
             EntityKind::Research => &cfg.statuses.research,
             EntityKind::Task => &cfg.statuses.task,
+            EntityKind::Sprint => &cfg.statuses.sprint,
         }
     }
 
@@ -74,6 +80,7 @@ impl EntityKind {
             "meeting" | "meetings" => Ok(EntityKind::Meeting),
             "research" => Ok(EntityKind::Research),
             "task" | "tasks" => Ok(EntityKind::Task),
+            "sprint" | "sprints" => Ok(EntityKind::Sprint),
             _ => Err(McError::Other(format!("Unknown entity kind: {s}"))),
         }
     }
@@ -90,15 +97,18 @@ impl EntityKind {
             Ok(EntityKind::Research)
         } else if id.starts_with(&format!("{}-", cfg.id_prefixes.task)) {
             Ok(EntityKind::Task)
+        } else if id.starts_with(&format!("{}-", cfg.id_prefixes.sprint)) {
+            Ok(EntityKind::Sprint)
         } else {
             Err(McError::InvalidId(format!(
-                "{} (expected format like {}-001, {}-002, {}-003, {}-001, or {}-001)",
+                "{} (expected format like {}-001, {}-002, {}-003, {}-001, {}-001, or {}-001)",
                 id,
                 cfg.id_prefixes.customer,
                 cfg.id_prefixes.project,
                 cfg.id_prefixes.meeting,
                 cfg.id_prefixes.research,
                 cfg.id_prefixes.task,
+                cfg.id_prefixes.sprint,
             )))
         }
     }
@@ -214,7 +224,7 @@ pub fn next_id(kind: EntityKind, cfg: &ResolvedConfig) -> McResult<EntityId> {
     let id_re = Regex::new(&format!(r"^{}-(\d+)", regex::escape(prefix))).unwrap();
 
     match kind {
-        EntityKind::Customer | EntityKind::Project | EntityKind::Research => {
+        EntityKind::Customer | EntityKind::Project | EntityKind::Research | EntityKind::Sprint => {
             let base = kind.base_dir(cfg);
             // Scan directory names
             if base.is_dir() {

@@ -101,6 +101,27 @@ pub fn run(entity: &NewEntity, cfg: &ResolvedConfig, yes: bool) -> McResult<()> 
             due_date.as_deref(),
             yes,
         ),
+        NewEntity::Sprint {
+            title,
+            owner,
+            status,
+            goal,
+            start_date,
+            end_date,
+            projects,
+            tags,
+        } => new_sprint(
+            cfg,
+            title,
+            owner.as_deref(),
+            status.as_deref(),
+            goal.as_deref(),
+            start_date.as_deref(),
+            end_date.as_deref(),
+            projects.as_deref(),
+            tags.as_deref(),
+            yes,
+        ),
     }
 }
 
@@ -785,6 +806,148 @@ fn new_task(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
+fn new_sprint(
+    cfg: &ResolvedConfig,
+    title: &str,
+    owner: Option<&str>,
+    status: Option<&str>,
+    goal: Option<&str>,
+    start_date: Option<&str>,
+    end_date: Option<&str>,
+    projects: Option<&str>,
+    tags: Option<&str>,
+    yes: bool,
+) -> McResult<()> {
+    let id = entity::next_id(EntityKind::Sprint, cfg)?;
+    let slug = util::slugify(title);
+    let today = util::today_str();
+
+    let owner = match owner {
+        Some(o) => o.to_string(),
+        None => prompt_input("Owner", "", yes),
+    };
+    let status = match status {
+        Some(s) => s.to_string(),
+        None => prompt_select("Status", &cfg.statuses.sprint, 0, yes),
+    };
+    let goal = match goal {
+        Some(g) => g.to_string(),
+        None => prompt_input_optional("Sprint goal", yes),
+    };
+    let start_date = start_date.unwrap_or(&today).to_string();
+    let end_date = end_date.unwrap_or("").to_string();
+    let tags: Vec<String> = match tags {
+        Some(t) => util::parse_comma_list(t),
+        None => {
+            let input = prompt_input_optional("Tags (comma-separated)", yes);
+            if input.is_empty() {
+                vec![]
+            } else {
+                util::parse_comma_list(&input)
+            }
+        }
+    };
+    let projects: Vec<String> = match projects {
+        Some(p) => util::parse_comma_list(p),
+        None => {
+            let input = prompt_input_optional("Link projects (comma-separated IDs)", yes);
+            if input.is_empty() {
+                vec![]
+            } else {
+                util::parse_comma_list(&input)
+            }
+        }
+    };
+
+    let tags_display = tags.join(", ");
+    let projects_display = projects.join(", ");
+    print_summary(
+        "sprint",
+        &[
+            ("ID", &id.to_string()),
+            ("Title", title),
+            ("Status", &status),
+            ("Goal", &goal),
+            ("Start", &start_date),
+            ("End", &end_date),
+            ("Owner", &owner),
+            ("Projects", &projects_display),
+            ("Tags", &tags_display),
+        ],
+    );
+
+    if !confirm_creation(yes) {
+        println!("{}", "Cancelled.".dimmed());
+        return Ok(());
+    }
+
+    let (tmpl_fm, tmpl_body) = template::load_template(&cfg.templates_dir, "sprint")?;
+
+    let mut fields = HashMap::new();
+    fields.insert("id".into(), Value::String(id.to_string()));
+    fields.insert("title".into(), Value::String(title.to_string()));
+    fields.insert("status".into(), Value::String(status));
+    fields.insert("goal".into(), Value::String(goal));
+    fields.insert("start_date".into(), Value::String(start_date));
+    fields.insert("end_date".into(), Value::String(end_date));
+    fields.insert("owner".into(), Value::String(owner));
+    fields.insert(
+        "projects".into(),
+        Value::Sequence(projects.iter().map(|p| Value::String(p.clone())).collect()),
+    );
+    fields.insert(
+        "tags".into(),
+        Value::Sequence(tags.iter().map(|t| Value::String(t.clone())).collect()),
+    );
+    fields.insert("created".into(), Value::String(today.clone()));
+    fields.insert("updated".into(), Value::String(today));
+
+    let mut placeholders = HashMap::new();
+    placeholders.insert("title".into(), title.to_string());
+
+    let (fm, body) = template::render_template(tmpl_fm, &tmpl_body, &fields, &placeholders);
+    let doc = frontmatter::serialize_document(&fm, &body);
+
+    let dir_name = format!("{}-{}", id, slug);
+    let dir_path = cfg.sprints_dir.join(&dir_name);
+    fs::create_dir_all(&dir_path)?;
+    fs::write(dir_path.join("_index.md"), &doc)?;
+
+    // Create ceremony stub files
+    fs::write(
+        dir_path.join("planning.md"),
+        format!(
+            "# {} -- Sprint Planning\n\n## Capacity\n\n## Selected Items\n\n## Notes\n",
+            title
+        ),
+    )?;
+    fs::write(
+        dir_path.join("review.md"),
+        format!(
+            "# {} -- Sprint Review\n\n## Demo Outcomes\n\n## Feedback\n\n## Notes\n",
+            title
+        ),
+    )?;
+    fs::write(
+        dir_path.join("retrospective.md"),
+        format!(
+            "# {} -- Retrospective\n\n## What Went Well\n\n## What Could Improve\n\n## Action Items\n",
+            title
+        ),
+    )?;
+
+    println!(
+        "{} Created sprint {} ({}) at {}",
+        "✓".green().bold(),
+        id.to_string().cyan().bold(),
+        title.bold(),
+        dir_path.display().to_string().dimmed()
+    );
+
+    Ok(())
+}
+
 /// Find a project directory by its ID prefix (e.g. "PROJ-001").
 fn find_project_dir(cfg: &ResolvedConfig, proj_id: &str) -> McResult<std::path::PathBuf> {
     if cfg.projects_dir.is_dir() {
@@ -1184,5 +1347,93 @@ pub fn create_task_programmatic(
         "id": id.to_string(),
         "title": title,
         "path": file_path.display().to_string(),
+    }))
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn create_sprint_programmatic(
+    cfg: &ResolvedConfig,
+    title: &str,
+    owner: Option<&str>,
+    status: Option<&str>,
+    goal: Option<&str>,
+    start_date: Option<&str>,
+    end_date: Option<&str>,
+    projects: Option<&str>,
+    tags: Option<&str>,
+) -> McResult<JsonValue> {
+    let id = entity::next_id(EntityKind::Sprint, cfg)?;
+    let slug = util::slugify(title);
+    let today = util::today_str();
+
+    let owner = owner.unwrap_or("").to_string();
+    let status = status
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| cfg.statuses.sprint.first().cloned().unwrap_or_default());
+    let goal = goal.unwrap_or("").to_string();
+    let start_date = start_date.unwrap_or(&today).to_string();
+    let end_date = end_date.unwrap_or("").to_string();
+    let tags: Vec<String> = tags.map(util::parse_comma_list).unwrap_or_default();
+    let projects: Vec<String> = projects.map(util::parse_comma_list).unwrap_or_default();
+
+    let (tmpl_fm, tmpl_body) = template::load_template(&cfg.templates_dir, "sprint")?;
+
+    let mut fields = HashMap::new();
+    fields.insert("id".into(), Value::String(id.to_string()));
+    fields.insert("title".into(), Value::String(title.to_string()));
+    fields.insert("status".into(), Value::String(status));
+    fields.insert("goal".into(), Value::String(goal));
+    fields.insert("start_date".into(), Value::String(start_date));
+    fields.insert("end_date".into(), Value::String(end_date));
+    fields.insert("owner".into(), Value::String(owner));
+    fields.insert(
+        "projects".into(),
+        Value::Sequence(projects.iter().map(|p| Value::String(p.clone())).collect()),
+    );
+    fields.insert(
+        "tags".into(),
+        Value::Sequence(tags.iter().map(|t| Value::String(t.clone())).collect()),
+    );
+    fields.insert("created".into(), Value::String(today.clone()));
+    fields.insert("updated".into(), Value::String(today));
+
+    let mut placeholders = HashMap::new();
+    placeholders.insert("title".into(), title.to_string());
+
+    let (fm, body) = template::render_template(tmpl_fm, &tmpl_body, &fields, &placeholders);
+    let doc = frontmatter::serialize_document(&fm, &body);
+
+    let dir_name = format!("{}-{}", id, slug);
+    let dir_path = cfg.sprints_dir.join(&dir_name);
+    fs::create_dir_all(&dir_path)?;
+    fs::write(dir_path.join("_index.md"), &doc)?;
+
+    // Create ceremony stub files
+    fs::write(
+        dir_path.join("planning.md"),
+        format!(
+            "# {} -- Sprint Planning\n\n## Capacity\n\n## Selected Items\n\n## Notes\n",
+            title
+        ),
+    )?;
+    fs::write(
+        dir_path.join("review.md"),
+        format!(
+            "# {} -- Sprint Review\n\n## Demo Outcomes\n\n## Feedback\n\n## Notes\n",
+            title
+        ),
+    )?;
+    fs::write(
+        dir_path.join("retrospective.md"),
+        format!(
+            "# {} -- Retrospective\n\n## What Went Well\n\n## What Could Improve\n\n## Action Items\n",
+            title
+        ),
+    )?;
+
+    Ok(serde_json::json!({
+        "id": id.to_string(),
+        "title": title,
+        "path": dir_path.display().to_string(),
     }))
 }

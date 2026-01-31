@@ -181,6 +181,34 @@ pub struct CreateTaskParams {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct CreateSprintParams {
+    /// Sprint title (e.g. "2026-W05")
+    #[schemars(description = "Sprint title")]
+    pub title: String,
+    /// Owner (optional)
+    #[schemars(description = "Owner")]
+    pub owner: Option<String>,
+    /// Status (optional, defaults to planning)
+    #[schemars(description = "Status (defaults to planning)")]
+    pub status: Option<String>,
+    /// Sprint goal (optional)
+    #[schemars(description = "Sprint goal")]
+    pub goal: Option<String>,
+    /// Start date YYYY-MM-DD (optional, defaults to today)
+    #[schemars(description = "Start date YYYY-MM-DD (defaults to today)")]
+    pub start_date: Option<String>,
+    /// End date YYYY-MM-DD (optional)
+    #[schemars(description = "End date YYYY-MM-DD")]
+    pub end_date: Option<String>,
+    /// Linked project IDs, comma-separated (optional)
+    #[schemars(description = "Linked project IDs, comma-separated")]
+    pub projects: Option<String>,
+    /// Comma-separated tags (optional)
+    #[schemars(description = "Comma-separated tags")]
+    pub tags: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct MoveTaskParams {
     /// Task ID (e.g. TASK-001)
     #[schemars(description = "Task ID (e.g. TASK-001)")]
@@ -407,6 +435,27 @@ impl McServer {
         Ok(CallToolResult::success(vec![Content::text(text)]))
     }
 
+    #[tool(description = "Create a new sprint")]
+    async fn create_sprint(
+        &self,
+        Parameters(params): Parameters<CreateSprintParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let result = commands::new::create_sprint_programmatic(
+            &self.cfg,
+            &params.title,
+            params.owner.as_deref(),
+            params.status.as_deref(),
+            params.goal.as_deref(),
+            params.start_date.as_deref(),
+            params.end_date.as_deref(),
+            params.projects.as_deref(),
+            params.tags.as_deref(),
+        )
+        .map_err(mc_err)?;
+        let text = serde_json::to_string_pretty(&result).map_err(mc_err)?;
+        Ok(CallToolResult::success(vec![Content::text(text)]))
+    }
+
     #[tool(description = "Move a task to a new status (and optionally update its sprint)")]
     async fn move_task(
         &self,
@@ -491,8 +540,8 @@ impl McServer {
     async fn build_index(&self) -> Result<CallToolResult, McpError> {
         let result = commands::index::run_quiet(&self.cfg).map_err(mc_err)?;
         let text = format!(
-            "Index built: {} customers, {} projects, {} meetings, {} research, {} tasks",
-            result.customers, result.projects, result.meetings, result.research, result.tasks,
+            "Index built: {} customers, {} projects, {} meetings, {} research, {} tasks, {} sprints",
+            result.customers, result.projects, result.meetings, result.research, result.tasks, result.sprints,
         );
         Ok(CallToolResult::success(vec![Content::text(text)]))
     }
@@ -505,6 +554,7 @@ impl McServer {
             EntityKind::Meeting,
             EntityKind::Research,
             EntityKind::Task,
+            EntityKind::Sprint,
         ];
 
         let mut counts = serde_json::Map::new();
@@ -581,6 +631,7 @@ impl ServerHandler for McServer {
             Annotated::new(RawResource::new("mc://entities/meetings", "meetings"), None),
             Annotated::new(RawResource::new("mc://entities/research", "research"), None),
             Annotated::new(RawResource::new("mc://entities/tasks", "tasks"), None),
+            Annotated::new(RawResource::new("mc://entities/sprints", "sprints"), None),
         ];
 
         Ok(ListResourcesResult {
@@ -606,6 +657,7 @@ impl ServerHandler for McServer {
                         "meeting": &self.cfg.id_prefixes.meeting,
                         "research": &self.cfg.id_prefixes.research,
                         "task": &self.cfg.id_prefixes.task,
+                        "sprint": &self.cfg.id_prefixes.sprint,
                     },
                     "statuses": {
                         "customer": &self.cfg.statuses.customer,
@@ -613,6 +665,7 @@ impl ServerHandler for McServer {
                         "meeting": &self.cfg.statuses.meeting,
                         "research": &self.cfg.statuses.research,
                         "task": &self.cfg.statuses.task,
+                        "sprint": &self.cfg.statuses.sprint,
                     },
                     "paths": {
                         "customers": self.cfg.customers_dir.display().to_string(),
@@ -620,6 +673,7 @@ impl ServerHandler for McServer {
                         "meetings": self.cfg.meetings_dir.display().to_string(),
                         "research": self.cfg.research_dir.display().to_string(),
                         "tasks": self.cfg.tasks_dir.display().to_string(),
+                        "sprints": self.cfg.sprints_dir.display().to_string(),
                     },
                 });
                 serde_json::to_string_pretty(&config_json).map_err(mc_err)?
@@ -642,6 +696,10 @@ impl ServerHandler for McServer {
             }
             "mc://entities/tasks" => {
                 let entities = collect_entity_json(EntityKind::Task, &self.cfg)?;
+                serde_json::to_string_pretty(&entities).map_err(mc_err)?
+            }
+            "mc://entities/sprints" => {
+                let entities = collect_entity_json(EntityKind::Sprint, &self.cfg)?;
                 serde_json::to_string_pretty(&entities).map_err(mc_err)?
             }
             _ => {

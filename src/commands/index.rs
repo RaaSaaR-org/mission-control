@@ -12,13 +12,14 @@ pub fn run(cfg: &ResolvedConfig) -> McResult<()> {
     let result = run_quiet(cfg)?;
 
     println!(
-        "{} Index built: {} customers, {} projects, {} meetings, {} research, {} tasks",
+        "{} Index built: {} customers, {} projects, {} meetings, {} research, {} tasks, {} sprints",
         "✓".green().bold(),
         result.customers.to_string().cyan(),
         result.projects.to_string().cyan(),
         result.meetings.to_string().cyan(),
         result.research.to_string().cyan(),
         result.tasks.to_string().cyan(),
+        result.sprints.to_string().cyan(),
     );
 
     Ok(())
@@ -30,6 +31,7 @@ pub struct IndexResult {
     pub meetings: usize,
     pub research: usize,
     pub tasks: usize,
+    pub sprints: usize,
 }
 
 /// Build indexes without printing to stdout.
@@ -39,6 +41,7 @@ pub fn run_quiet(cfg: &ResolvedConfig) -> McResult<IndexResult> {
     let meetings = collect_json(EntityKind::Meeting, cfg)?;
     let research = collect_json(EntityKind::Research, cfg)?;
     let tasks = collect_json(EntityKind::Task, cfg)?;
+    let sprints = collect_json(EntityKind::Sprint, cfg)?;
 
     std::fs::create_dir_all(&cfg.data_dir)?;
 
@@ -49,6 +52,7 @@ pub fn run_quiet(cfg: &ResolvedConfig) -> McResult<IndexResult> {
         "meetings": meetings,
         "research": research,
         "tasks": tasks,
+        "sprints": sprints,
     });
 
     let index_path = cfg.data_dir.join("index.json");
@@ -77,12 +81,16 @@ pub fn run_quiet(cfg: &ResolvedConfig) -> McResult<IndexResult> {
     let tasks_data = serde_json::to_string_pretty(&tasks)? + "\n";
     util::atomic_write(&cfg.data_dir.join("tasks.json"), tasks_data.as_bytes())?;
 
+    let sprints_data = serde_json::to_string_pretty(&sprints)? + "\n";
+    util::atomic_write(&cfg.data_dir.join("sprints.json"), sprints_data.as_bytes())?;
+
     Ok(IndexResult {
         customers: customers.len(),
         projects: projects.len(),
         meetings: meetings.len(),
         research: research.len(),
         tasks: tasks.len(),
+        sprints: sprints.len(),
     })
 }
 
