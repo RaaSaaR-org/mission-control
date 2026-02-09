@@ -12,6 +12,15 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 
+fn check_mode(kind: EntityKind, cfg: &ResolvedConfig) -> McResult<()> {
+    if !kind.available_in_mode(cfg.mode) {
+        return Err(McError::NotAvailableInMode {
+            kind: kind.label().to_string(),
+        });
+    }
+    Ok(())
+}
+
 pub fn run(entity: &NewEntity, cfg: &ResolvedConfig, yes: bool) -> McResult<()> {
     match entity {
         NewEntity::Customer {
@@ -206,6 +215,7 @@ fn new_customer(
     tags: Option<&str>,
     yes: bool,
 ) -> McResult<()> {
+    check_mode(EntityKind::Customer, cfg)?;
     let id = entity::next_id(EntityKind::Customer, cfg)?;
     let slug = util::slugify(name);
     let today = util::today_str();
@@ -307,6 +317,7 @@ fn new_project(
     tags: Option<&str>,
     yes: bool,
 ) -> McResult<()> {
+    check_mode(EntityKind::Project, cfg)?;
     let id = entity::next_id(EntityKind::Project, cfg)?;
     let slug = util::slugify(name);
     let today = util::today_str();
@@ -991,6 +1002,7 @@ pub fn create_customer_programmatic(
     status: Option<&str>,
     tags: Option<&str>,
 ) -> McResult<JsonValue> {
+    check_mode(EntityKind::Customer, cfg)?;
     let id = entity::next_id(EntityKind::Customer, cfg)?;
     let slug = util::slugify(name);
     let today = util::today_str();
@@ -1053,6 +1065,7 @@ pub fn create_project_programmatic(
     customers: Option<&str>,
     tags: Option<&str>,
 ) -> McResult<JsonValue> {
+    check_mode(EntityKind::Project, cfg)?;
     let id = entity::next_id(EntityKind::Project, cfg)?;
     let slug = util::slugify(name);
     let today = util::today_str();

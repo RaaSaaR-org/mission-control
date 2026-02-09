@@ -1,4 +1,4 @@
-use crate::config::ResolvedConfig;
+use crate::config::{RepoMode, ResolvedConfig};
 use crate::data;
 use crate::entity::{self, EntityKind};
 use crate::error::{McError, McResult};
@@ -43,8 +43,10 @@ pub fn run(cfg: &ResolvedConfig) -> McResult<()> {
 pub fn validate_programmatic(cfg: &ResolvedConfig) -> McResult<Vec<ValidationIssue>> {
     let mut issues: Vec<ValidationIssue> = Vec::new();
 
-    validate_entity_dirs(EntityKind::Customer, cfg, &mut issues)?;
-    validate_entity_dirs(EntityKind::Project, cfg, &mut issues)?;
+    if cfg.mode == RepoMode::Standalone {
+        validate_entity_dirs(EntityKind::Customer, cfg, &mut issues)?;
+        validate_entity_dirs(EntityKind::Project, cfg, &mut issues)?;
+    }
     validate_meetings(cfg, &mut issues)?;
     validate_entity_dirs(EntityKind::Research, cfg, &mut issues)?;
     validate_entity_dirs(EntityKind::Sprint, cfg, &mut issues)?;

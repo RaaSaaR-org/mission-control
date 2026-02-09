@@ -3,6 +3,15 @@ use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+/// Operating mode for a MissionControl repository.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RepoMode {
+    /// Standalone repo where the entire directory is managed by mc.
+    Standalone,
+    /// Embedded `.mc/` folder inside an existing project.
+    Embedded,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct RawConfig {
     #[allow(dead_code)]
@@ -35,6 +44,7 @@ pub struct SiteConfig {
 #[derive(Debug, Clone)]
 pub struct ResolvedConfig {
     pub root: PathBuf,
+    pub mode: RepoMode,
     pub customers_dir: PathBuf,
     pub projects_dir: PathBuf,
     pub meetings_dir: PathBuf,
@@ -84,12 +94,16 @@ pub struct StatusConfig {
     pub sprint: Vec<String>,
 }
 
-/// Walk up from `start` looking for a directory that contains `config/config.yml`.
-pub fn find_repo_root(start: &Path) -> McResult<PathBuf> {
+/// Walk up from `start` looking for a MissionControl config.
+/// Checks `.mc/config.yml` (embedded) first, then `config/config.yml` (standalone).
+pub fn find_repo_root(start: &Path) -> McResult<(PathBuf, RepoMode)> {
     let mut dir = start.to_path_buf();
     loop {
+        if dir.join(".mc").join("config.yml").is_file() {
+            return Ok((dir, RepoMode::Embedded));
+        }
         if dir.join("config").join("config.yml").is_file() {
-            return Ok(dir);
+            return Ok((dir, RepoMode::Standalone));
         }
         if !dir.pop() {
             return Err(McError::RepoRootNotFound);
@@ -97,9 +111,22 @@ pub fn find_repo_root(start: &Path) -> McResult<PathBuf> {
     }
 }
 
+/// Detect the repo mode for an explicit root path.
+pub fn detect_mode(root: &Path) -> RepoMode {
+    if root.join(".mc").join("config.yml").is_file() {
+        RepoMode::Embedded
+    } else {
+        RepoMode::Standalone
+    }
+}
+
 /// Load and resolve configuration.
-pub fn load_config(root: &Path) -> McResult<ResolvedConfig> {
-    let config_path = root.join("config").join("config.yml");
+pub fn load_config(root: &Path, mode: RepoMode) -> McResult<ResolvedConfig> {
+    let (config_path, base_dir) = match mode {
+        RepoMode::Standalone => (root.join("config").join("config.yml"), root.to_path_buf()),
+        RepoMode::Embedded => (root.join(".mc").join("config.yml"), root.join(".mc")),
+    };
+
     if !config_path.is_file() {
         return Err(McError::ConfigNotFound(config_path));
     }
@@ -114,11 +141,12 @@ pub fn load_config(root: &Path) -> McResult<ResolvedConfig> {
     let raw_brand = raw.brand;
 
     let resolve = |key: &str, default: &str| -> PathBuf {
-        root.join(paths.get(key).map(|s| s.as_str()).unwrap_or(default))
+        base_dir.join(paths.get(key).map(|s| s.as_str()).unwrap_or(default))
     };
 
     Ok(ResolvedConfig {
         root: root.to_path_buf(),
+        mode,
         customers_dir: resolve("customers", "customers/"),
         projects_dir: resolve("projects", "projects/"),
         meetings_dir: resolve("meetings", "meetings/"),
@@ -192,7 +220,7 @@ pub fn load_config(root: &Path) -> McResult<ResolvedConfig> {
                 ]
             }),
         },
-        brand: resolve_brand(root, raw_brand),
+        brand: resolve_brand(&base_dir, raw_brand),
     })
 }
 

@@ -107,6 +107,7 @@ pub enum Command {
     #[command(after_help = "\x1b[1mExamples:\x1b[0m
   mc init                            Full setup (customers, projects, meetings, etc.)
   mc init --project                  Lightweight project setup (tasks, meetings, research)
+  mc init --embedded                 Embedded .mc/ folder in an existing project
   mc init --name \"My Project\"        Set the repo name
   mc init /path/to/dir               Initialize in a specific directory
   mc -y init                         Skip prompts, use defaults
@@ -116,6 +117,10 @@ pub enum Command {
         #[arg(long)]
         project: bool,
 
+        /// Create an embedded .mc/ folder inside an existing project
+        #[arg(long)]
+        embedded: bool,
+
         /// Repository or project name
         #[arg(long)]
         name: Option<String>,
@@ -123,7 +128,7 @@ pub enum Command {
         /// Target directory (defaults to current directory)
         path: Option<String>,
 
-        /// Overwrite existing config/config.yml
+        /// Overwrite existing config
         #[arg(long)]
         force: bool,
     },

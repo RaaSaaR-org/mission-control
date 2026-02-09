@@ -2,7 +2,7 @@ use crate::cli::ListEntity;
 use crate::config::ResolvedConfig;
 use crate::data::{self, TaskFilter};
 use crate::entity::EntityKind;
-use crate::error::McResult;
+use crate::error::{McError, McResult};
 use crate::frontmatter;
 use colored::*;
 
@@ -26,6 +26,11 @@ pub fn run(entity: &ListEntity, cfg: &ResolvedConfig) -> McResult<()> {
                 ListEntity::Sprints { status, tag } => (EntityKind::Sprint, status, tag),
                 ListEntity::Tasks { .. } => unreachable!(),
             };
+            if !kind.available_in_mode(cfg.mode) {
+                return Err(McError::NotAvailableInMode {
+                    kind: kind.label().to_string(),
+                });
+            }
             list_standard(kind, cfg, status_filter, tag_filter)
         }
     }

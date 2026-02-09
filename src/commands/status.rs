@@ -1,24 +1,30 @@
-use crate::config::ResolvedConfig;
+use crate::config::{RepoMode, ResolvedConfig};
 use crate::data;
 use crate::entity::EntityKind;
 use crate::error::McResult;
 use colored::*;
 
 pub fn run(cfg: &ResolvedConfig) -> McResult<()> {
-    let customers = data::count_by_status(EntityKind::Customer, cfg)?;
-    let projects = data::count_by_status(EntityKind::Project, cfg)?;
     let meetings = data::count_by_status(EntityKind::Meeting, cfg)?;
     let research = data::count_by_status(EntityKind::Research, cfg)?;
     let tasks = data::count_by_status(EntityKind::Task, cfg)?;
     let sprints = data::count_by_status(EntityKind::Sprint, cfg)?;
 
     println!();
-    println!("  {}", "MissionControl".bold());
+    let header = match cfg.mode {
+        RepoMode::Embedded => format!("{} {}", "MissionControl", "(embedded)".dimmed()),
+        RepoMode::Standalone => "MissionControl".to_string(),
+    };
+    println!("  {}", header.bold());
     println!("  {}", "────────────────────────────────────────".dimmed());
     println!();
 
-    print_section("Customers", &customers.by_status);
-    print_section("Projects", &projects.by_status);
+    if cfg.mode == RepoMode::Standalone {
+        let customers = data::count_by_status(EntityKind::Customer, cfg)?;
+        let projects = data::count_by_status(EntityKind::Project, cfg)?;
+        print_section("Customers", &customers.by_status);
+        print_section("Projects", &projects.by_status);
+    }
     print_section("Meetings", &meetings.by_status);
     print_section("Research", &research.by_status);
     print_section("Tasks", &tasks.by_status);

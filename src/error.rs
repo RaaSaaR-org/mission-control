@@ -3,7 +3,9 @@ use thiserror::Error;
 
 #[derive(Error, Debug)]
 pub enum McError {
-    #[error("Could not find MissionControl repo root (looked for config/config.yml)")]
+    #[error(
+        "Could not find MissionControl repo root (looked for .mc/config.yml and config/config.yml)"
+    )]
     RepoRootNotFound,
 
     #[error("Config file not found: {0}")]
@@ -27,8 +29,11 @@ pub enum McError {
     #[error("Validation failed: {0} issue(s) found")]
     ValidationFailed(usize),
 
-    #[error("Already initialized: config/config.yml exists at {0}")]
+    #[error("Already initialized: config exists at {0}")]
     AlreadyInitialized(PathBuf),
+
+    #[error("{kind} entities are not available in embedded mode")]
+    NotAvailableInMode { kind: String },
 
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
@@ -60,13 +65,16 @@ impl McError {
                 "Try 'mc list customers' (or projects, meetings, research) to see available entities.".into(),
             ),
             McError::RepoRootNotFound => Some(
-                "Run mc from inside a MissionControl repo, pass --root <path>, or run 'mc init' to create a new repo.".into(),
+                "Run mc from inside a MissionControl repo, pass --root <path>, or run 'mc init' (or 'mc init --embedded') to create one.".into(),
             ),
             McError::AlreadyInitialized(_) => Some(
                 "Use --force to reinitialize, or run mc init in a different directory.".into(),
             ),
             McError::TemplateNotFound(_) => Some(
                 "Check that your templates/ directory contains the required .md templates.".into(),
+            ),
+            McError::NotAvailableInMode { .. } => Some(
+                "Embedded mode (.mc/) only supports tasks, meetings, research, and sprints. Use a standalone repo for customers and projects.".into(),
             ),
             _ => None,
         }

@@ -1,5 +1,5 @@
 use crate::commands;
-use crate::config::ResolvedConfig;
+use crate::config::{RepoMode, ResolvedConfig};
 use crate::data;
 use crate::entity::EntityKind;
 use rmcp::handler::server::tool::ToolRouter;
@@ -548,7 +548,7 @@ impl McServer {
 
     #[tool(description = "Get a status overview with entity counts and recent activity")]
     async fn get_status(&self) -> Result<CallToolResult, McpError> {
-        let kinds = [
+        let all_kinds = [
             EntityKind::Customer,
             EntityKind::Project,
             EntityKind::Meeting,
@@ -558,8 +558,12 @@ impl McServer {
         ];
 
         let mut counts = serde_json::Map::new();
+        let kinds: Vec<_> = all_kinds
+            .iter()
+            .filter(|k| k.available_in_mode(self.cfg.mode))
+            .collect();
         for kind in &kinds {
-            let sc = data::count_by_status(*kind, &self.cfg).map_err(mc_err)?;
+            let sc = data::count_by_status(**kind, &self.cfg).map_err(mc_err)?;
             let by_status: serde_json::Map<String, JsonValue> = sc
                 .by_status
                 .into_iter()
@@ -603,11 +607,22 @@ impl McServer {
 #[tool_handler]
 impl ServerHandler for McServer {
     fn get_info(&self) -> ServerInfo {
+        let mode_label = match self.cfg.mode {
+            RepoMode::Standalone => "standalone",
+            RepoMode::Embedded => "embedded",
+        };
+        let instructions = format!(
+            "MissionControl ({}) at {}. Manage {} in a git-based knowledge repository.",
+            mode_label,
+            self.cfg.root.display(),
+            match self.cfg.mode {
+                RepoMode::Standalone =>
+                    "customers, projects, meetings, research, sprints, and tasks",
+                RepoMode::Embedded => "meetings, research, sprints, and tasks",
+            }
+        );
         ServerInfo {
-            instructions: Some(
-                "MissionControl MCP server. Manage customers, projects, meetings, research, and tasks in a git-based knowledge repository."
-                    .into(),
-            ),
+            instructions: Some(instructions),
             capabilities: ServerCapabilities::builder()
                 .enable_tools()
                 .enable_resources()
@@ -621,18 +636,38 @@ impl ServerHandler for McServer {
         _request: Option<PaginatedRequestParams>,
         _context: RequestContext<RoleServer>,
     ) -> Result<ListResourcesResult, McpError> {
-        let resources = vec![
-            Annotated::new(RawResource::new("mc://config", "config"), None),
-            Annotated::new(
+        let mut resources = vec![Annotated::new(
+            RawResource::new("mc://config", "config"),
+            None,
+        )];
+
+        if self.cfg.mode == RepoMode::Standalone {
+            resources.push(Annotated::new(
                 RawResource::new("mc://entities/customers", "customers"),
                 None,
-            ),
-            Annotated::new(RawResource::new("mc://entities/projects", "projects"), None),
-            Annotated::new(RawResource::new("mc://entities/meetings", "meetings"), None),
-            Annotated::new(RawResource::new("mc://entities/research", "research"), None),
-            Annotated::new(RawResource::new("mc://entities/tasks", "tasks"), None),
-            Annotated::new(RawResource::new("mc://entities/sprints", "sprints"), None),
-        ];
+            ));
+            resources.push(Annotated::new(
+                RawResource::new("mc://entities/projects", "projects"),
+                None,
+            ));
+        }
+
+        resources.push(Annotated::new(
+            RawResource::new("mc://entities/meetings", "meetings"),
+            None,
+        ));
+        resources.push(Annotated::new(
+            RawResource::new("mc://entities/research", "research"),
+            None,
+        ));
+        resources.push(Annotated::new(
+            RawResource::new("mc://entities/tasks", "tasks"),
+            None,
+        ));
+        resources.push(Annotated::new(
+            RawResource::new("mc://entities/sprints", "sprints"),
+            None,
+        ));
 
         Ok(ListResourcesResult {
             resources,

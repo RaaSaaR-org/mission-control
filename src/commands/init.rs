@@ -392,6 +392,59 @@ priorities:
   4: low
 "#;
 
+const EMBEDDED_CONFIG: &str = r#"# MissionControl Configuration (embedded mode)
+# Stored in .mc/ alongside an existing project.
+
+site:
+  name: {name}
+  description: Project knowledge base
+
+paths:
+  meetings: meetings/
+  research: research/
+  tasks: tasks/
+  sprints: sprints/
+  data: data/
+  templates: templates/
+  archive: archive/
+
+id_prefixes:
+  meeting: MTG
+  research: RES
+  task: TASK
+  sprint: SPR
+
+statuses:
+  meeting:
+    - scheduled
+    - completed
+    - cancelled
+  research:
+    - draft
+    - in-progress
+    - final
+    - outdated
+  task:
+    - backlog
+    - todo
+    - in-progress
+    - review
+    - done
+    - cancelled
+  sprint:
+    - planning
+    - active
+    - review
+    - completed
+    - cancelled
+
+priorities:
+  1: critical
+  2: high
+  3: medium
+  4: low
+"#;
+
 // ---------------------------------------------------------------------------
 // Directory lists
 // ---------------------------------------------------------------------------
@@ -424,6 +477,17 @@ const PROJECT_DIRS: &[&str] = &[
     "archive",
 ];
 
+const EMBEDDED_DIRS: &[&str] = &[
+    "tasks/todo",
+    "tasks/done",
+    "meetings",
+    "research",
+    "sprints",
+    "templates",
+    "data",
+    "archive",
+];
+
 // ---------------------------------------------------------------------------
 // Public entry point
 // ---------------------------------------------------------------------------
@@ -431,10 +495,15 @@ const PROJECT_DIRS: &[&str] = &[
 pub fn run(
     target: &Path,
     project_mode: bool,
+    embedded: bool,
     name: Option<&str>,
     force: bool,
     yes: bool,
 ) -> McResult<()> {
+    if embedded {
+        return run_embedded(target, name, force, yes);
+    }
+
     let config_path = target.join("config").join("config.yml");
 
     // Guard: error if already initialized
@@ -580,6 +649,93 @@ pub fn run(
     Ok(())
 }
 
+fn run_embedded(target: &Path, name: Option<&str>, force: bool, yes: bool) -> McResult<()> {
+    let mc_dir = target.join(".mc");
+    let config_path = mc_dir.join("config.yml");
+
+    // Guard: error if already initialized
+    if config_path.is_file() && !force {
+        return Err(McError::AlreadyInitialized(config_path));
+    }
+
+    let default_name = target
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "Project".to_string());
+
+    let repo_name = match name {
+        Some(n) => n.to_string(),
+        None => {
+            if yes {
+                default_name.clone()
+            } else {
+                prompt_name(&default_name)?
+            }
+        }
+    };
+
+    // Print summary
+    println!();
+    println!("  {} embedded", "Mode:".bold());
+    println!("  {} {}", "Name:".bold(), repo_name);
+    println!("  {} {}", "Location:".bold(), mc_dir.display());
+    if force && config_path.is_file() {
+        println!("  {} reinitializing (--force)", "Note:".yellow().bold());
+    }
+    println!();
+
+    // Confirm
+    if !yes && !confirm("Initialize embedded .mc/ folder?")? {
+        println!("Aborted.");
+        return Ok(());
+    }
+
+    // Create directories under .mc/
+    for dir in EMBEDDED_DIRS {
+        let path = mc_dir.join(dir);
+        std::fs::create_dir_all(&path)?;
+        let gitkeep = path.join(".gitkeep");
+        if !gitkeep.exists() && is_empty_dir(&path)? {
+            std::fs::File::create(gitkeep)?;
+        }
+    }
+
+    // Write config (flat, not in config/ subdirectory)
+    std::fs::create_dir_all(&mc_dir)?;
+    let config_content = EMBEDDED_CONFIG.replace("{name}", &repo_name);
+    std::fs::write(&config_path, config_content)?;
+
+    // Write templates
+    let templates_dir = mc_dir.join("templates");
+    std::fs::create_dir_all(&templates_dir)?;
+    write_if_missing_or_force(&templates_dir.join("meeting.md"), TEMPLATE_MEETING, force)?;
+    write_if_missing_or_force(&templates_dir.join("research.md"), TEMPLATE_RESEARCH, force)?;
+    write_if_missing_or_force(&templates_dir.join("task.md"), TEMPLATE_TASK, force)?;
+    write_if_missing_or_force(&templates_dir.join("sprint.md"), TEMPLATE_SPRINT, force)?;
+
+    // Create .mc/.gitignore (only ignore generated index files)
+    write_if_missing_or_force(&mc_dir.join(".gitignore"), "data/*.json\n", force)?;
+
+    // Remove .gitkeep from directories that now have content
+    remove_gitkeep_if_nonempty(&templates_dir)?;
+
+    // Success
+    println!();
+    println!(
+        "{} MissionControl embedded folder initialized at {}",
+        "✓".green().bold(),
+        mc_dir.display()
+    );
+    println!();
+    println!("Next steps:");
+    println!("  mc status              Show repo dashboard");
+    println!("  mc new task \"...\"      Create your first task");
+    println!("  mc new meeting \"...\"   Create a meeting");
+    println!("  mc task board          Show kanban board");
+
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -641,7 +797,11 @@ mod tests {
     use tempfile::TempDir;
 
     fn run_init(dir: &Path, project_mode: bool, name: Option<&str>, force: bool) -> McResult<()> {
-        run(dir, project_mode, name, force, true)
+        run(dir, project_mode, false, name, force, true)
+    }
+
+    fn run_embedded_init(dir: &Path, name: Option<&str>, force: bool) -> McResult<()> {
+        run(dir, false, true, name, force, true)
     }
 
     #[test]
@@ -807,7 +967,7 @@ mod tests {
     }
 
     fn resolve_config_after_init(root: &Path) -> crate::config::ResolvedConfig {
-        crate::config::load_config(root).unwrap()
+        crate::config::load_config(root, crate::config::RepoMode::Standalone).unwrap()
     }
 
     #[test]
@@ -835,5 +995,119 @@ mod tests {
         assert_eq!(cfg.id_prefixes.task, "TASK");
         assert_eq!(cfg.statuses.task.len(), 6);
         assert_eq!(cfg.statuses.meeting.len(), 3);
+    }
+
+    #[test]
+    fn test_embedded_init_creates_structure() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        run_embedded_init(root, Some("EmbeddedTest"), false).unwrap();
+
+        // Config at .mc/config.yml (flat, not config/config.yml)
+        assert!(root.join(".mc/config.yml").is_file());
+        assert!(!root.join("config/config.yml").exists());
+
+        // Directories under .mc/
+        assert!(root.join(".mc/tasks/todo").is_dir());
+        assert!(root.join(".mc/tasks/done").is_dir());
+        assert!(root.join(".mc/meetings").is_dir());
+        assert!(root.join(".mc/research").is_dir());
+        assert!(root.join(".mc/sprints").is_dir());
+        assert!(root.join(".mc/templates").is_dir());
+        assert!(root.join(".mc/data").is_dir());
+        assert!(root.join(".mc/archive").is_dir());
+
+        // No standalone directories at root
+        assert!(!root.join("customers").exists());
+        assert!(!root.join("projects").exists());
+
+        // Templates: meeting, research, task, sprint
+        assert!(root.join(".mc/templates/meeting.md").is_file());
+        assert!(root.join(".mc/templates/research.md").is_file());
+        assert!(root.join(".mc/templates/task.md").is_file());
+        assert!(root.join(".mc/templates/sprint.md").is_file());
+        assert!(!root.join(".mc/templates/customer.md").exists());
+        assert!(!root.join(".mc/templates/project.md").exists());
+
+        // .mc/.gitignore exists
+        assert!(root.join(".mc/.gitignore").is_file());
+        let gitignore = std::fs::read_to_string(root.join(".mc/.gitignore")).unwrap();
+        assert!(gitignore.contains("data/*.json"));
+
+        // No .gitignore or .gitattributes at root
+        assert!(!root.join(".gitignore").exists());
+        assert!(!root.join(".gitattributes").exists());
+
+        // Config content
+        let config = std::fs::read_to_string(root.join(".mc/config.yml")).unwrap();
+        assert!(config.contains("name: EmbeddedTest"));
+        assert!(config.contains("embedded mode"));
+        assert!(!config.contains("customer"));
+    }
+
+    #[test]
+    fn test_embedded_init_config_loads() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        run_embedded_init(root, Some("LoadEmbed"), false).unwrap();
+
+        let cfg = crate::config::load_config(root, crate::config::RepoMode::Embedded).unwrap();
+        assert_eq!(cfg.mode, crate::config::RepoMode::Embedded);
+        assert_eq!(cfg.id_prefixes.task, "TASK");
+        assert_eq!(cfg.id_prefixes.sprint, "SPR");
+        assert_eq!(cfg.statuses.task.len(), 6);
+        assert_eq!(cfg.statuses.sprint.len(), 5);
+        // Paths should resolve under .mc/
+        assert!(cfg.tasks_dir.ends_with(".mc/tasks"));
+        assert!(cfg.meetings_dir.ends_with(".mc/meetings"));
+    }
+
+    #[test]
+    fn test_embedded_already_initialized_error() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        run_embedded_init(root, Some("First"), false).unwrap();
+
+        let result = run_embedded_init(root, Some("Second"), false);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            McError::AlreadyInitialized(_) => {}
+            other => panic!("Expected AlreadyInitialized, got: {other}"),
+        }
+    }
+
+    #[test]
+    fn test_embedded_force_reinitialize() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        run_embedded_init(root, Some("First"), false).unwrap();
+        run_embedded_init(root, Some("Second"), true).unwrap();
+
+        let config = std::fs::read_to_string(root.join(".mc/config.yml")).unwrap();
+        assert!(config.contains("name: Second"));
+    }
+
+    #[test]
+    fn test_find_repo_root_embedded() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        run_embedded_init(root, Some("FindTest"), false).unwrap();
+
+        let (found_root, mode) = crate::config::find_repo_root(root).unwrap();
+        assert_eq!(found_root, root);
+        assert_eq!(mode, crate::config::RepoMode::Embedded);
+    }
+
+    #[test]
+    fn test_find_repo_root_prefers_embedded() {
+        // If both .mc/config.yml and config/config.yml exist, embedded wins
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        // Create both
+        run_init(root, false, Some("Standalone"), false).unwrap();
+        run_embedded_init(root, Some("Embedded"), true).unwrap();
+
+        let (_, mode) = crate::config::find_repo_root(root).unwrap();
+        assert_eq!(mode, crate::config::RepoMode::Embedded);
     }
 }

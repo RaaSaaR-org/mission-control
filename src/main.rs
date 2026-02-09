@@ -31,6 +31,7 @@ fn run(cli: &Cli) -> McResult<()> {
     // Init is handled before config loading (config doesn't exist yet)
     if let Command::Init {
         project,
+        embedded,
         name,
         path,
         force,
@@ -40,16 +41,27 @@ fn run(cli: &Cli) -> McResult<()> {
             Some(p) => std::path::PathBuf::from(p),
             None => std::env::current_dir()?,
         };
-        return commands::init::run(&target, *project, name.as_deref(), *force, cli.yes);
+        return commands::init::run(
+            &target,
+            *project,
+            *embedded,
+            name.as_deref(),
+            *force,
+            cli.yes,
+        );
     }
 
-    // Determine repo root
-    let root = match &cli.root {
-        Some(path) => std::path::PathBuf::from(path),
+    // Determine repo root and mode
+    let (root, mode) = match &cli.root {
+        Some(path) => {
+            let r = std::path::PathBuf::from(path);
+            let m = config::detect_mode(&r);
+            (r, m)
+        }
         None => config::find_repo_root(&std::env::current_dir()?)?,
     };
 
-    let cfg = config::load_config(&root)?;
+    let cfg = config::load_config(&root, mode)?;
 
     match &cli.command {
         Command::Init { .. } => unreachable!(),

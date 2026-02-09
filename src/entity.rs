@@ -1,4 +1,4 @@
-use crate::config::ResolvedConfig;
+use crate::config::{RepoMode, ResolvedConfig};
 use crate::error::{McError, McResult};
 use crate::frontmatter;
 use regex::Regex;
@@ -70,6 +70,17 @@ impl EntityKind {
             EntityKind::Research => &cfg.statuses.research,
             EntityKind::Task => &cfg.statuses.task,
             EntityKind::Sprint => &cfg.statuses.sprint,
+        }
+    }
+
+    /// Whether this entity kind is available in the given repo mode.
+    pub fn available_in_mode(&self, mode: RepoMode) -> bool {
+        match mode {
+            RepoMode::Standalone => true,
+            RepoMode::Embedded => matches!(
+                self,
+                EntityKind::Task | EntityKind::Meeting | EntityKind::Research | EntityKind::Sprint
+            ),
         }
     }
 
