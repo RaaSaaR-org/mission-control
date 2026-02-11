@@ -24,7 +24,8 @@ pub fn run(entity: &ListEntity, cfg: &ResolvedConfig) -> McResult<()> {
                 ListEntity::Meetings { status, tag } => (EntityKind::Meeting, status, tag),
                 ListEntity::Research { status, tag } => (EntityKind::Research, status, tag),
                 ListEntity::Sprints { status, tag } => (EntityKind::Sprint, status, tag),
-                ListEntity::Tasks { .. } => unreachable!(),
+                ListEntity::Proposals { status, tag } => (EntityKind::Proposal, status, tag),
+                ListEntity::Tasks { .. } => unreachable!("Tasks handled in outer match arm"),
             };
             if !kind.available_in_mode(cfg.mode) {
                 return Err(McError::NotAvailableInMode {
@@ -38,8 +39,8 @@ pub fn run(entity: &ListEntity, cfg: &ResolvedConfig) -> McResult<()> {
 
 /// Truncate a string to `max` chars, appending "..." if needed.
 fn truncate(s: &str, max: usize) -> String {
-    if s.len() > max && max > 3 {
-        format!("{}...", &s[..max - 3])
+    if s.chars().count() > max && max > 3 {
+        format!("{}...", s.chars().take(max - 3).collect::<String>())
     } else {
         s.to_string()
     }
@@ -222,7 +223,33 @@ fn list_standard(
                 );
             }
         }
-        EntityKind::Task => unreachable!(),
+        EntityKind::Proposal => {
+            println!(
+                "  {:<10} {:<30} {:<12} {:<14} {:<12}",
+                "ID".bold(),
+                "Title".bold(),
+                "Status".bold(),
+                "Type".bold(),
+                "Author".bold()
+            );
+            println!("  {}", "─".repeat(78).dimmed());
+            for e in &entries {
+                let id = frontmatter::get_str_or(&e.frontmatter, "id", "");
+                let title = frontmatter::get_str_or(&e.frontmatter, "title", "");
+                let status = frontmatter::get_str_or(&e.frontmatter, "status", "");
+                let ptype = frontmatter::get_str_or(&e.frontmatter, "type", "");
+                let author = frontmatter::get_str_or(&e.frontmatter, "author", "");
+                println!(
+                    "  {:<10} {:<30} {:<12} {:<14} {}",
+                    id.cyan(),
+                    truncate(title, 29),
+                    format_status(status),
+                    ptype,
+                    author.dimmed()
+                );
+            }
+        }
+        EntityKind::Task => unreachable!("Tasks use list_tasks(), not list_standard()"),
     }
 
     println!(
@@ -386,12 +413,40 @@ fn list_tasks(
     Ok(())
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_truncate_ascii() {
+        assert_eq!(truncate("hello", 10), "hello");
+        assert_eq!(truncate("hello world", 8), "hello...");
+    }
+
+    #[test]
+    fn test_truncate_unicode() {
+        // Must not panic on multi-byte characters
+        assert_eq!(truncate("Übersicht GmbH", 10), "Übersic...");
+        assert_eq!(truncate("日本語テスト", 5), "日本...");
+    }
+
+    #[test]
+    fn test_truncate_edge_cases() {
+        assert_eq!(truncate("abc", 3), "abc");
+        assert_eq!(truncate("abcd", 3), "abcd"); // max <= 3 returns as-is
+        assert_eq!(truncate("", 5), "");
+    }
+}
+
 pub fn format_status(status: &str) -> colored::ColoredString {
     match status {
-        "active" | "completed" | "final" | "done" => status.green(),
-        "inactive" | "cancelled" | "churned" | "outdated" => status.red(),
-        "on-hold" | "draft" | "in-progress" | "review" | "planning" => status.yellow(),
+        "active" | "completed" | "final" | "done" | "accepted" => status.green(),
+        "inactive" | "cancelled" | "churned" | "outdated" | "rejected" | "withdrawn" => {
+            status.red()
+        }
+        "on-hold" | "draft" | "in-progress" | "review" | "planning" | "proposed" => status.yellow(),
         "prospect" | "scheduled" | "todo" => status.blue(),
+        "superseded" => status.dimmed(),
         "backlog" => status.dimmed(),
         _ => status.normal(),
     }

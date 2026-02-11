@@ -276,7 +276,7 @@ fn run_move(
     let content = std::fs::read_to_string(&old_path)?;
     let (fm_str, body) = frontmatter::split_frontmatter(&content)
         .ok_or_else(|| McError::Other("Task file has no frontmatter".into()))?;
-    let mut fm = frontmatter::parse_raw(&fm_str)?;
+    let mut fm = frontmatter::parse_raw(&fm_str, &old_path)?;
 
     // Update frontmatter fields
     frontmatter::set_str(&mut fm, "status", new_status);
@@ -293,7 +293,7 @@ fn run_move(
 
     if old_is_active == new_is_active {
         // Same folder -- just update the file in place
-        std::fs::write(&old_path, &new_doc)?;
+        util::atomic_write(&old_path, new_doc.as_bytes())?;
         println!(
             "{} {} status: {} -> {}",
             "+".green().bold(),
@@ -318,7 +318,7 @@ fn run_move(
         let new_path = target_dir.join(filename);
 
         // Write new content to target, then remove old file
-        std::fs::write(&new_path, &new_doc)?;
+        util::atomic_write(&new_path, new_doc.as_bytes())?;
         std::fs::remove_file(&old_path)?;
 
         let direction = if new_is_active {
@@ -479,6 +479,10 @@ fn run_next(cfg: &ResolvedConfig, project: Option<&str>, customer: Option<&str>)
 
 // ---------------------------------------------------------------------------
 // Programmatic move function (no prompts, no printing, returns JSON)
+//
+// Note: The rename from todo/ → done/ (or vice versa) is not atomic across
+// the status-update and file-move steps. This is fine for a single-user CLI;
+// concurrent moves of the same task are not a realistic scenario.
 // ---------------------------------------------------------------------------
 
 pub fn move_task_programmatic(
@@ -506,7 +510,7 @@ pub fn move_task_programmatic(
     let content = std::fs::read_to_string(&old_path)?;
     let (fm_str, body) = frontmatter::split_frontmatter(&content)
         .ok_or_else(|| McError::Other("Task file has no frontmatter".into()))?;
-    let mut fm = frontmatter::parse_raw(&fm_str)?;
+    let mut fm = frontmatter::parse_raw(&fm_str, &old_path)?;
 
     // Update frontmatter fields
     frontmatter::set_str(&mut fm, "status", new_status);
@@ -523,7 +527,7 @@ pub fn move_task_programmatic(
 
     let final_path = if old_is_active == new_is_active {
         // Same folder -- just update the file in place
-        std::fs::write(&old_path, &new_doc)?;
+        util::atomic_write(&old_path, new_doc.as_bytes())?;
         old_path.clone()
     } else {
         // Need to move between todo/ and done/
@@ -540,7 +544,7 @@ pub fn move_task_programmatic(
         std::fs::create_dir_all(&target_dir)?;
 
         let new_path = target_dir.join(filename);
-        std::fs::write(&new_path, &new_doc)?;
+        util::atomic_write(&new_path, new_doc.as_bytes())?;
         std::fs::remove_file(&old_path)?;
         new_path
     };
@@ -551,4 +555,152 @@ pub fn move_task_programmatic(
         "new_status": new_status,
         "path": final_path.display().to_string(),
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::commands::{init, new};
+    use crate::config;
+    use tempfile::TempDir;
+
+    fn setup_repo() -> (TempDir, config::ResolvedConfig) {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        init::run(root, false, false, Some("TestRepo"), false, true).unwrap();
+        let cfg = config::load_config(root, config::RepoMode::Standalone).unwrap();
+        (tmp, cfg)
+    }
+
+    #[test]
+    fn test_task_move_status_change() {
+        let (_tmp, cfg) = setup_repo();
+
+        // Create a task with status=todo
+        new::create_task_programmatic(
+            &cfg,
+            "Test task",
+            None,
+            None,
+            None,
+            Some("todo"),
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+
+        // Move to in-progress (stays in todo/)
+        let result = move_task_programmatic(&cfg, "TASK-001", "in-progress", None).unwrap();
+        assert_eq!(result["old_status"], "todo");
+        assert_eq!(result["new_status"], "in-progress");
+
+        // Verify frontmatter was updated
+        let path_str = result["path"].as_str().unwrap();
+        let content = std::fs::read_to_string(path_str).unwrap();
+        let (fm_str, _) = frontmatter::split_frontmatter(&content).unwrap();
+        let fm = frontmatter::parse_raw(&fm_str, std::path::Path::new(path_str)).unwrap();
+        assert_eq!(frontmatter::get_str(&fm, "status").unwrap(), "in-progress");
+    }
+
+    #[test]
+    fn test_task_move_todo_to_done_folder() {
+        let (_tmp, cfg) = setup_repo();
+
+        // Create a task (defaults to todo/)
+        new::create_task_programmatic(
+            &cfg,
+            "Finish feature",
+            None,
+            None,
+            None,
+            Some("todo"),
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+
+        let todo_path = cfg
+            .tasks_dir
+            .join("todo")
+            .join("TASK-001-finish-feature.md");
+        assert!(todo_path.is_file());
+
+        // Move to done
+        let result = move_task_programmatic(&cfg, "TASK-001", "done", None).unwrap();
+        assert_eq!(result["new_status"], "done");
+
+        // File should now be in done/, not todo/
+        assert!(!todo_path.is_file());
+        let done_path = cfg
+            .tasks_dir
+            .join("done")
+            .join("TASK-001-finish-feature.md");
+        assert!(done_path.is_file());
+
+        // Verify status in frontmatter
+        let content = std::fs::read_to_string(&done_path).unwrap();
+        let (fm_str, _) = frontmatter::split_frontmatter(&content).unwrap();
+        let fm = frontmatter::parse_raw(&fm_str, &done_path).unwrap();
+        assert_eq!(frontmatter::get_str(&fm, "status").unwrap(), "done");
+    }
+
+    #[test]
+    fn test_task_move_invalid_status() {
+        let (_tmp, cfg) = setup_repo();
+
+        new::create_task_programmatic(
+            &cfg,
+            "Test task",
+            None,
+            None,
+            None,
+            Some("todo"),
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+
+        let result = move_task_programmatic(&cfg, "TASK-001", "nonexistent", None);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("Invalid task status"));
+    }
+
+    #[test]
+    fn test_task_move_with_sprint() {
+        let (_tmp, cfg) = setup_repo();
+
+        new::create_task_programmatic(
+            &cfg,
+            "Sprint task",
+            None,
+            None,
+            None,
+            Some("backlog"),
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+
+        let result =
+            move_task_programmatic(&cfg, "TASK-001", "in-progress", Some("SPR-001")).unwrap();
+        let path_str = result["path"].as_str().unwrap();
+
+        let content = std::fs::read_to_string(path_str).unwrap();
+        let (fm_str, _) = frontmatter::split_frontmatter(&content).unwrap();
+        let fm = frontmatter::parse_raw(&fm_str, std::path::Path::new(path_str)).unwrap();
+        assert_eq!(frontmatter::get_str(&fm, "sprint").unwrap(), "SPR-001");
+    }
 }

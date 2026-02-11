@@ -17,6 +17,7 @@ pub fn layout(title: &str, active_nav: &str, body_html: &str) -> String {
         ("Research", "/research"),
         ("Tasks", "/tasks"),
         ("Sprints", "/sprints"),
+        ("Proposals", "/proposals"),
     ];
 
     let nav_links: String = nav_items
@@ -125,10 +126,10 @@ fn auto_link_entity_ids(html: &str, prefixes: &[&str]) -> String {
         .collect::<Vec<_>>()
         .join("|");
     let pattern = format!(r"\b(?:{})-\d{{3}}\b", prefix_pattern);
-    let re = Regex::new(&pattern).unwrap();
+    let re = Regex::new(&pattern).expect("regex with escaped prefixes is always valid");
 
     // Simple approach: split by <a...>...</a> tags to avoid linking inside existing links
-    let link_re = Regex::new(r"<a[^>]*>.*?</a>").unwrap();
+    let link_re = Regex::new(r"<a[^>]*>.*?</a>").expect("static regex pattern is always valid");
     let mut result = String::new();
     let mut last_end = 0;
 
@@ -761,6 +762,15 @@ pub fn board_page(tasks: &[EntityRecord]) -> String {
     layout("Task Board", "/tasks", &body)
 }
 
+/// Render a 500 error page.
+pub fn error_page(message: &str) -> String {
+    let body = format!(
+        r#"<div class="empty-state"><span class="empty-state-icon">!</span><h2>Error</h2><p>{}</p><p><a href="/">Back to Dashboard</a></p></div>"#,
+        escape_html(message)
+    );
+    layout("Error", "", &body)
+}
+
 /// Render a 404 page.
 pub fn not_found_page(path: &str) -> String {
     let body = format!(
@@ -816,4 +826,5 @@ fn escape_html(s: &str) -> String {
         .replace('<', "&lt;")
         .replace('>', "&gt;")
         .replace('"', "&quot;")
+        .replace('\'', "&#39;")
 }

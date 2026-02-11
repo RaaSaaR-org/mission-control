@@ -1,7 +1,7 @@
 use crate::config::ResolvedConfig;
 use crate::data::{self, TaskFilter};
 use crate::entity::EntityKind;
-use crate::error::McResult;
+use crate::error::{McError, McResult};
 use crate::html;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
@@ -27,6 +27,7 @@ pub fn run(cfg: &ResolvedConfig, port: u16) -> McResult<()> {
             .route("/meetings", get(handle_meetings))
             .route("/research", get(handle_research))
             .route("/sprints", get(handle_sprints))
+            .route("/proposals", get(handle_proposals))
             .route("/tasks", get(handle_tasks))
             .route("/tasks/board", get(handle_tasks_board))
             .route("/entity/{id}", get(handle_detail))
@@ -37,11 +38,19 @@ pub fn run(cfg: &ResolvedConfig, port: u16) -> McResult<()> {
         println!("MissionControl web dashboard: http://{}", addr);
         println!("Press Ctrl+C to stop.");
 
-        let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
-        axum::serve(listener, app).await.unwrap();
-    });
-
-    Ok(())
+        let listener = tokio::net::TcpListener::bind(&addr).await.map_err(|e| {
+            if e.kind() == std::io::ErrorKind::AddrInUse {
+                McError::Other(format!(
+                    "Port {} is already in use. Try a different port with: mc serve --port <PORT>",
+                    port
+                ))
+            } else {
+                McError::Io(e)
+            }
+        })?;
+        axum::serve(listener, app).await.map_err(McError::Io)?;
+        Ok(())
+    })
 }
 
 async fn handle_dashboard(State(state): State<Arc<AppState>>) -> Html<String> {
@@ -54,6 +63,7 @@ async fn handle_dashboard(State(state): State<Arc<AppState>>) -> Html<String> {
         EntityKind::Research,
         EntityKind::Task,
         EntityKind::Sprint,
+        EntityKind::Proposal,
     ];
 
     let counts: Vec<data::StatusCounts> = kinds
@@ -61,7 +71,13 @@ async fn handle_dashboard(State(state): State<Arc<AppState>>) -> Html<String> {
         .filter_map(|k| data::count_by_status(*k, cfg).ok())
         .collect();
 
-    let recent = data::recent_activity(cfg, 10).unwrap_or_default();
+    let recent = match data::recent_activity(cfg, 10) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("serve: error loading recent activity: {}", e);
+            Vec::new()
+        }
+    };
 
     Html(html::dashboard_page(&counts, &recent))
 }
@@ -69,42 +85,49 @@ async fn handle_dashboard(State(state): State<Arc<AppState>>) -> Html<String> {
 async fn handle_customers(
     State(state): State<Arc<AppState>>,
     Query(params): Query<HashMap<String, String>>,
-) -> Html<String> {
+) -> Result<Html<String>, (StatusCode, Html<String>)> {
     handle_list(EntityKind::Customer, &state.cfg, &params)
 }
 
 async fn handle_projects(
     State(state): State<Arc<AppState>>,
     Query(params): Query<HashMap<String, String>>,
-) -> Html<String> {
+) -> Result<Html<String>, (StatusCode, Html<String>)> {
     handle_list(EntityKind::Project, &state.cfg, &params)
 }
 
 async fn handle_meetings(
     State(state): State<Arc<AppState>>,
     Query(params): Query<HashMap<String, String>>,
-) -> Html<String> {
+) -> Result<Html<String>, (StatusCode, Html<String>)> {
     handle_list(EntityKind::Meeting, &state.cfg, &params)
 }
 
 async fn handle_research(
     State(state): State<Arc<AppState>>,
     Query(params): Query<HashMap<String, String>>,
-) -> Html<String> {
+) -> Result<Html<String>, (StatusCode, Html<String>)> {
     handle_list(EntityKind::Research, &state.cfg, &params)
 }
 
 async fn handle_sprints(
     State(state): State<Arc<AppState>>,
     Query(params): Query<HashMap<String, String>>,
-) -> Html<String> {
+) -> Result<Html<String>, (StatusCode, Html<String>)> {
     handle_list(EntityKind::Sprint, &state.cfg, &params)
+}
+
+async fn handle_proposals(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<HashMap<String, String>>,
+) -> Result<Html<String>, (StatusCode, Html<String>)> {
+    handle_list(EntityKind::Proposal, &state.cfg, &params)
 }
 
 async fn handle_tasks(
     State(state): State<Arc<AppState>>,
     Query(params): Query<HashMap<String, String>>,
-) -> Html<String> {
+) -> Result<Html<String>, (StatusCode, Html<String>)> {
     let cfg = &state.cfg;
     let status_filter = params
         .get("status")
@@ -121,16 +144,23 @@ async fn handle_tasks(
         owner: None,
     };
 
-    let tasks = data::collect_tasks_filtered(cfg, &filter).unwrap_or_default();
+    let tasks = data::collect_tasks_filtered(cfg, &filter).map_err(|e| {
+        eprintln!("serve: error loading tasks: {}", e);
+        error_response(&e.to_string())
+    })?;
     let valid_statuses = EntityKind::Task.statuses(cfg);
 
-    Html(html::tasks_list_page(&tasks, status_filter, valid_statuses))
+    Ok(Html(html::tasks_list_page(
+        &tasks,
+        status_filter,
+        valid_statuses,
+    )))
 }
 
 async fn handle_tasks_board(
     State(state): State<Arc<AppState>>,
     Query(params): Query<HashMap<String, String>>,
-) -> Html<String> {
+) -> Result<Html<String>, (StatusCode, Html<String>)> {
     let cfg = &state.cfg;
     let project = params
         .get("project")
@@ -155,16 +185,19 @@ async fn handle_tasks_board(
         owner: None,
     };
 
-    let tasks = data::collect_tasks_filtered(cfg, &filter).unwrap_or_default();
+    let tasks = data::collect_tasks_filtered(cfg, &filter).map_err(|e| {
+        eprintln!("serve: error loading tasks: {}", e);
+        error_response(&e.to_string())
+    })?;
 
-    Html(html::board_page(&tasks))
+    Ok(Html(html::board_page(&tasks)))
 }
 
 fn handle_list(
     kind: EntityKind,
     cfg: &ResolvedConfig,
     params: &HashMap<String, String>,
-) -> Html<String> {
+) -> Result<Html<String>, (StatusCode, Html<String>)> {
     let status_filter = params
         .get("status")
         .filter(|s| !s.is_empty())
@@ -174,17 +207,20 @@ fn handle_list(
         .filter(|s| !s.is_empty())
         .map(|s| s.as_str());
 
-    let entities = data::collect_filtered(kind, cfg, status_filter, tag_filter).unwrap_or_default();
+    let entities = data::collect_filtered(kind, cfg, status_filter, tag_filter).map_err(|e| {
+        eprintln!("serve: error loading {}: {}", kind.label_plural(), e);
+        error_response(&e.to_string())
+    })?;
 
     let valid_statuses = kind.statuses(cfg);
 
-    Html(html::list_page(
+    Ok(Html(html::list_page(
         kind.label_plural(),
         &entities,
         status_filter,
         tag_filter,
         valid_statuses,
-    ))
+    )))
 }
 
 async fn handle_detail(
@@ -202,9 +238,17 @@ async fn handle_detail(
         cfg.id_prefixes.research.as_str(),
         cfg.id_prefixes.task.as_str(),
         cfg.id_prefixes.sprint.as_str(),
+        cfg.id_prefixes.proposal.as_str(),
     ];
 
     Ok(Html(html::detail_page(&entity, &prefixes)))
+}
+
+fn error_response(message: &str) -> (StatusCode, Html<String>) {
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Html(html::error_page(message)),
+    )
 }
 
 async fn handle_404(uri: axum::http::Uri) -> Html<String> {

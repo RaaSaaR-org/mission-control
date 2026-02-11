@@ -14,8 +14,6 @@ pub enum RepoMode {
 
 #[derive(Debug, Deserialize)]
 pub struct RawConfig {
-    #[allow(dead_code)]
-    pub site: Option<SiteConfig>,
     pub paths: Option<HashMap<String, String>>,
     pub id_prefixes: Option<HashMap<String, String>>,
     pub statuses: Option<HashMap<String, Vec<String>>>,
@@ -26,18 +24,10 @@ pub struct RawConfig {
 pub struct BrandConfig {
     pub name: Option<String>,
     pub tagline: Option<String>,
-    pub logo: Option<String>,
     pub fonts_dir: Option<String>,
     pub font_name: Option<String>,
     pub primary_color: Option<Vec<u8>>,
     pub accent_color: Option<Vec<u8>>,
-}
-
-#[derive(Debug, Deserialize)]
-#[allow(dead_code)]
-pub struct SiteConfig {
-    pub name: Option<String>,
-    pub description: Option<String>,
 }
 
 /// Resolved configuration with absolute paths.
@@ -51,8 +41,7 @@ pub struct ResolvedConfig {
     pub research_dir: PathBuf,
     pub tasks_dir: PathBuf,
     pub sprints_dir: PathBuf,
-    #[allow(dead_code)]
-    pub notes_dir: PathBuf,
+    pub proposals_dir: PathBuf,
     pub data_dir: PathBuf,
     pub templates_dir: PathBuf,
     pub archive_dir: PathBuf,
@@ -66,8 +55,6 @@ pub struct ResolvedConfig {
 pub struct ResolvedBrand {
     pub name: String,
     pub tagline: String,
-    #[allow(dead_code)]
-    pub logo: Option<PathBuf>,
     pub fonts_dir: Option<PathBuf>,
     pub font_name: String,
     pub primary_color: [u8; 3],
@@ -82,6 +69,7 @@ pub struct IdPrefixes {
     pub research: String,
     pub task: String,
     pub sprint: String,
+    pub proposal: String,
 }
 
 #[derive(Debug, Clone)]
@@ -92,6 +80,7 @@ pub struct StatusConfig {
     pub research: Vec<String>,
     pub task: Vec<String>,
     pub sprint: Vec<String>,
+    pub proposal: Vec<String>,
 }
 
 /// Walk up from `start` looking for a MissionControl config.
@@ -144,7 +133,7 @@ pub fn load_config(root: &Path, mode: RepoMode) -> McResult<ResolvedConfig> {
         base_dir.join(paths.get(key).map(|s| s.as_str()).unwrap_or(default))
     };
 
-    Ok(ResolvedConfig {
+    let resolved = ResolvedConfig {
         root: root.to_path_buf(),
         mode,
         customers_dir: resolve("customers", "customers/"),
@@ -153,7 +142,7 @@ pub fn load_config(root: &Path, mode: RepoMode) -> McResult<ResolvedConfig> {
         research_dir: resolve("research", "research/"),
         tasks_dir: resolve("tasks", "tasks/"),
         sprints_dir: resolve("sprints", "sprints/"),
-        notes_dir: resolve("notes", "notes/"),
+        proposals_dir: resolve("proposals", "proposals/"),
         data_dir: resolve("data", "data/"),
         templates_dir: resolve("templates", "templates/"),
         archive_dir: resolve("archive", "archive/"),
@@ -182,6 +171,10 @@ pub fn load_config(root: &Path, mode: RepoMode) -> McResult<ResolvedConfig> {
                 .get("sprint")
                 .cloned()
                 .unwrap_or_else(|| "SPR".into()),
+            proposal: prefixes
+                .get("proposal")
+                .cloned()
+                .unwrap_or_else(|| "PROP".into()),
         },
         statuses: StatusConfig {
             customer: statuses
@@ -219,9 +212,84 @@ pub fn load_config(root: &Path, mode: RepoMode) -> McResult<ResolvedConfig> {
                     "cancelled".into(),
                 ]
             }),
+            proposal: statuses.get("proposal").cloned().unwrap_or_else(|| {
+                vec![
+                    "draft".into(),
+                    "proposed".into(),
+                    "accepted".into(),
+                    "rejected".into(),
+                    "superseded".into(),
+                    "withdrawn".into(),
+                ]
+            }),
         },
         brand: resolve_brand(&base_dir, raw_brand),
-    })
+    };
+
+    validate_status_config(&resolved.statuses)?;
+
+    Ok(resolved)
+}
+
+fn validate_status_config(statuses: &StatusConfig) -> McResult<()> {
+    let checks = [
+        ("customer", &statuses.customer),
+        ("project", &statuses.project),
+        ("meeting", &statuses.meeting),
+        ("research", &statuses.research),
+        ("task", &statuses.task),
+        ("sprint", &statuses.sprint),
+        ("proposal", &statuses.proposal),
+    ];
+    for (name, list) in checks {
+        if list.is_empty() {
+            return Err(McError::ConfigParse(format!(
+                "statuses.{} must not be empty",
+                name
+            )));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn default_statuses() -> StatusConfig {
+        StatusConfig {
+            customer: vec!["active".into()],
+            project: vec!["active".into()],
+            meeting: vec!["scheduled".into()],
+            research: vec!["draft".into()],
+            task: vec!["todo".into()],
+            sprint: vec!["planning".into()],
+            proposal: vec!["draft".into()],
+        }
+    }
+
+    #[test]
+    fn test_valid_statuses_pass() {
+        assert!(validate_status_config(&default_statuses()).is_ok());
+    }
+
+    #[test]
+    fn test_empty_customer_statuses_rejected() {
+        let mut s = default_statuses();
+        s.customer = vec![];
+        let err = validate_status_config(&s).unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("statuses.customer must not be empty"));
+    }
+
+    #[test]
+    fn test_empty_task_statuses_rejected() {
+        let mut s = default_statuses();
+        s.task = vec![];
+        let err = validate_status_config(&s).unwrap_err();
+        assert!(err.to_string().contains("statuses.task must not be empty"));
+    }
 }
 
 fn resolve_brand(root: &Path, raw: Option<BrandConfig>) -> ResolvedBrand {
@@ -235,12 +303,10 @@ fn resolve_brand(root: &Path, raw: Option<BrandConfig>) -> ResolvedBrand {
 
     match raw {
         Some(b) => {
-            let logo = b.logo.map(|p| root.join(p)).filter(|p| p.is_file());
             let fonts_dir = b.fonts_dir.map(|p| root.join(p)).filter(|p| p.is_dir());
             ResolvedBrand {
                 name: b.name.unwrap_or_else(|| "MissionControl".into()),
                 tagline: b.tagline.unwrap_or_default(),
-                logo,
                 fonts_dir,
                 font_name: b.font_name.unwrap_or_else(|| "LiberationSans".into()),
                 primary_color: b
@@ -258,7 +324,6 @@ fn resolve_brand(root: &Path, raw: Option<BrandConfig>) -> ResolvedBrand {
         None => ResolvedBrand {
             name: "MissionControl".into(),
             tagline: String::new(),
-            logo: None,
             fonts_dir: None,
             font_name: "LiberationSans".into(),
             primary_color: [0, 82, 155],

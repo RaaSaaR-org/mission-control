@@ -74,7 +74,7 @@ impl McError {
                 "Check that your templates/ directory contains the required .md templates.".into(),
             ),
             McError::NotAvailableInMode { .. } => Some(
-                "Embedded mode (.mc/) only supports tasks, meetings, research, and sprints. Use a standalone repo for customers and projects.".into(),
+                "Embedded mode (.mc/) only supports tasks, meetings, research, sprints, and proposals. Use a standalone repo for customers and projects.".into(),
             ),
             _ => None,
         }

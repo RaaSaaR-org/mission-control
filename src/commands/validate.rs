@@ -50,6 +50,7 @@ pub fn validate_programmatic(cfg: &ResolvedConfig) -> McResult<Vec<ValidationIss
     validate_meetings(cfg, &mut issues)?;
     validate_entity_dirs(EntityKind::Research, cfg, &mut issues)?;
     validate_entity_dirs(EntityKind::Sprint, cfg, &mut issues)?;
+    validate_proposals(cfg, &mut issues)?;
     validate_tasks(cfg, &mut issues)?;
 
     Ok(issues)
@@ -72,7 +73,7 @@ fn validate_entity_dirs(
         r"^{}-\d{{3}}-[a-z0-9]+(-[a-z0-9]+)*$",
         regex::escape(prefix)
     ))
-    .unwrap();
+    .expect("regex with escaped prefix is always valid");
 
     for entry in std::fs::read_dir(base)? {
         let entry = entry?;
@@ -121,7 +122,8 @@ fn validate_meetings(cfg: &ResolvedConfig, issues: &mut Vec<ValidationIssue>) ->
         return Ok(());
     }
 
-    let filename_re = Regex::new(r"^\d{4}-\d{2}-\d{2}-.+\.md$").unwrap();
+    let filename_re =
+        Regex::new(r"^\d{4}-\d{2}-\d{2}-.+\.md$").expect("static regex pattern is always valid");
 
     for entry in WalkDir::new(base)
         .max_depth(1)
@@ -133,7 +135,10 @@ fn validate_meetings(cfg: &ResolvedConfig, issues: &mut Vec<ValidationIssue>) ->
             continue;
         }
 
-        let filename = path.file_name().unwrap().to_string_lossy().to_string();
+        let Some(fname) = path.file_name() else {
+            continue;
+        };
+        let filename = fname.to_string_lossy().to_string();
 
         // Check meeting filename pattern
         if !filename_re.is_match(&filename) {
@@ -156,6 +161,51 @@ fn validate_meetings(cfg: &ResolvedConfig, issues: &mut Vec<ValidationIssue>) ->
     Ok(())
 }
 
+fn validate_proposals(cfg: &ResolvedConfig, issues: &mut Vec<ValidationIssue>) -> McResult<()> {
+    let base = &cfg.proposals_dir;
+    if !base.is_dir() {
+        return Ok(());
+    }
+
+    let prefix = &cfg.id_prefixes.proposal;
+    let filename_re = Regex::new(&format!(
+        r"^{}-\d{{3}}-[a-z0-9]+(-[a-z0-9]+)*\.md$",
+        regex::escape(prefix)
+    ))
+    .expect("regex with escaped prefix is always valid");
+
+    for entry in WalkDir::new(base)
+        .max_depth(1)
+        .into_iter()
+        .filter_map(|e| e.ok())
+    {
+        let path = entry.path();
+        if path.is_dir() || path.extension().is_none_or(|e| e != "md") {
+            continue;
+        }
+
+        let Some(fname) = path.file_name() else {
+            continue;
+        };
+        let filename = fname.to_string_lossy().to_string();
+
+        if !filename_re.is_match(&filename) {
+            issues.push(ValidationIssue {
+                path: filename.clone(),
+                check: "proposal-filename".into(),
+                message: format!(
+                    "Proposal filename does not match {}-NNN-slug.md pattern",
+                    prefix
+                ),
+            });
+        }
+
+        validate_frontmatter_file(path, EntityKind::Proposal, prefix, cfg, issues);
+    }
+
+    Ok(())
+}
+
 /// Validate all task files across all locations.
 fn validate_tasks(cfg: &ResolvedConfig, issues: &mut Vec<ValidationIssue>) -> McResult<()> {
     let locations = entity::collect_all_task_dirs(cfg);
@@ -164,7 +214,7 @@ fn validate_tasks(cfg: &ResolvedConfig, issues: &mut Vec<ValidationIssue>) -> Mc
         r"^{}-\d{{3}}-[a-z0-9]+(-[a-z0-9]+)*\.md$",
         regex::escape(prefix)
     ))
-    .unwrap();
+    .expect("regex with escaped prefix is always valid");
 
     let active_statuses = ["backlog", "todo", "in-progress", "review"];
     let finished_statuses = ["done", "cancelled"];
@@ -209,7 +259,10 @@ fn validate_tasks(cfg: &ResolvedConfig, issues: &mut Vec<ValidationIssue>) -> Mc
                         continue;
                     }
 
-                    let filename = path.file_name().unwrap().to_string_lossy().to_string();
+                    let Some(fname) = path.file_name() else {
+                        continue;
+                    };
+                    let filename = fname.to_string_lossy().to_string();
 
                     // Check filename pattern
                     if !filename_re.is_match(&filename) {
@@ -266,7 +319,7 @@ fn validate_task_frontmatter_file(
         }
     };
 
-    let fm = match frontmatter::parse_raw(&fm_str) {
+    let fm = match frontmatter::parse_raw(&fm_str, path) {
         Ok(v) => v,
         Err(_) => {
             issues.push(ValidationIssue {
@@ -396,7 +449,7 @@ fn validate_frontmatter_file(
     };
 
     // Check 3: YAML validity
-    let fm = match frontmatter::parse_raw(&fm_str) {
+    let fm = match frontmatter::parse_raw(&fm_str, path) {
         Ok(v) => v,
         Err(_) => {
             issues.push(ValidationIssue {
@@ -436,9 +489,11 @@ fn validate_frontmatter_file(
     // Check 6: required name/title field
     let has_name = match kind {
         EntityKind::Customer | EntityKind::Project => frontmatter::get_str(&fm, "name").is_some(),
-        EntityKind::Meeting | EntityKind::Research | EntityKind::Task | EntityKind::Sprint => {
-            frontmatter::get_str(&fm, "title").is_some()
-        }
+        EntityKind::Meeting
+        | EntityKind::Research
+        | EntityKind::Task
+        | EntityKind::Sprint
+        | EntityKind::Proposal => frontmatter::get_str(&fm, "title").is_some(),
     };
     if !has_name {
         let field = match kind {
@@ -469,7 +524,11 @@ fn validate_frontmatter_file(
     }
 
     // Check 8: slug consistency (for directory-based entities)
-    if kind != EntityKind::Meeting && kind != EntityKind::Task && kind != EntityKind::Sprint {
+    if kind != EntityKind::Meeting
+        && kind != EntityKind::Task
+        && kind != EntityKind::Sprint
+        && kind != EntityKind::Proposal
+    {
         if let Some(slug) = frontmatter::get_str(&fm, "slug") {
             // Check that the parent directory contains the slug
             if let Some(parent) = path.parent() {

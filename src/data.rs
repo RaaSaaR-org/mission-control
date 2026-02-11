@@ -76,7 +76,7 @@ pub fn collect_entities(kind: EntityKind, cfg: &ResolvedConfig) -> McResult<Vec<
 
         if let Ok(content) = std::fs::read_to_string(path) {
             if let Some((fm_str, body)) = frontmatter::split_frontmatter(&content) {
-                if let Ok(fm) = frontmatter::parse_raw(&fm_str) {
+                if let Ok(fm) = frontmatter::parse_raw(&fm_str, path) {
                     if let Some(id) = frontmatter::get_str(&fm, "id") {
                         if id.starts_with(&id_prefix) && seen_ids.insert(id.to_string()) {
                             records.push(EntityRecord {
@@ -118,7 +118,7 @@ pub fn collect_tasks(cfg: &ResolvedConfig) -> McResult<Vec<EntityRecord>> {
                     }
                     if let Ok(content) = std::fs::read_to_string(&path) {
                         if let Some((fm_str, body)) = frontmatter::split_frontmatter(&content) {
-                            if let Ok(fm) = frontmatter::parse_raw(&fm_str) {
+                            if let Ok(fm) = frontmatter::parse_raw(&fm_str, &path) {
                                 if let Some(id) = frontmatter::get_str(&fm, "id") {
                                     if id.starts_with(&id_prefix) && seen_ids.insert(id.to_string())
                                     {
@@ -217,7 +217,7 @@ pub fn find_entity_by_id(id: &str, cfg: &ResolvedConfig) -> McResult<EntityRecor
         }
         if let Ok(content) = std::fs::read_to_string(path) {
             if let Some((fm_str, body)) = frontmatter::split_frontmatter(&content) {
-                if let Ok(fm) = frontmatter::parse_raw(&fm_str) {
+                if let Ok(fm) = frontmatter::parse_raw(&fm_str, path) {
                     if frontmatter::get_str(&fm, "id") == Some(id) {
                         return Ok(EntityRecord {
                             kind,
@@ -253,7 +253,7 @@ fn find_task_by_id(id: &str, cfg: &ResolvedConfig) -> McResult<EntityRecord> {
                     }
                     if let Ok(content) = std::fs::read_to_string(&path) {
                         if let Some((fm_str, body)) = frontmatter::split_frontmatter(&content) {
-                            if let Ok(fm) = frontmatter::parse_raw(&fm_str) {
+                            if let Ok(fm) = frontmatter::parse_raw(&fm_str, &path) {
                                 if frontmatter::get_str(&fm, "id") == Some(id) {
                                     return Ok(EntityRecord {
                                         kind: EntityKind::Task,
@@ -331,7 +331,7 @@ pub fn count_by_status(kind: EntityKind, cfg: &ResolvedConfig) -> McResult<Statu
 
             if let Ok(content) = std::fs::read_to_string(path) {
                 if let Some((fm_str, _)) = frontmatter::split_frontmatter(&content) {
-                    if let Ok(fm) = frontmatter::parse_raw(&fm_str) {
+                    if let Ok(fm) = frontmatter::parse_raw(&fm_str, path) {
                         if let Some(id) = frontmatter::get_str(&fm, "id") {
                             if id.starts_with(&id_prefix) && seen_ids.insert(id.to_string()) {
                                 let status = frontmatter::get_str(&fm, "status")
@@ -391,6 +391,7 @@ pub fn recent_activity(cfg: &ResolvedConfig, limit: usize) -> McResult<Vec<Recen
         &cfg.research_dir,
         &cfg.tasks_dir,
         &cfg.sprints_dir,
+        &cfg.proposals_dir,
     ];
 
     for dir in &dirs {
@@ -406,7 +407,7 @@ pub fn recent_activity(cfg: &ResolvedConfig, limit: usize) -> McResult<Vec<Recen
                 if let Ok(modified) = meta.modified() {
                     let (id, name) = if let Ok(content) = std::fs::read_to_string(path) {
                         if let Some((fm_str, _)) = frontmatter::split_frontmatter(&content) {
-                            if let Ok(fm) = frontmatter::parse_raw(&fm_str) {
+                            if let Ok(fm) = frontmatter::parse_raw(&fm_str, path) {
                                 let id = frontmatter::get_str(&fm, "id").unwrap_or("").to_string();
                                 let name = frontmatter::get_str(&fm, "name")
                                     .or_else(|| frontmatter::get_str(&fm, "title"))
@@ -478,5 +479,166 @@ pub fn yaml_to_json(yaml: &Value) -> JsonValue {
             JsonValue::Object(obj)
         }
         Value::Tagged(tagged) => yaml_to_json(&tagged.value),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::commands::{init, new};
+    use crate::config;
+    use tempfile::TempDir;
+
+    fn setup_repo() -> (TempDir, config::ResolvedConfig) {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        init::run(root, false, false, Some("TestRepo"), false, true).unwrap();
+        let cfg = config::load_config(root, config::RepoMode::Standalone).unwrap();
+        (tmp, cfg)
+    }
+
+    #[test]
+    fn test_collect_entities_empty_repo() {
+        let (_tmp, cfg) = setup_repo();
+
+        let customers = collect_entities(EntityKind::Customer, &cfg).unwrap();
+        assert!(customers.is_empty());
+
+        let tasks = collect_tasks(&cfg).unwrap();
+        assert!(tasks.is_empty());
+    }
+
+    #[test]
+    fn test_collect_entities_after_creation() {
+        let (_tmp, cfg) = setup_repo();
+
+        new::create_customer_programmatic(&cfg, "Acme", None, Some("active"), None).unwrap();
+        new::create_customer_programmatic(&cfg, "Beta Corp", None, Some("active"), None).unwrap();
+
+        let customers = collect_entities(EntityKind::Customer, &cfg).unwrap();
+        assert_eq!(customers.len(), 2);
+    }
+
+    #[test]
+    fn test_collect_tasks_after_creation() {
+        let (_tmp, cfg) = setup_repo();
+
+        new::create_task_programmatic(
+            &cfg,
+            "Task A",
+            None,
+            None,
+            None,
+            Some("todo"),
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        new::create_task_programmatic(
+            &cfg,
+            "Task B",
+            None,
+            None,
+            None,
+            Some("backlog"),
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+
+        let tasks = collect_tasks(&cfg).unwrap();
+        assert_eq!(tasks.len(), 2);
+    }
+
+    #[test]
+    fn test_collect_tasks_filtered_by_status() {
+        let (_tmp, cfg) = setup_repo();
+
+        new::create_task_programmatic(
+            &cfg,
+            "Task A",
+            None,
+            None,
+            None,
+            Some("todo"),
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        new::create_task_programmatic(
+            &cfg,
+            "Task B",
+            None,
+            None,
+            None,
+            Some("backlog"),
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+
+        let filter = TaskFilter {
+            status: Some("todo"),
+            tag: None,
+            project: None,
+            customer: None,
+            priority: None,
+            sprint: None,
+            owner: None,
+        };
+        let filtered = collect_tasks_filtered(&cfg, &filter).unwrap();
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].id, "TASK-001");
+    }
+
+    #[test]
+    fn test_find_entity_by_id() {
+        let (_tmp, cfg) = setup_repo();
+
+        new::create_customer_programmatic(&cfg, "Acme", None, Some("active"), None).unwrap();
+
+        let entity = find_entity_by_id("CUST-001", &cfg).unwrap();
+        assert_eq!(entity.id, "CUST-001");
+        assert_eq!(entity.kind, EntityKind::Customer);
+    }
+
+    #[test]
+    fn test_find_entity_by_id_not_found() {
+        let (_tmp, cfg) = setup_repo();
+
+        let result = find_entity_by_id("CUST-999", &cfg);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_count_by_status() {
+        let (_tmp, cfg) = setup_repo();
+
+        new::create_customer_programmatic(&cfg, "Acme", None, Some("active"), None).unwrap();
+        new::create_customer_programmatic(&cfg, "Beta", None, Some("active"), None).unwrap();
+        new::create_customer_programmatic(&cfg, "Gamma", None, Some("inactive"), None).unwrap();
+
+        let counts = count_by_status(EntityKind::Customer, &cfg).unwrap();
+        assert_eq!(counts.total, 3);
+        assert!(counts
+            .by_status
+            .iter()
+            .any(|(s, c)| s == "active" && *c == 2));
+        assert!(counts
+            .by_status
+            .iter()
+            .any(|(s, c)| s == "inactive" && *c == 1));
     }
 }

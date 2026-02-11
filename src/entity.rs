@@ -6,7 +6,7 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
-/// The six entity kinds managed by MissionControl.
+/// The seven entity kinds managed by MissionControl.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EntityKind {
     Customer,
@@ -15,6 +15,7 @@ pub enum EntityKind {
     Research,
     Task,
     Sprint,
+    Proposal,
 }
 
 impl EntityKind {
@@ -26,6 +27,7 @@ impl EntityKind {
             EntityKind::Research => "research",
             EntityKind::Task => "task",
             EntityKind::Sprint => "sprint",
+            EntityKind::Proposal => "proposal",
         }
     }
 
@@ -37,6 +39,7 @@ impl EntityKind {
             EntityKind::Research => "research",
             EntityKind::Task => "tasks",
             EntityKind::Sprint => "sprints",
+            EntityKind::Proposal => "proposals",
         }
     }
 
@@ -48,6 +51,7 @@ impl EntityKind {
             EntityKind::Research => &cfg.id_prefixes.research,
             EntityKind::Task => &cfg.id_prefixes.task,
             EntityKind::Sprint => &cfg.id_prefixes.sprint,
+            EntityKind::Proposal => &cfg.id_prefixes.proposal,
         }
     }
 
@@ -59,6 +63,7 @@ impl EntityKind {
             EntityKind::Research => &cfg.research_dir,
             EntityKind::Task => &cfg.tasks_dir,
             EntityKind::Sprint => &cfg.sprints_dir,
+            EntityKind::Proposal => &cfg.proposals_dir,
         }
     }
 
@@ -70,6 +75,7 @@ impl EntityKind {
             EntityKind::Research => &cfg.statuses.research,
             EntityKind::Task => &cfg.statuses.task,
             EntityKind::Sprint => &cfg.statuses.sprint,
+            EntityKind::Proposal => &cfg.statuses.proposal,
         }
     }
 
@@ -79,7 +85,11 @@ impl EntityKind {
             RepoMode::Standalone => true,
             RepoMode::Embedded => matches!(
                 self,
-                EntityKind::Task | EntityKind::Meeting | EntityKind::Research | EntityKind::Sprint
+                EntityKind::Task
+                    | EntityKind::Meeting
+                    | EntityKind::Research
+                    | EntityKind::Sprint
+                    | EntityKind::Proposal
             ),
         }
     }
@@ -92,6 +102,7 @@ impl EntityKind {
             "research" => Ok(EntityKind::Research),
             "task" | "tasks" => Ok(EntityKind::Task),
             "sprint" | "sprints" => Ok(EntityKind::Sprint),
+            "proposal" | "proposals" | "prop" => Ok(EntityKind::Proposal),
             _ => Err(McError::Other(format!("Unknown entity kind: {s}"))),
         }
     }
@@ -110,9 +121,11 @@ impl EntityKind {
             Ok(EntityKind::Task)
         } else if id.starts_with(&format!("{}-", cfg.id_prefixes.sprint)) {
             Ok(EntityKind::Sprint)
+        } else if id.starts_with(&format!("{}-", cfg.id_prefixes.proposal)) {
+            Ok(EntityKind::Proposal)
         } else {
             Err(McError::InvalidId(format!(
-                "{} (expected format like {}-001, {}-002, {}-003, {}-001, {}-001, or {}-001)",
+                "{} (expected format like {}-001, {}-002, {}-003, {}-001, {}-001, {}-001, or {}-001)",
                 id,
                 cfg.id_prefixes.customer,
                 cfg.id_prefixes.project,
@@ -120,6 +133,7 @@ impl EntityKind {
                 cfg.id_prefixes.research,
                 cfg.id_prefixes.task,
                 cfg.id_prefixes.sprint,
+                cfg.id_prefixes.proposal,
             )))
         }
     }
@@ -158,11 +172,8 @@ impl fmt::Display for EntityId {
 }
 
 /// A task location discovered on disk.
-#[allow(dead_code)]
 pub struct TaskLocation {
     pub tasks_dir: PathBuf,
-    pub project_id: Option<String>,
-    pub customer_id: Option<String>,
 }
 
 /// Collect all directories that can contain tasks:
@@ -173,8 +184,6 @@ pub fn collect_all_task_dirs(cfg: &ResolvedConfig) -> Vec<TaskLocation> {
     // Global tasks dir
     locations.push(TaskLocation {
         tasks_dir: cfg.tasks_dir.clone(),
-        project_id: None,
-        customer_id: None,
     });
 
     // Project-scoped tasks
@@ -182,13 +191,9 @@ pub fn collect_all_task_dirs(cfg: &ResolvedConfig) -> Vec<TaskLocation> {
         if let Ok(entries) = std::fs::read_dir(&cfg.projects_dir) {
             for entry in entries.filter_map(|e| e.ok()) {
                 if entry.file_type().is_ok_and(|ft| ft.is_dir()) {
-                    let dir_name = entry.file_name().to_string_lossy().to_string();
-                    let proj_id = extract_id_from_dirname(&dir_name, &cfg.id_prefixes.project);
                     let tasks_subdir = entry.path().join("tasks");
                     locations.push(TaskLocation {
                         tasks_dir: tasks_subdir,
-                        project_id: proj_id,
-                        customer_id: None,
                     });
                 }
             }
@@ -200,13 +205,9 @@ pub fn collect_all_task_dirs(cfg: &ResolvedConfig) -> Vec<TaskLocation> {
         if let Ok(entries) = std::fs::read_dir(&cfg.customers_dir) {
             for entry in entries.filter_map(|e| e.ok()) {
                 if entry.file_type().is_ok_and(|ft| ft.is_dir()) {
-                    let dir_name = entry.file_name().to_string_lossy().to_string();
-                    let cust_id = extract_id_from_dirname(&dir_name, &cfg.id_prefixes.customer);
                     let tasks_subdir = entry.path().join("tasks");
                     locations.push(TaskLocation {
                         tasks_dir: tasks_subdir,
-                        project_id: None,
-                        customer_id: cust_id,
                     });
                 }
             }
@@ -216,23 +217,22 @@ pub fn collect_all_task_dirs(cfg: &ResolvedConfig) -> Vec<TaskLocation> {
     locations
 }
 
-/// Extract an entity ID (e.g. "PROJ-001") from a directory name like "PROJ-001-robot-arm".
-fn extract_id_from_dirname(dirname: &str, prefix: &str) -> Option<String> {
-    let re = Regex::new(&format!(r"^({})-(\d{{3}})", regex::escape(prefix))).unwrap();
-    re.captures(dirname)
-        .map(|caps| format!("{}-{}", &caps[1], &caps[2]))
-}
-
 /// Scan for the next available ID for a given entity kind.
 /// For directory-based entities (Customer, Project, Research): scan directory names.
 /// For meetings: scan frontmatter `id` fields.
 /// For tasks: scan all task locations (both `todo/` and `done/` subfolders).
 /// Always returns max+1 (no gap-filling).
+///
+/// Note: There is a theoretical TOCTOU race between reading the max ID and
+/// writing the new entity. This is acceptable for a single-user CLI — the
+/// window is microseconds and adding file locking (e.g. `fs2`/`flock`) would
+/// introduce cross-platform complexity for zero practical benefit.
 pub fn next_id(kind: EntityKind, cfg: &ResolvedConfig) -> McResult<EntityId> {
     let prefix = kind.prefix(cfg);
     let mut max_num: u32 = 0;
 
-    let id_re = Regex::new(&format!(r"^{}-(\d+)", regex::escape(prefix))).unwrap();
+    let id_re = Regex::new(&format!(r"^{}-(\d+)", regex::escape(prefix)))
+        .expect("regex with escaped prefix is always valid");
 
     match kind {
         EntityKind::Customer | EntityKind::Project | EntityKind::Research | EntityKind::Sprint => {
@@ -253,16 +253,16 @@ pub fn next_id(kind: EntityKind, cfg: &ResolvedConfig) -> McResult<EntityId> {
                 }
             }
         }
-        EntityKind::Meeting => {
+        EntityKind::Meeting | EntityKind::Proposal => {
             let base = kind.base_dir(cfg);
-            // Scan frontmatter id fields in meeting .md files
+            // Scan frontmatter id fields in .md files
             if base.is_dir() {
                 for entry in WalkDir::new(base).into_iter().filter_map(|e| e.ok()) {
                     let path = entry.path();
                     if path.extension().is_some_and(|e| e == "md") {
                         if let Ok(content) = std::fs::read_to_string(path) {
                             if let Some((fm_str, _)) = frontmatter::split_frontmatter(&content) {
-                                if let Ok(val) = frontmatter::parse_raw(&fm_str) {
+                                if let Ok(val) = frontmatter::parse_raw(&fm_str, path) {
                                     if let Some(id_val) = frontmatter::get_str(&val, "id") {
                                         if let Some(caps) = id_re.captures(id_val) {
                                             if let Ok(n) = caps[1].parse::<u32>() {

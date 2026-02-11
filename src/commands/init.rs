@@ -206,6 +206,35 @@ updated: "YYYY-MM-DD"
 <!-- General sprint notes and decisions -->
 "#;
 
+const TEMPLATE_PROPOSAL: &str = r#"---
+id: "PROP-NNN"
+title: ""
+status: "draft"           # draft | proposed | accepted | rejected | superseded | withdrawn
+type: "architecture"      # architecture | feature | process
+author: ""
+supersedes: ""            # optional, e.g. "PROP-003"
+superseded_by: ""         # optional
+tags: []
+created: "YYYY-MM-DD"
+updated: "YYYY-MM-DD"
+---
+
+# {{ title }}
+
+## Context
+<!-- What problem or situation prompted this proposal? -->
+
+## Options Considered
+### Option 1
+### Option 2
+
+## Decision
+<!-- What was decided and why? -->
+
+## Consequences
+<!-- Implications — positive and negative -->
+"#;
+
 // ---------------------------------------------------------------------------
 // Embedded repo files
 // ---------------------------------------------------------------------------
@@ -292,6 +321,7 @@ paths:
   research: research/
   tasks: tasks/
   sprints: sprints/
+  proposals: proposals/
   notes: notes/
   data: data/
   templates: templates/
@@ -305,6 +335,7 @@ id_prefixes:
   research: RES
   task: TASK
   sprint: SPR
+  proposal: PROP
 
 statuses:
   customer:
@@ -339,6 +370,13 @@ statuses:
     - review
     - completed
     - cancelled
+  proposal:
+    - draft
+    - proposed
+    - accepted
+    - rejected
+    - superseded
+    - withdrawn
 
 priorities:
   1: critical
@@ -358,6 +396,7 @@ paths:
   meetings: meetings/
   research: research/
   tasks: tasks/
+  proposals: proposals/
   data: data/
   templates: templates/
   archive: archive/
@@ -366,6 +405,7 @@ id_prefixes:
   meeting: MTG
   research: RES
   task: TASK
+  proposal: PROP
 
 statuses:
   meeting:
@@ -384,6 +424,13 @@ statuses:
     - review
     - done
     - cancelled
+  proposal:
+    - draft
+    - proposed
+    - accepted
+    - rejected
+    - superseded
+    - withdrawn
 
 priorities:
   1: critical
@@ -404,6 +451,7 @@ paths:
   research: research/
   tasks: tasks/
   sprints: sprints/
+  proposals: proposals/
   data: data/
   templates: templates/
   archive: archive/
@@ -413,6 +461,7 @@ id_prefixes:
   research: RES
   task: TASK
   sprint: SPR
+  proposal: PROP
 
 statuses:
   meeting:
@@ -437,6 +486,13 @@ statuses:
     - review
     - completed
     - cancelled
+  proposal:
+    - draft
+    - proposed
+    - accepted
+    - rejected
+    - superseded
+    - withdrawn
 
 priorities:
   1: critical
@@ -458,6 +514,7 @@ const FULL_DIRS: &[&str] = &[
     "tasks/todo",
     "tasks/done",
     "sprints",
+    "proposals",
     "notes/how-tos",
     "notes/playbooks",
     "data",
@@ -472,6 +529,7 @@ const PROJECT_DIRS: &[&str] = &[
     "tasks/done",
     "meetings",
     "research",
+    "proposals",
     "templates",
     "data",
     "archive",
@@ -483,6 +541,7 @@ const EMBEDDED_DIRS: &[&str] = &[
     "meetings",
     "research",
     "sprints",
+    "proposals",
     "templates",
     "data",
     "archive",
@@ -576,18 +635,20 @@ pub fn run(
     std::fs::create_dir_all(&templates_dir)?;
 
     if project_mode {
-        // Project-only: meeting, research, task
+        // Project-only: meeting, research, task, proposal
         write_if_missing_or_force(&templates_dir.join("meeting.md"), TEMPLATE_MEETING, force)?;
         write_if_missing_or_force(&templates_dir.join("research.md"), TEMPLATE_RESEARCH, force)?;
         write_if_missing_or_force(&templates_dir.join("task.md"), TEMPLATE_TASK, force)?;
+        write_if_missing_or_force(&templates_dir.join("proposal.md"), TEMPLATE_PROPOSAL, force)?;
     } else {
-        // Full: all 6 templates
+        // Full: all 7 templates
         write_if_missing_or_force(&templates_dir.join("customer.md"), TEMPLATE_CUSTOMER, force)?;
         write_if_missing_or_force(&templates_dir.join("project.md"), TEMPLATE_PROJECT, force)?;
         write_if_missing_or_force(&templates_dir.join("meeting.md"), TEMPLATE_MEETING, force)?;
         write_if_missing_or_force(&templates_dir.join("research.md"), TEMPLATE_RESEARCH, force)?;
         write_if_missing_or_force(&templates_dir.join("task.md"), TEMPLATE_TASK, force)?;
         write_if_missing_or_force(&templates_dir.join("sprint.md"), TEMPLATE_SPRINT, force)?;
+        write_if_missing_or_force(&templates_dir.join("proposal.md"), TEMPLATE_PROPOSAL, force)?;
     }
 
     // Write .gitignore and .gitattributes
@@ -712,6 +773,7 @@ fn run_embedded(target: &Path, name: Option<&str>, force: bool, yes: bool) -> Mc
     write_if_missing_or_force(&templates_dir.join("research.md"), TEMPLATE_RESEARCH, force)?;
     write_if_missing_or_force(&templates_dir.join("task.md"), TEMPLATE_TASK, force)?;
     write_if_missing_or_force(&templates_dir.join("sprint.md"), TEMPLATE_SPRINT, force)?;
+    write_if_missing_or_force(&templates_dir.join("proposal.md"), TEMPLATE_PROPOSAL, force)?;
 
     // Create .mc/.gitignore (only ignore generated index files)
     write_if_missing_or_force(&mc_dir.join(".gitignore"), "data/*.json\n", force)?;

@@ -12,7 +12,7 @@ pub fn run(cfg: &ResolvedConfig) -> McResult<()> {
     let result = run_quiet(cfg)?;
 
     println!(
-        "{} Index built: {} customers, {} projects, {} meetings, {} research, {} tasks, {} sprints",
+        "{} Index built: {} customers, {} projects, {} meetings, {} research, {} tasks, {} sprints, {} proposals",
         "✓".green().bold(),
         result.customers.to_string().cyan(),
         result.projects.to_string().cyan(),
@@ -20,6 +20,7 @@ pub fn run(cfg: &ResolvedConfig) -> McResult<()> {
         result.research.to_string().cyan(),
         result.tasks.to_string().cyan(),
         result.sprints.to_string().cyan(),
+        result.proposals.to_string().cyan(),
     );
 
     Ok(())
@@ -32,6 +33,7 @@ pub struct IndexResult {
     pub research: usize,
     pub tasks: usize,
     pub sprints: usize,
+    pub proposals: usize,
 }
 
 /// Build indexes without printing to stdout.
@@ -42,6 +44,7 @@ pub fn run_quiet(cfg: &ResolvedConfig) -> McResult<IndexResult> {
     let research = collect_json(EntityKind::Research, cfg)?;
     let tasks = collect_json(EntityKind::Task, cfg)?;
     let sprints = collect_json(EntityKind::Sprint, cfg)?;
+    let proposals = collect_json(EntityKind::Proposal, cfg)?;
 
     std::fs::create_dir_all(&cfg.data_dir)?;
 
@@ -53,6 +56,7 @@ pub fn run_quiet(cfg: &ResolvedConfig) -> McResult<IndexResult> {
         "research": research,
         "tasks": tasks,
         "sprints": sprints,
+        "proposals": proposals,
     });
 
     let index_path = cfg.data_dir.join("index.json");
@@ -84,6 +88,12 @@ pub fn run_quiet(cfg: &ResolvedConfig) -> McResult<IndexResult> {
     let sprints_data = serde_json::to_string_pretty(&sprints)? + "\n";
     util::atomic_write(&cfg.data_dir.join("sprints.json"), sprints_data.as_bytes())?;
 
+    let proposals_data = serde_json::to_string_pretty(&proposals)? + "\n";
+    util::atomic_write(
+        &cfg.data_dir.join("proposals.json"),
+        proposals_data.as_bytes(),
+    )?;
+
     Ok(IndexResult {
         customers: customers.len(),
         projects: projects.len(),
@@ -91,6 +101,7 @@ pub fn run_quiet(cfg: &ResolvedConfig) -> McResult<IndexResult> {
         research: research.len(),
         tasks: tasks.len(),
         sprints: sprints.len(),
+        proposals: proposals.len(),
     })
 }
 

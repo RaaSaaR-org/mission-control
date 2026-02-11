@@ -3,7 +3,7 @@ use clap::{Parser, Subcommand};
 #[derive(Parser, Debug)]
 #[command(
     name = "mc",
-    about = "MissionControl CLI -- manage customers, projects, meetings, research, and tasks",
+    about = "MissionControl CLI -- manage customers, projects, meetings, research, tasks, and proposals",
     version,
     after_help = "\x1b[1mExamples:\x1b[0m
   mc status                          Show dashboard
@@ -54,7 +54,8 @@ pub enum Command {
   mc list projects --tag ml
   mc list meetings --status scheduled
   mc list tasks --status in-progress --project PROJ-001
-  mc list sprints --status active")]
+  mc list sprints --status active
+  mc list proposals --status accepted")]
     List {
         #[command(subcommand)]
         entity: ListEntity,
@@ -66,9 +67,10 @@ pub enum Command {
   mc show MTG-001
   mc show RES-001
   mc show TASK-001
-  mc show SPR-001")]
+  mc show SPR-001
+  mc show PROP-001")]
     Show {
-        /// Entity ID (e.g., CUST-001, PROJ-001, MTG-001, RES-001, TASK-001, SPR-001)
+        /// Entity ID (e.g., CUST-001, PROJ-001, MTG-001, RES-001, TASK-001, SPR-001, PROP-001)
         id: String,
     },
     /// Rebuild data/*.json index files
@@ -303,6 +305,31 @@ pub enum NewEntity {
         #[arg(long)]
         tags: Option<String>,
     },
+    /// Create a new proposal (BIP/ADR-style decision record)
+    #[command(after_help = "\x1b[1mExamples:\x1b[0m
+  mc new proposal \"Use PostgreSQL for primary database\"
+  mc new proposal \"Adopt microservices\" --type architecture --author alice
+  mc new proposal \"Switch to React\" --status proposed --tags \"frontend,framework\"
+  mc new proposal \"New auth flow\" --supersedes PROP-001")]
+    Proposal {
+        /// Proposal title
+        title: String,
+        /// Author
+        #[arg(long)]
+        author: Option<String>,
+        /// Status (default: draft)
+        #[arg(long)]
+        status: Option<String>,
+        /// Proposal type: architecture, feature, or process
+        #[arg(long, name = "type")]
+        proposal_type: Option<String>,
+        /// Comma-separated tags
+        #[arg(long)]
+        tags: Option<String>,
+        /// ID of proposal this supersedes (e.g., PROP-001)
+        #[arg(long)]
+        supersedes: Option<String>,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -365,6 +392,19 @@ pub enum ListEntity {
   mc list sprints --status active
   mc list sprints --tag q1")]
     Sprints {
+        /// Filter by status
+        #[arg(long)]
+        status: Option<String>,
+        /// Filter by tag
+        #[arg(long)]
+        tag: Option<String>,
+    },
+    /// List proposals
+    #[command(after_help = "\x1b[1mExamples:\x1b[0m
+  mc list proposals
+  mc list proposals --status accepted
+  mc list proposals --tag architecture")]
+    Proposals {
         /// Filter by status
         #[arg(long)]
         status: Option<String>,

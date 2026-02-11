@@ -209,6 +209,30 @@ pub struct CreateSprintParams {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct CreateProposalParams {
+    /// Proposal title
+    #[schemars(description = "Proposal title")]
+    pub title: String,
+    /// Author (optional)
+    #[schemars(description = "Author")]
+    pub author: Option<String>,
+    /// Status (optional, defaults to draft)
+    #[schemars(description = "Status (defaults to draft)")]
+    pub status: Option<String>,
+    /// Proposal type: architecture, feature, or process (optional, defaults to architecture)
+    #[schemars(
+        description = "Proposal type: architecture, feature, or process (defaults to architecture)"
+    )]
+    pub proposal_type: Option<String>,
+    /// Comma-separated tags (optional)
+    #[schemars(description = "Comma-separated tags")]
+    pub tags: Option<String>,
+    /// ID of proposal this supersedes (optional, e.g. PROP-001)
+    #[schemars(description = "ID of proposal this supersedes (e.g. PROP-001)")]
+    pub supersedes: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct MoveTaskParams {
     /// Task ID (e.g. TASK-001)
     #[schemars(description = "Task ID (e.g. TASK-001)")]
@@ -456,6 +480,25 @@ impl McServer {
         Ok(CallToolResult::success(vec![Content::text(text)]))
     }
 
+    #[tool(description = "Create a new proposal (BIP/ADR-style decision record)")]
+    async fn create_proposal(
+        &self,
+        Parameters(params): Parameters<CreateProposalParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let result = commands::new::create_proposal_programmatic(
+            &self.cfg,
+            &params.title,
+            params.author.as_deref(),
+            params.status.as_deref(),
+            params.proposal_type.as_deref(),
+            params.tags.as_deref(),
+            params.supersedes.as_deref(),
+        )
+        .map_err(mc_err)?;
+        let text = serde_json::to_string_pretty(&result).map_err(mc_err)?;
+        Ok(CallToolResult::success(vec![Content::text(text)]))
+    }
+
     #[tool(description = "Move a task to a new status (and optionally update its sprint)")]
     async fn move_task(
         &self,
@@ -540,8 +583,8 @@ impl McServer {
     async fn build_index(&self) -> Result<CallToolResult, McpError> {
         let result = commands::index::run_quiet(&self.cfg).map_err(mc_err)?;
         let text = format!(
-            "Index built: {} customers, {} projects, {} meetings, {} research, {} tasks, {} sprints",
-            result.customers, result.projects, result.meetings, result.research, result.tasks, result.sprints,
+            "Index built: {} customers, {} projects, {} meetings, {} research, {} tasks, {} sprints, {} proposals",
+            result.customers, result.projects, result.meetings, result.research, result.tasks, result.sprints, result.proposals,
         );
         Ok(CallToolResult::success(vec![Content::text(text)]))
     }
@@ -555,6 +598,7 @@ impl McServer {
             EntityKind::Research,
             EntityKind::Task,
             EntityKind::Sprint,
+            EntityKind::Proposal,
         ];
 
         let mut counts = serde_json::Map::new();
@@ -617,8 +661,8 @@ impl ServerHandler for McServer {
             self.cfg.root.display(),
             match self.cfg.mode {
                 RepoMode::Standalone =>
-                    "customers, projects, meetings, research, sprints, and tasks",
-                RepoMode::Embedded => "meetings, research, sprints, and tasks",
+                    "customers, projects, meetings, research, sprints, proposals, and tasks",
+                RepoMode::Embedded => "meetings, research, sprints, proposals, and tasks",
             }
         );
         ServerInfo {
@@ -668,6 +712,10 @@ impl ServerHandler for McServer {
             RawResource::new("mc://entities/sprints", "sprints"),
             None,
         ));
+        resources.push(Annotated::new(
+            RawResource::new("mc://entities/proposals", "proposals"),
+            None,
+        ));
 
         Ok(ListResourcesResult {
             resources,
@@ -693,6 +741,7 @@ impl ServerHandler for McServer {
                         "research": &self.cfg.id_prefixes.research,
                         "task": &self.cfg.id_prefixes.task,
                         "sprint": &self.cfg.id_prefixes.sprint,
+                        "proposal": &self.cfg.id_prefixes.proposal,
                     },
                     "statuses": {
                         "customer": &self.cfg.statuses.customer,
@@ -701,6 +750,7 @@ impl ServerHandler for McServer {
                         "research": &self.cfg.statuses.research,
                         "task": &self.cfg.statuses.task,
                         "sprint": &self.cfg.statuses.sprint,
+                        "proposal": &self.cfg.statuses.proposal,
                     },
                     "paths": {
                         "customers": self.cfg.customers_dir.display().to_string(),
@@ -709,6 +759,7 @@ impl ServerHandler for McServer {
                         "research": self.cfg.research_dir.display().to_string(),
                         "tasks": self.cfg.tasks_dir.display().to_string(),
                         "sprints": self.cfg.sprints_dir.display().to_string(),
+                        "proposals": self.cfg.proposals_dir.display().to_string(),
                     },
                 });
                 serde_json::to_string_pretty(&config_json).map_err(mc_err)?
@@ -735,6 +786,10 @@ impl ServerHandler for McServer {
             }
             "mc://entities/sprints" => {
                 let entities = collect_entity_json(EntityKind::Sprint, &self.cfg)?;
+                serde_json::to_string_pretty(&entities).map_err(mc_err)?
+            }
+            "mc://entities/proposals" => {
+                let entities = collect_entity_json(EntityKind::Proposal, &self.cfg)?;
                 serde_json::to_string_pretty(&entities).map_err(mc_err)?
             }
             _ => {

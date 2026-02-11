@@ -64,7 +64,7 @@ fn run(cli: &Cli) -> McResult<()> {
     let cfg = config::load_config(&root, mode)?;
 
     match &cli.command {
-        Command::Init { .. } => unreachable!(),
+        Command::Init { .. } => unreachable!("Init is handled before config loading"),
         Command::New { entity } => commands::new::run(entity, &cfg, cli.yes),
         Command::List { entity } => commands::list::run(entity, &cfg),
         Command::Show { id } => commands::show::run(id, &cfg),

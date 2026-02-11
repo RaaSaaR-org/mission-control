@@ -23,9 +23,9 @@ pub fn split_frontmatter(content: &str) -> Option<(String, String)> {
 }
 
 /// Parse raw YAML frontmatter string into a serde_yaml::Value (should be a Mapping).
-pub fn parse_raw(fm_str: &str) -> McResult<Value> {
+pub fn parse_raw(fm_str: &str, source: &Path) -> McResult<Value> {
     let val: Value = serde_yaml::from_str(fm_str).map_err(|e| McError::Frontmatter {
-        path: "".into(),
+        path: source.to_path_buf(),
         message: e.to_string(),
     })?;
     Ok(val)
@@ -51,7 +51,8 @@ pub fn parse_file(path: &Path) -> McResult<(Value, String)> {
 
 /// Serialize a YAML Value back into a complete markdown file with frontmatter.
 pub fn serialize_document(frontmatter: &Value, body: &str) -> String {
-    let yaml = serde_yaml::to_string(frontmatter).unwrap_or_default();
+    let yaml = serde_yaml::to_string(frontmatter)
+        .expect("serializing a serde_yaml::Value to YAML should never fail");
     // serde_yaml adds a trailing newline, remove it for cleanliness
     let yaml = yaml.trim_end();
     format!("---\n{}\n---\n{}", yaml, body)
@@ -92,11 +93,81 @@ pub fn set_str(val: &mut Value, key: &str, value: &str) {
     }
 }
 
-/// Set a sequence of strings on a YAML Mapping Value.
-#[allow(dead_code)]
-pub fn set_string_list(val: &mut Value, key: &str, values: &[String]) {
-    if let Some(map) = val.as_mapping_mut() {
-        let seq: Vec<Value> = values.iter().map(|s| Value::String(s.clone())).collect();
-        map.insert(Value::String(key.to_string()), Value::Sequence(seq));
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_split_frontmatter_basic() {
+        let content = "---\nid: CUST-001\nname: Acme\n---\n# Acme\n\nBody text.";
+        let (fm, body) = split_frontmatter(content).unwrap();
+        assert!(fm.contains("id: CUST-001"));
+        assert!(fm.contains("name: Acme"));
+        assert!(body.contains("Body text."));
+    }
+
+    #[test]
+    fn test_split_frontmatter_no_frontmatter() {
+        let content = "# Just a heading\n\nSome body.";
+        assert!(split_frontmatter(content).is_none());
+    }
+
+    #[test]
+    fn test_parse_raw_and_accessors() {
+        let fm_str = "id: TASK-001\ntitle: Fix bug\nstatus: todo\ntags:\n  - urgent\n  - backend";
+        let fm = parse_raw(fm_str, std::path::Path::new("test.md")).unwrap();
+
+        assert_eq!(get_str(&fm, "id").unwrap(), "TASK-001");
+        assert_eq!(get_str(&fm, "title").unwrap(), "Fix bug");
+        assert_eq!(get_str(&fm, "status").unwrap(), "todo");
+        assert_eq!(get_str(&fm, "nonexistent"), None);
+
+        let tags = get_string_list(&fm, "tags");
+        assert_eq!(tags, vec!["urgent", "backend"]);
+    }
+
+    #[test]
+    fn test_set_str_modifies_value() {
+        let fm_str = "id: TASK-001\nstatus: todo";
+        let mut fm = parse_raw(fm_str, std::path::Path::new("test.md")).unwrap();
+
+        set_str(&mut fm, "status", "done");
+        assert_eq!(get_str(&fm, "status").unwrap(), "done");
+
+        // Setting a new key
+        set_str(&mut fm, "owner", "alice");
+        assert_eq!(get_str(&fm, "owner").unwrap(), "alice");
+    }
+
+    #[test]
+    fn test_frontmatter_round_trip() {
+        let fm_str =
+            "id: RES-001\ntitle: LLM Benchmarks\nstatus: draft\ntags:\n  - ai\n  - research";
+        let fm = parse_raw(fm_str, std::path::Path::new("test.md")).unwrap();
+        let body = "\n# LLM Benchmarks\n\nResearch body.\n";
+
+        let doc = serialize_document(&fm, body);
+
+        // Re-parse the serialized document
+        let (fm_str2, body2) = split_frontmatter(&doc).unwrap();
+        let fm2 = parse_raw(&fm_str2, std::path::Path::new("test.md")).unwrap();
+
+        assert_eq!(get_str(&fm2, "id").unwrap(), "RES-001");
+        assert_eq!(get_str(&fm2, "title").unwrap(), "LLM Benchmarks");
+        assert_eq!(get_str(&fm2, "status").unwrap(), "draft");
+        assert_eq!(get_string_list(&fm2, "tags"), vec!["ai", "research"]);
+        assert!(body2.contains("Research body."));
+    }
+
+    #[test]
+    fn test_serialize_document_format() {
+        let fm_str = "id: TEST-001\nname: Test";
+        let fm = parse_raw(fm_str, std::path::Path::new("test.md")).unwrap();
+        let body = "\n# Test\n";
+
+        let doc = serialize_document(&fm, body);
+        assert!(doc.starts_with("---\n"));
+        assert!(doc.contains("\n---\n"));
+        assert!(doc.contains("# Test"));
     }
 }
