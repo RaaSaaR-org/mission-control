@@ -1,7 +1,7 @@
 [package]
 name = "mc"
 version = "0.1.1"
-authors = ["RaaSaaR <info@raasaar.com>"]
+authors = ["huhn511 <huhn.dev@gmail.com>"]
 edition = "2021"
 rust-version = "1.82"
 description = "Git-based knowledge management CLI — manage customers, projects, meetings, research and tasks with Markdown + YAML frontmatter"
@@ -21,6 +21,9 @@ path = "src/main.rs"
 [dependencies]
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
+# TODO: serde_yaml is deprecated; migrate to serde_yml once it reaches 1.0
+# (currently v0.0.12 with docs.rs build failures — migration is a mechanical
+# rename of serde_yaml:: → serde_yml:: across ~12 files).
 serde_yaml = "0.9"
 serde_json = "1"
 colored = "2"
