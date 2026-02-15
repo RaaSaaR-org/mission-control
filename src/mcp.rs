@@ -293,6 +293,24 @@ pub struct PrintResearchParams {
     pub file: Option<String>,
 }
 
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct PrintFileParams {
+    /// Path to markdown file
+    #[schemars(description = "Path to markdown file")]
+    pub path: String,
+    /// Output PDF path (optional, defaults to <filename>.pdf)
+    #[schemars(description = "Output PDF path (optional)")]
+    pub output: Option<String>,
+    /// Cover page template: standard, meeting, research, sprint (optional, defaults to standard)
+    #[schemars(
+        description = "Cover page template: standard, meeting, research, sprint (defaults to standard)"
+    )]
+    pub template: Option<String>,
+    /// Override document title (optional, auto-detected from first H1 or filename)
+    #[schemars(description = "Override document title (optional)")]
+    pub title: Option<String>,
+}
+
 // ---------------------------------------------------------------------------
 // McServer
 // ---------------------------------------------------------------------------
@@ -562,6 +580,30 @@ impl McServer {
             &params.id,
             params.output.as_deref(),
             params.file.as_deref(),
+        )
+        .map_err(mc_err)?;
+        let text = serde_json::to_string_pretty(&result).map_err(mc_err)?;
+        Ok(CallToolResult::success(vec![Content::text(text)]))
+    }
+
+    #[tool(description = "Generate a branded PDF from any markdown file")]
+    async fn print_file(
+        &self,
+        Parameters(params): Parameters<PrintFileParams>,
+    ) -> Result<CallToolResult, McpError> {
+        use crate::cli::PrintTemplate;
+        let template = match params.template.as_deref() {
+            Some("meeting") => PrintTemplate::Meeting,
+            Some("research") => PrintTemplate::Research,
+            Some("sprint") => PrintTemplate::Sprint,
+            _ => PrintTemplate::Standard,
+        };
+        let result = commands::print::print_file_programmatic(
+            &self.cfg,
+            &params.path,
+            params.output.as_deref(),
+            &template,
+            params.title.as_deref(),
         )
         .map_err(mc_err)?;
         let text = serde_json::to_string_pretty(&result).map_err(mc_err)?;

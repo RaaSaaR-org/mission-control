@@ -80,12 +80,14 @@ pub enum Command {
         #[command(subcommand)]
         entity: ExportEntity,
     },
-    /// Generate a branded PDF from a meeting or research entity
+    /// Generate a branded PDF from a meeting, research entity, or any markdown file
     #[command(after_help = "\x1b[1mExamples:\x1b[0m
   mc print meeting MTG-001                    Meeting notes to PDF
   mc print meeting MTG-001 -o meeting.pdf     Custom output path
   mc print research RES-001                   Research final report to PDF
-  mc print research RES-001 --file report.md  Specific file from final/")]
+  mc print research RES-001 --file report.md  Specific file from final/
+  mc print file ./docs/architecture.md        Any markdown file to PDF
+  mc print file ./notes/kickoff.md -t meeting Use meeting cover template")]
     Print {
         #[command(subcommand)]
         entity: PrintEntity,
@@ -500,6 +502,14 @@ pub enum ExportEntity {
     },
 }
 
+#[derive(Clone, Debug, clap::ValueEnum)]
+pub enum PrintTemplate {
+    Standard,
+    Meeting,
+    Research,
+    Sprint,
+}
+
 #[derive(Subcommand, Debug)]
 pub enum PrintEntity {
     /// Generate PDF from meeting notes
@@ -520,5 +530,19 @@ pub enum PrintEntity {
         /// Specific file from final/ directory
         #[arg(long)]
         file: Option<String>,
+    },
+    /// Generate PDF from any markdown file
+    File {
+        /// Path to markdown file
+        path: String,
+        /// Output PDF path (default: <filename>.pdf)
+        #[arg(short, long)]
+        output: Option<String>,
+        /// Cover page template
+        #[arg(short, long, default_value = "standard")]
+        template: PrintTemplate,
+        /// Override document title (default: auto-detect from first H1 or filename)
+        #[arg(long)]
+        title: Option<String>,
     },
 }

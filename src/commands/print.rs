@@ -1,4 +1,4 @@
-use crate::cli::PrintEntity;
+use crate::cli::{PrintEntity, PrintTemplate};
 use crate::config::ResolvedConfig;
 use crate::data;
 use crate::entity::EntityKind;
@@ -41,13 +41,20 @@ pub fn run(entity: &PrintEntity, cfg: &ResolvedConfig) -> McResult<()> {
         PrintEntity::Research { id, output, file } => {
             print_research(id, output.as_deref(), file.as_deref(), cfg)
         }
+        PrintEntity::File {
+            path,
+            output,
+            template,
+            title,
+        } => print_file(path, output.as_deref(), template, title.as_deref(), cfg),
     }
 }
 
-/// Load a font family from the brand fonts directory.
-/// Uses Builtin::Helvetica so the font data is not embedded in the PDF (smaller files)
-/// when the font is metrically compatible (Liberation Sans is).
+/// Load a font family from the brand fonts directory, falling back to system fonts.
+///
+/// Priority: configured brand fonts → system font discovery → error.
 fn load_fonts(cfg: &ResolvedConfig) -> McResult<fonts::FontFamily<fonts::FontData>> {
+    // 1. Try configured brand fonts
     if let Some(ref fonts_dir) = cfg.brand.fonts_dir {
         match fonts::from_files(fonts_dir, &cfg.brand.font_name, None::<fonts::Builtin>) {
             Ok(family) => return Ok(family),
@@ -62,11 +69,59 @@ fn load_fonts(cfg: &ResolvedConfig) -> McResult<fonts::FontFamily<fonts::FontDat
         }
     }
 
+    // 2. Try system font discovery
+    if let Some(family) = discover_system_fonts() {
+        return Ok(family);
+    }
+
+    // 3. No fonts found
     Err(McError::Pdf(
-        "No fonts directory configured. Set brand.fonts_dir in config/config.yml \
-         and place TTF files there (see assets/brand/README.md)."
+        "No fonts found. Set brand.fonts_dir in config.yml, \
+         or install Liberation Sans (Linux) or ensure Arial is available (macOS)."
             .into(),
     ))
+}
+
+/// Search well-known system directories for a usable font family.
+///
+/// On Linux, looks for LiberationSans in standard font directories (hyphenated naming
+/// matches genpdf's `from_files` convention). On macOS, loads Arial individually since
+/// its space-separated filenames don't match the convention.
+fn discover_system_fonts() -> Option<fonts::FontFamily<fonts::FontData>> {
+    // Linux: LiberationSans uses hyphenated naming that matches from_files()
+    for (dir, name) in [
+        ("/usr/share/fonts/truetype/liberation", "LiberationSans"),
+        ("/usr/share/fonts/TTF", "LiberationSans"),
+    ] {
+        if Path::new(dir).is_dir() {
+            if let Ok(family) = fonts::from_files(dir, name, None::<fonts::Builtin>) {
+                return Some(family);
+            }
+        }
+    }
+
+    // macOS: Arial uses space-separated naming, load each variant individually
+    let macos_dir = Path::new("/System/Library/Fonts/Supplemental");
+    if macos_dir.is_dir() {
+        let load = |filename: &str| -> Option<fonts::FontData> {
+            fonts::FontData::load(macos_dir.join(filename), None).ok()
+        };
+        if let (Some(r), Some(b), Some(i), Some(bi)) = (
+            load("Arial.ttf"),
+            load("Arial Bold.ttf"),
+            load("Arial Italic.ttf"),
+            load("Arial Bold Italic.ttf"),
+        ) {
+            return Some(fonts::FontFamily {
+                regular: r,
+                bold: b,
+                italic: i,
+                bold_italic: bi,
+            });
+        }
+    }
+
+    None
 }
 
 /// Create a configured genpdf Document with page decorator.
@@ -491,6 +546,261 @@ pub fn print_research_programmatic(
         "title": title,
         "path": display_path.display().to_string(),
     }))
+}
+
+// ---------------------------------------------------------------------------
+// File PDF (generic markdown file)
+// ---------------------------------------------------------------------------
+
+fn print_file(
+    path: &str,
+    output: Option<&str>,
+    template: &PrintTemplate,
+    title: Option<&str>,
+    cfg: &ResolvedConfig,
+) -> McResult<()> {
+    let result = print_file_programmatic(cfg, path, output, template, title)?;
+    println!(
+        "{} PDF written to {}",
+        "success:".green().bold(),
+        result["path"].as_str().unwrap_or("?")
+    );
+    Ok(())
+}
+
+/// Programmatic variant of `print_file` -- returns JSON instead of printing.
+pub fn print_file_programmatic(
+    cfg: &ResolvedConfig,
+    path: &str,
+    output: Option<&str>,
+    template: &PrintTemplate,
+    title_override: Option<&str>,
+) -> McResult<JsonValue> {
+    let file_path = PathBuf::from(path);
+    if !file_path.exists() {
+        return Err(McError::Other(format!("File not found: {}", path)));
+    }
+
+    let content = std::fs::read_to_string(&file_path)?;
+
+    // Split frontmatter if present and parse YAML
+    let (fm, body) = match frontmatter::split_frontmatter(&content) {
+        Some((fm_str, body)) => {
+            let parsed = frontmatter::parse_raw(&fm_str, &file_path).ok();
+            (parsed, body)
+        }
+        None => (None, content.clone()),
+    };
+
+    // Determine title: flag > frontmatter > first H1 > filename
+    let title = if let Some(t) = title_override {
+        t.to_string()
+    } else if let Some(ref fm) = fm {
+        if let Some(t) =
+            frontmatter::get_str(fm, "title").or_else(|| frontmatter::get_str(fm, "name"))
+        {
+            t.to_string()
+        } else {
+            detect_title_from_body(&body, &file_path)
+        }
+    } else {
+        detect_title_from_body(&body, &file_path)
+    };
+
+    // Build metadata pairs based on template
+    let entity_type_label = match template {
+        PrintTemplate::Standard => "Document",
+        PrintTemplate::Meeting => "Meeting Notes",
+        PrintTemplate::Research => "Research Report",
+        PrintTemplate::Sprint => "Sprint Report",
+    };
+
+    let mut meta_pairs: Vec<(&str, String)> = Vec::new();
+
+    if let Some(ref fm) = fm {
+        match template {
+            PrintTemplate::Standard => {
+                if let Some(v) = frontmatter::get_str(fm, "date") {
+                    meta_pairs.push(("Date", v.to_string()));
+                }
+                if let Some(v) =
+                    frontmatter::get_str(fm, "author").or_else(|| frontmatter::get_str(fm, "owner"))
+                {
+                    meta_pairs.push(("Author", v.to_string()));
+                }
+                if let Some(v) = frontmatter::get_str(fm, "status") {
+                    meta_pairs.push(("Status", v.to_string()));
+                }
+                let tags = frontmatter::get_string_list(fm, "tags");
+                if !tags.is_empty() {
+                    meta_pairs.push(("Tags", tags.join(", ")));
+                }
+            }
+            PrintTemplate::Meeting => {
+                if let Some(v) = frontmatter::get_str(fm, "date") {
+                    meta_pairs.push(("Date", v.to_string()));
+                }
+                if let Some(v) = frontmatter::get_str(fm, "time") {
+                    meta_pairs.push(("Time", v.to_string()));
+                }
+                if let Some(v) = frontmatter::get_str(fm, "duration") {
+                    meta_pairs.push(("Duration", v.to_string()));
+                }
+                if let Some(v) = frontmatter::get_str(fm, "status") {
+                    meta_pairs.push(("Status", v.to_string()));
+                }
+                let attendees = get_attendees(fm);
+                if !attendees.is_empty() {
+                    let names: Vec<&str> = attendees.iter().map(|a| a.name.as_str()).collect();
+                    meta_pairs.push(("Participants", names.join(", ")));
+                }
+                let customers = frontmatter::get_string_list(fm, "customers");
+                if !customers.is_empty() {
+                    meta_pairs.push(("Customers", customers.join(", ")));
+                }
+                let projects = frontmatter::get_string_list(fm, "projects");
+                if !projects.is_empty() {
+                    meta_pairs.push(("Projects", projects.join(", ")));
+                }
+            }
+            PrintTemplate::Research => {
+                if let Some(v) = frontmatter::get_str(fm, "owner") {
+                    meta_pairs.push(("Owner", v.to_string()));
+                }
+                if let Some(v) = frontmatter::get_str(fm, "status") {
+                    meta_pairs.push(("Status", v.to_string()));
+                }
+                let tags = frontmatter::get_string_list(fm, "tags");
+                if !tags.is_empty() {
+                    meta_pairs.push(("Tags", tags.join(", ")));
+                }
+                let agents = frontmatter::get_string_list(fm, "agents");
+                if !agents.is_empty() {
+                    meta_pairs.push(("Agents", agents.join(", ")));
+                }
+            }
+            PrintTemplate::Sprint => {
+                if let Some(v) = frontmatter::get_str(fm, "owner") {
+                    meta_pairs.push(("Owner", v.to_string()));
+                }
+                if let Some(v) = frontmatter::get_str(fm, "status") {
+                    meta_pairs.push(("Status", v.to_string()));
+                }
+                if let Some(v) = frontmatter::get_str(fm, "goal") {
+                    meta_pairs.push(("Goal", v.to_string()));
+                }
+                if let Some(v) = frontmatter::get_str(fm, "start_date") {
+                    meta_pairs.push(("Start Date", v.to_string()));
+                }
+                if let Some(v) = frontmatter::get_str(fm, "end_date") {
+                    meta_pairs.push(("End Date", v.to_string()));
+                }
+                let projects = frontmatter::get_string_list(fm, "projects");
+                if !projects.is_empty() {
+                    meta_pairs.push(("Projects", projects.join(", ")));
+                }
+                let tags = frontmatter::get_string_list(fm, "tags");
+                if !tags.is_empty() {
+                    meta_pairs.push(("Tags", tags.join(", ")));
+                }
+            }
+        }
+    }
+
+    let font_family = load_fonts(cfg)?;
+    let pc = primary_color(cfg);
+    let ac = accent_color(cfg);
+    let mut doc = create_document(font_family, &title, &cfg.brand.name, pc, ac);
+
+    // Cover page
+    push_cover_page(
+        &mut doc,
+        &cfg.brand.name,
+        &cfg.brand.tagline,
+        entity_type_label,
+        &title,
+        &meta_pairs,
+        pc,
+        ac,
+    );
+
+    // For research template: render summary before body if present
+    if matches!(template, PrintTemplate::Research) {
+        if let Some(ref fm) = fm {
+            let summary = frontmatter::get_str(fm, "summary").unwrap_or("");
+            if !summary.is_empty() {
+                doc.push(elements::Paragraph::new(style::StyledString::new(
+                    "Summary",
+                    style::Style::new()
+                        .bold()
+                        .with_font_size(H2_SIZE)
+                        .with_color(pc),
+                )));
+                doc.push(elements::Break::new(0.3));
+                doc.push(elements::Paragraph::new(summary));
+                push_section_separator(&mut doc);
+            }
+        }
+    }
+
+    // Body content
+    render_markdown(&mut doc, &body, pc);
+
+    // Footer
+    push_document_footer(&mut doc);
+
+    // Write PDF
+    let out_path = match output {
+        Some(p) => PathBuf::from(p),
+        None => {
+            let stem = file_path
+                .file_stem()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string();
+            PathBuf::from(format!("{}.pdf", stem))
+        }
+    };
+    doc.render_to_file(&out_path)
+        .map_err(|e| McError::Pdf(format!("Failed to write PDF: {e}")))?;
+
+    let display_path = out_path.canonicalize().unwrap_or(out_path);
+    Ok(serde_json::json!({
+        "title": title,
+        "path": display_path.display().to_string(),
+    }))
+}
+
+/// Extract title from the first H1 heading in the markdown body, or fall back to filename.
+fn detect_title_from_body(body: &str, file_path: &Path) -> String {
+    let opts = Options::empty();
+    let parser = Parser::new_ext(body, opts);
+    let mut in_heading = false;
+
+    for event in parser {
+        match event {
+            Event::Start(Tag::Heading {
+                level: HeadingLevel::H1,
+                ..
+            }) => {
+                in_heading = true;
+            }
+            Event::Text(text) if in_heading => {
+                return text.to_string();
+            }
+            Event::End(TagEnd::Heading(_)) => {
+                in_heading = false;
+            }
+            _ => {}
+        }
+    }
+
+    // Fallback: filename stem
+    file_path
+        .file_stem()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_string()
 }
 
 // ---------------------------------------------------------------------------
