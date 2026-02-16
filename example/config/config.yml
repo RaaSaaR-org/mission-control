@@ -1,0 +1,76 @@
+# MissionControl Configuration
+# Used by the mc CLI for repo structure, IDs, and statuses.
+
+site:
+  name: Northwind Labs
+  description: Customer and project knowledge base
+
+paths:
+  customers: customers/
+  projects: projects/
+  meetings: meetings/
+  research: research/
+  tasks: tasks/
+  sprints: sprints/
+  proposals: proposals/
+  notes: notes/
+  data: data/
+  templates: templates/
+  assets: assets/
+  archive: archive/
+
+id_prefixes:
+  customer: CUST
+  project: PROJ
+  meeting: MTG
+  research: RES
+  task: TASK
+  sprint: SPR
+  proposal: PROP
+
+statuses:
+  customer:
+    - active
+    - inactive
+    - prospect
+    - churned
+  project:
+    - active
+    - on-hold
+    - completed
+    - cancelled
+  meeting:
+    - scheduled
+    - completed
+    - cancelled
+  research:
+    - draft
+    - in-progress
+    - final
+    - outdated
+  task:
+    - backlog
+    - todo
+    - in-progress
+    - review
+    - done
+    - cancelled
+  sprint:
+    - planning
+    - active
+    - review
+    - completed
+    - cancelled
+  proposal:
+    - draft
+    - proposed
+    - accepted
+    - rejected
+    - superseded
+    - withdrawn
+
+priorities:
+  1: critical
+  2: high
+  3: medium
+  4: low

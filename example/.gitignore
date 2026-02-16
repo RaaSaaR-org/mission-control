@@ -1,0 +1,46 @@
+# OS files
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Editor files
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
+*.sublime-workspace
+*.sublime-project
+
+# Secrets and environment
+.env
+.env.*
+*.pem
+*.key
+*.secret
+
+# Dependencies
+node_modules/
+vendor/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+
+# Logs
+*.log
+
+# Rust build artifacts
+tools/mc/target/
+
+# Generated indexes (rebuilt by `mc index`)
+data/*.json
+
+# Temp files
+tmp/
+.tmp/
