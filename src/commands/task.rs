@@ -282,7 +282,7 @@ fn run_move(
     frontmatter::set_str(&mut fm, "status", new_status);
     frontmatter::set_str(&mut fm, "updated", &util::today_str());
     if let Some(sp) = sprint {
-        frontmatter::set_str(&mut fm, "sprint", sp);
+        frontmatter::set_str(&mut fm, "sprint", &frontmatter::wrap_wikilink(sp));
     }
 
     let new_doc = frontmatter::serialize_document(&fm, &body);
@@ -377,7 +377,7 @@ fn run_next(cfg: &ResolvedConfig, project: Option<&str>, customer: Option<&str>)
         })
         .filter(|t| {
             // Check dependencies -- all depends_on must be done
-            let deps = frontmatter::get_string_list(&t.frontmatter, "depends_on");
+            let deps = frontmatter::get_link_list(&t.frontmatter, "depends_on");
             deps.iter().all(|dep| done_ids.contains(dep))
         })
         .collect();
@@ -421,7 +421,7 @@ fn run_next(cfg: &ResolvedConfig, project: Option<&str>, customer: Option<&str>)
     let status = frontmatter::get_str_or(&next.frontmatter, "status", "");
     let priority = data::get_number(&next.frontmatter, "priority").unwrap_or(3);
     let owner = frontmatter::get_str_or(&next.frontmatter, "owner", "");
-    let deps = frontmatter::get_string_list(&next.frontmatter, "depends_on");
+    let deps = frontmatter::get_link_list(&next.frontmatter, "depends_on");
 
     let pri_label = match priority {
         1 => "CRITICAL".red().bold().to_string(),
@@ -516,7 +516,7 @@ pub fn move_task_programmatic(
     frontmatter::set_str(&mut fm, "status", new_status);
     frontmatter::set_str(&mut fm, "updated", &util::today_str());
     if let Some(sp) = sprint {
-        frontmatter::set_str(&mut fm, "sprint", sp);
+        frontmatter::set_str(&mut fm, "sprint", &frontmatter::wrap_wikilink(sp));
     }
 
     let new_doc = frontmatter::serialize_document(&fm, &body);
@@ -701,6 +701,6 @@ mod tests {
         let content = std::fs::read_to_string(path_str).unwrap();
         let (fm_str, _) = frontmatter::split_frontmatter(&content).unwrap();
         let fm = frontmatter::parse_raw(&fm_str, std::path::Path::new(path_str)).unwrap();
-        assert_eq!(frontmatter::get_str(&fm, "sprint").unwrap(), "SPR-001");
+        assert_eq!(frontmatter::get_str(&fm, "sprint").unwrap(), "[[SPR-001]]");
     }
 }

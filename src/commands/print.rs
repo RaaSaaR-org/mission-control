@@ -489,7 +489,7 @@ pub fn print_research_programmatic(
     if report_files.is_empty() {
         // Fall back to _index.md body
         eprintln!(
-            "{} No files in final/ directory, using _index.md body.",
+            "{} No files in final/ directory, using entity file body.",
             "warning:".yellow().bold()
         );
         render_markdown(&mut doc, &entity.body, pc);
