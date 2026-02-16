@@ -29,7 +29,7 @@ That's it. You now have a `.mc/` folder with task tracking in your project.
 
 ### Embedded Mode (recommended for most projects)
 
-Add `mc` to an existing project. Creates a `.mc/` folder for tasks, meetings, research, and sprints (no customers, projects, or contacts).
+Add `mc` to an existing project. Creates a `.mc/` folder for tasks, meetings, research, sprints, and proposals (no customers, projects, or contacts).
 
 ```bash
 cd my-project
@@ -43,7 +43,8 @@ my-project/
 │   ├── tasks/
 │   ├── meetings/
 │   ├── research/
-│   └── sprints/
+│   ├── sprints/
+│   └── proposals/
 └── (your code)
 ```
 
@@ -63,7 +64,8 @@ my-company/
 ├── meetings/
 ├── research/
 ├── tasks/
-└── sprints/
+├── sprints/
+└── proposals/
 ```
 
 Standalone mode adds **customers**, **contacts**, and **projects** — useful for agencies, freelancers, or anyone managing multiple clients.
@@ -79,6 +81,7 @@ Standalone mode adds **customers**, **contacts**, and **projects** — useful fo
 | **Customers** | Client profiles (standalone only) | `mc new customer "Acme Corp"` |
 | **Contacts** | Per-customer contacts (standalone only) | `mc new contact "Alice Smith" --customer CUST-001` |
 | **Projects** | Project containers (standalone only) | `mc new project "Robot Arm" --customers CUST-001` |
+| **Proposals** | Decision records (BIP/ADR-style) | `mc new proposal "Migrate to Postgres"` |
 
 ## Task Management
 
@@ -170,21 +173,45 @@ Now your AI assistant can create tasks, move them through the board, query statu
 
 ### Available MCP Tools
 
+All tools return JSON with documented fields. Parameter descriptions include valid values, defaults, and examples — AI agents can discover the full API from the tool schema alone.
+
 | Tool | Description |
 |------|-------------|
-| `list_entities` | List entities by kind with optional filters |
-| `list_tasks` | List tasks with rich filtering (project, sprint, priority, owner) |
-| `get_entity` | Get details about any entity |
-| `create_task` | Create a new task |
-| `create_sprint` | Create a new sprint |
+| `get_status` | Status overview with per-entity counts and recent activity |
+| `list_entities` | List entities by kind with optional status/tag filters |
+| `list_tasks` | List tasks with rich filtering (status, project, customer, priority, sprint, owner, tag) |
+| `get_entity` | Get entity detail with frontmatter fields and body preview |
+| `read_entity_file` | Read full markdown content (YAML frontmatter + body) |
+| `create_task` | Create a task (with priority, sprint, dependencies, scoping) |
+| `create_sprint` | Create a sprint |
 | `create_meeting` | Create a meeting |
-| `create_contact` | Create a contact for a customer |
 | `create_research` | Create a research topic |
-| `move_task` | Move a task to a new status |
+| `create_customer` | Create a customer (standalone only) |
+| `create_project` | Create a project (standalone only) |
+| `create_contact` | Create a contact under a customer (standalone only) |
+| `create_proposal` | Create a proposal / decision record (standalone only) |
+| `move_task` | Move a task to a new status, optionally assign a sprint |
 | `print_meeting` | Export meeting to PDF |
 | `print_research` | Export research to PDF |
-| `validate_repo` | Check repo structure |
-| `get_status` | Dashboard with counts and recent activity |
+| `print_file` | Generate branded PDF from any markdown file |
+| `validate_repo` | Validate repo structure and frontmatter |
+| `build_index` | Rebuild JSON index files for the web dashboard |
+
+### MCP Resources
+
+Resources provide read-only data snapshots. Start with `mc://config` to discover valid status values and ID prefixes.
+
+| Resource | Description |
+|----------|-------------|
+| `mc://config` | Valid status values, ID prefixes, and directory paths |
+| `mc://entities/customers` | All customers (standalone only) |
+| `mc://entities/contacts` | All contacts |
+| `mc://entities/projects` | All projects (standalone only) |
+| `mc://entities/meetings` | All meetings |
+| `mc://entities/research` | All research topics |
+| `mc://entities/tasks` | All tasks (unfiltered — use `list_tasks` tool for filtering) |
+| `mc://entities/sprints` | All sprints |
+| `mc://entities/proposals` | All proposals |
 
 ## Web Dashboard
 
@@ -233,7 +260,7 @@ cargo build --release
 Config lives at `.mc/config.yml` (embedded) or `config/config.yml` (standalone). It controls:
 
 - Directory paths for each entity type
-- ID prefixes (`TASK`, `MTG`, `RES`, `SPR`, `CONT`, etc.)
+- ID prefixes (`CUST`, `CONT`, `PROJ`, `MTG`, `RES`, `TASK`, `SPR`, `PROP`)
 - Allowed status values per entity type
 
 The defaults work out of the box. Edit the config when you want to customize status workflows or add new prefixes.
@@ -253,6 +280,7 @@ The defaults work out of the box. Edit the config when you want to customize sta
 | `mc status` | Dashboard with counts and recent activity |
 | `mc print meeting <ID>` | Export meeting to PDF |
 | `mc print research <ID>` | Export research to PDF |
+| `mc print file <path>` | Generate branded PDF from any markdown file |
 | `mc serve` | Start web dashboard |
 | `mc mcp` | Start MCP server |
 
