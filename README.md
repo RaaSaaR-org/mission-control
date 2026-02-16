@@ -1,6 +1,6 @@
 # mc — project management for developers and AI agents
 
-Manage tasks, meetings, research, and sprints with plain Markdown files. No database, no server, no account — just files in your repo that you can `git diff`, review in PRs, and edit with any tool. Works from your terminal and from AI editors via MCP.
+Manage tasks, meetings, research, contacts, and sprints with plain Markdown files. No database, no server, no account — just files in your repo that you can `git diff`, review in PRs, and edit with any tool. Works from your terminal and from AI editors via MCP.
 
 [![Crates.io](https://img.shields.io/crates/v/mc.svg)](https://crates.io/crates/mc)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
@@ -23,13 +23,13 @@ That's it. You now have a `.mc/` folder with task tracking in your project.
 - **No database, no server, no account** — just files in your repo
 - **Built for AI agents** — full MCP server, one command to connect
 - **Embedded mode** — `.mc/` folder lives alongside your code
-- **Kanban board, sprint planning, meeting notes, research tracking** — all from the terminal
+- **Kanban board, sprint planning, meeting notes, research tracking, contact management** — all from the terminal
 
 ## Two Ways to Use It
 
 ### Embedded Mode (recommended for most projects)
 
-Add `mc` to an existing project. Creates a `.mc/` folder for tasks, meetings, research, and sprints.
+Add `mc` to an existing project. Creates a `.mc/` folder for tasks, meetings, research, and sprints (no customers, projects, or contacts).
 
 ```bash
 cd my-project
@@ -66,7 +66,7 @@ my-company/
 └── sprints/
 ```
 
-Standalone mode adds **customers** and **projects** — useful for agencies, freelancers, or anyone managing multiple clients.
+Standalone mode adds **customers**, **contacts**, and **projects** — useful for agencies, freelancers, or anyone managing multiple clients.
 
 ## What You Can Track
 
@@ -77,6 +77,7 @@ Standalone mode adds **customers** and **projects** — useful for agencies, fre
 | **Meetings** | Notes with date, attendees, PDF export | `mc new meeting "Sprint Review" --date 2026-02-10` |
 | **Research** | Multi-agent research topics, PDF export | `mc new research "LLM Benchmarks" --agents claude,gemini` |
 | **Customers** | Client profiles (standalone only) | `mc new customer "Acme Corp"` |
+| **Contacts** | Per-customer contacts (standalone only) | `mc new contact "Alice Smith" --customer CUST-001` |
 | **Projects** | Project containers (standalone only) | `mc new project "Robot Arm" --customers CUST-001` |
 
 ## Task Management
@@ -177,6 +178,7 @@ Now your AI assistant can create tasks, move them through the board, query statu
 | `create_task` | Create a new task |
 | `create_sprint` | Create a new sprint |
 | `create_meeting` | Create a meeting |
+| `create_contact` | Create a contact for a customer |
 | `create_research` | Create a research topic |
 | `move_task` | Move a task to a new status |
 | `print_meeting` | Export meeting to PDF |
@@ -231,7 +233,7 @@ cargo build --release
 Config lives at `.mc/config.yml` (embedded) or `config/config.yml` (standalone). It controls:
 
 - Directory paths for each entity type
-- ID prefixes (`TASK`, `MTG`, `RES`, `SPR`, etc.)
+- ID prefixes (`TASK`, `MTG`, `RES`, `SPR`, `CONT`, etc.)
 - Allowed status values per entity type
 
 The defaults work out of the box. Edit the config when you want to customize status workflows or add new prefixes.

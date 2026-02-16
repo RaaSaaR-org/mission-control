@@ -16,18 +16,18 @@ CI runs fmt, clippy, test, and release build on every push to `main` and every P
 
 ## Architecture
 
-**MissionControl (`mc`)** is a Rust CLI for git-based knowledge management. Entities (customers, projects, meetings, research, tasks, sprints) are stored as Markdown files with YAML frontmatter in a structured directory tree. Two operating modes are supported:
+**MissionControl (`mc`)** is a Rust CLI for git-based knowledge management. Entities (customers, contacts, projects, meetings, research, tasks, sprints) are stored as Markdown files with YAML frontmatter in a structured directory tree. Two operating modes are supported:
 
 - **Standalone**: Entire repo is managed by mc. Config at `config/config.yml`. All entity types available.
-- **Embedded**: `.mc/` folder inside an existing project. Config at `.mc/config.yml`. Only tasks, meetings, research, and sprints (no customers/projects).
+- **Embedded**: `.mc/` folder inside an existing project. Config at `.mc/config.yml`. Only tasks, meetings, research, and sprints (no customers/contacts/projects).
 
 ### Module Responsibilities
 
 - **`main.rs`** — Entry point. Parses CLI args via clap, loads config, dispatches to command handlers. The `init` command is special-cased before config loading since the config doesn't exist yet.
 - **`cli.rs`** — clap derive definitions for all commands and subcommands.
 - **`config.rs`** — `RepoMode` enum (Standalone/Embedded), `RawConfig` (parsed from YAML), and `ResolvedConfig` (with absolute paths, mode, and defaults). `find_repo_root()` walks up directories looking for `.mc/config.yml` or `config/config.yml`.
-- **`entity.rs`** — `EntityKind` enum (Customer, Project, Meeting, Research, Task, Sprint) with polymorphic methods for labels, prefixes, directory paths, and status values. `EntityId` handles formatted IDs like `CUST-001`.
-- **`data.rs`** — `EntityRecord` struct and collection functions. `collect_entities()` walks a directory tree and parses each markdown file. `collect_tasks_filtered()` supports multi-dimensional task queries (status, priority, sprint, owner, project, customer).
+- **`entity.rs`** — `EntityKind` enum (Customer, Contact, Project, Meeting, Research, Task, Sprint) with polymorphic methods for labels, prefixes, directory paths, and status values. `EntityId` handles formatted IDs like `CUST-001`. Contacts use discovery-based collection across `customers/*/contacts/` directories (similar to task discovery).
+- **`data.rs`** — `EntityRecord` struct and collection functions. `collect_entities()` walks a directory tree and parses each markdown file. `collect_tasks_filtered()` supports multi-dimensional task queries (status, priority, sprint, owner, project, customer). `collect_contacts_filtered()` supports contact queries (status, tag, customer).
 - **`frontmatter.rs`** — Splits `---\nYAML\n---\nbody` format, parses/serializes frontmatter, provides field accessors.
 - **`html.rs`** — Generates the web dashboard HTML. Layout templates, navigation, status badges, entity detail pages. CSS is embedded from `src/assets/`.
 - **`mcp.rs`** — Model Context Protocol server exposing all CLI functionality as MCP tools and resources. Uses `rmcp` crate with schemars for parameter schemas.
@@ -43,6 +43,7 @@ CLI args (clap) → config loading (`find_repo_root` → `load_config`) → enti
 - **Config-driven**: All directory paths, ID prefixes, and valid status values come from the config file. Adding a new status or changing a prefix requires only a config change.
 - **Polymorphic via enum**: `EntityKind` dispatches behavior (directory, prefix, statuses) rather than using traits or inheritance. Most command handlers work generically over any entity kind.
 - **Tasks have special scoping**: Tasks can be global, project-scoped, or customer-scoped, with discovery logic in `entity.rs` that searches multiple directory locations.
+- **Contacts are per-customer**: Contacts live in `customers/CUST-NNN-slug/contacts/CONT-NNN-name.md`. IDs are globally sequential across all customers. Discovery walks all customer contact directories.
 - **Embedded templates**: The `init` command uses template strings inlined as constants in `commands/init.rs` (not `include_str!`).
 - **MCP bridge**: `mcp.rs` mirrors the full CLI surface for AI assistant integration. Each CLI command has a corresponding MCP tool with schemars-annotated parameter structs.
 
