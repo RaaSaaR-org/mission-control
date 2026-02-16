@@ -76,30 +76,34 @@ fn mc_err(e: impl std::fmt::Display) -> McpError {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct ListEntitiesParams {
-    /// Entity kind: customers, projects, meetings, research, tasks, or contacts
+    /// Entity kind: customers, contacts, projects, meetings, research, tasks, sprints, or proposals
     #[schemars(
-        description = "Entity kind: customers, projects, meetings, research, tasks, or contacts"
+        description = "Entity kind: customers, contacts, projects, meetings, research, tasks, sprints, or proposals"
     )]
     pub kind: String,
     /// Filter by status (optional)
-    #[schemars(description = "Filter by status (e.g. active, draft)")]
+    #[schemars(
+        description = "Filter by status (valid values depend on entity kind — read mc://config)"
+    )]
     pub status: Option<String>,
     /// Filter by tag (optional)
-    #[schemars(description = "Filter by tag")]
+    #[schemars(description = "Filter by tag (exact match)")]
     pub tag: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct GetEntityParams {
-    /// Entity ID (e.g. CUST-001, PROJ-002, MTG-003, RES-001, TASK-001)
-    #[schemars(description = "Entity ID (e.g. CUST-001, PROJ-002, TASK-001)")]
+    /// Entity ID (e.g. CUST-001, CONT-001, PROJ-001, MTG-001, RES-001, TASK-001, SPR-001, PROP-001)
+    #[schemars(
+        description = "Entity ID (e.g. CUST-001, CONT-001, PROJ-001, MTG-001, RES-001, TASK-001, SPR-001, PROP-001)"
+    )]
     pub id: String,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct ReadEntityFileParams {
-    /// Entity ID whose markdown file to read
-    #[schemars(description = "Entity ID whose markdown file to read")]
+    /// Entity ID (e.g. CUST-001, TASK-001)
+    #[schemars(description = "Entity ID (e.g. CUST-001, TASK-001)")]
     pub id: String,
 }
 
@@ -109,10 +113,10 @@ pub struct CreateCustomerParams {
     #[schemars(description = "Customer name")]
     pub name: String,
     /// Owner (optional)
-    #[schemars(description = "Owner")]
+    #[schemars(description = "Owner (username or name)")]
     pub owner: Option<String>,
-    /// Status (optional, defaults to first configured status)
-    #[schemars(description = "Status (defaults to first configured status)")]
+    /// Status (optional, defaults to active)
+    #[schemars(description = "Status (default: active; values: active, inactive, prospect)")]
     pub status: Option<String>,
     /// Comma-separated tags (optional)
     #[schemars(description = "Comma-separated tags")]
@@ -125,10 +129,10 @@ pub struct CreateProjectParams {
     #[schemars(description = "Project name")]
     pub name: String,
     /// Owner (optional)
-    #[schemars(description = "Owner")]
+    #[schemars(description = "Owner (username or name)")]
     pub owner: Option<String>,
     /// Status (optional)
-    #[schemars(description = "Status")]
+    #[schemars(description = "Status (default: active; values: active, on-hold, completed)")]
     pub status: Option<String>,
     /// Linked customer IDs, comma-separated (optional)
     #[schemars(description = "Linked customer IDs, comma-separated")]
@@ -153,7 +157,7 @@ pub struct CreateMeetingParams {
     #[schemars(description = "Duration e.g. 30m, 1h (defaults to 30m)")]
     pub duration: Option<String>,
     /// Status (optional)
-    #[schemars(description = "Status")]
+    #[schemars(description = "Status (default: scheduled; values: scheduled, completed)")]
     pub status: Option<String>,
     /// Comma-separated tags (optional)
     #[schemars(description = "Comma-separated tags")]
@@ -175,7 +179,7 @@ pub struct CreateResearchParams {
     #[schemars(description = "Research title")]
     pub title: String,
     /// Owner (optional)
-    #[schemars(description = "Owner")]
+    #[schemars(description = "Owner (username or name)")]
     pub owner: Option<String>,
     /// Comma-separated agent names (optional, defaults to claude,gemini,chatgpt,perplexity)
     #[schemars(
@@ -199,10 +203,12 @@ pub struct CreateTaskParams {
     #[schemars(description = "Scope to a customer (e.g. CUST-001)")]
     pub customer: Option<String>,
     /// Owner (optional)
-    #[schemars(description = "Owner")]
+    #[schemars(description = "Owner (username or name)")]
     pub owner: Option<String>,
-    /// Status (optional, defaults to first configured status e.g. backlog)
-    #[schemars(description = "Status (defaults to first configured status e.g. backlog)")]
+    /// Status (optional, defaults to backlog)
+    #[schemars(
+        description = "Status (default: backlog; values: backlog, todo, in-progress, review, done, cancelled)"
+    )]
     pub status: Option<String>,
     /// Priority 1-4 (1=critical, 2=high, 3=medium, 4=low; defaults to 3)
     #[schemars(description = "Priority 1-4 (1=critical, 2=high, 3=medium, 4=low; defaults to 3)")]
@@ -210,11 +216,11 @@ pub struct CreateTaskParams {
     /// Comma-separated tags (optional)
     #[schemars(description = "Comma-separated tags")]
     pub tags: Option<String>,
-    /// Sprint name (optional)
-    #[schemars(description = "Sprint name")]
+    /// Sprint label (optional)
+    #[schemars(description = "Sprint label (e.g. 2026-W05)")]
     pub sprint: Option<String>,
     /// Comma-separated task IDs this depends on (optional)
-    #[schemars(description = "Comma-separated task IDs this depends on")]
+    #[schemars(description = "Comma-separated task IDs this depends on (e.g. TASK-001,TASK-002)")]
     pub depends_on: Option<String>,
     /// Due date YYYY-MM-DD (optional)
     #[schemars(description = "Due date YYYY-MM-DD")]
@@ -224,13 +230,15 @@ pub struct CreateTaskParams {
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct CreateSprintParams {
     /// Sprint title (e.g. "2026-W05")
-    #[schemars(description = "Sprint title")]
+    #[schemars(description = "Sprint title (e.g. 2026-W05)")]
     pub title: String,
     /// Owner (optional)
-    #[schemars(description = "Owner")]
+    #[schemars(description = "Owner (username or name)")]
     pub owner: Option<String>,
     /// Status (optional, defaults to planning)
-    #[schemars(description = "Status (defaults to planning)")]
+    #[schemars(
+        description = "Status (default: planning; values: planning, active, review, completed, cancelled)"
+    )]
     pub status: Option<String>,
     /// Sprint goal (optional)
     #[schemars(description = "Sprint goal")]
@@ -255,10 +263,12 @@ pub struct CreateProposalParams {
     #[schemars(description = "Proposal title")]
     pub title: String,
     /// Author (optional)
-    #[schemars(description = "Author")]
+    #[schemars(description = "Author (username or name)")]
     pub author: Option<String>,
     /// Status (optional, defaults to draft)
-    #[schemars(description = "Status (defaults to draft)")]
+    #[schemars(
+        description = "Status (default: draft; values: draft, proposed, accepted, rejected, superseded, withdrawn)"
+    )]
     pub status: Option<String>,
     /// Proposal type: architecture, feature, or process (optional, defaults to architecture)
     #[schemars(
@@ -291,7 +301,7 @@ pub struct CreateContactParams {
     #[schemars(description = "Phone number")]
     pub phone: Option<String>,
     /// Status (optional, defaults to active)
-    #[schemars(description = "Status (defaults to active)")]
+    #[schemars(description = "Status (default: active; values: active, inactive)")]
     pub status: Option<String>,
     /// Comma-separated tags (optional)
     #[schemars(description = "Comma-separated tags")]
@@ -303,21 +313,25 @@ pub struct MoveTaskParams {
     /// Task ID (e.g. TASK-001)
     #[schemars(description = "Task ID (e.g. TASK-001)")]
     pub id: String,
-    /// Target status (e.g. todo, in-progress, done)
-    #[schemars(description = "Target status (e.g. todo, in-progress, done)")]
+    /// Target status
+    #[schemars(
+        description = "Target status (values: backlog, todo, in-progress, review, done, cancelled)"
+    )]
     pub status: String,
-    /// Sprint name (optional, updates sprint field)
-    #[schemars(description = "Sprint name (optional, updates sprint field)")]
+    /// Sprint label to assign (optional)
+    #[schemars(description = "Sprint label to assign (e.g. 2026-W05)")]
     pub sprint: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct ListTasksParams {
     /// Filter by status (optional)
-    #[schemars(description = "Filter by status (e.g. backlog, todo, in-progress, done)")]
+    #[schemars(
+        description = "Filter by status (values: backlog, todo, in-progress, review, done, cancelled)"
+    )]
     pub status: Option<String>,
     /// Filter by tag (optional)
-    #[schemars(description = "Filter by tag")]
+    #[schemars(description = "Filter by tag (exact match)")]
     pub tag: Option<String>,
     /// Filter by project ID (optional, e.g. PROJ-001)
     #[schemars(description = "Filter by project ID (e.g. PROJ-001)")]
@@ -326,10 +340,10 @@ pub struct ListTasksParams {
     #[schemars(description = "Filter by customer ID (e.g. CUST-001)")]
     pub customer: Option<String>,
     /// Filter by priority 1-4 (optional)
-    #[schemars(description = "Filter by priority 1-4")]
+    #[schemars(description = "Filter by priority 1-4 (1=critical, 2=high, 3=medium, 4=low)")]
     pub priority: Option<u32>,
-    /// Filter by sprint name (optional)
-    #[schemars(description = "Filter by sprint name")]
+    /// Filter by sprint label (optional)
+    #[schemars(description = "Filter by sprint label (e.g. 2026-W05)")]
     pub sprint: Option<String>,
     /// Filter by owner (optional)
     #[schemars(description = "Filter by owner")]
@@ -341,8 +355,8 @@ pub struct PrintMeetingParams {
     /// Meeting ID (e.g. MTG-001)
     #[schemars(description = "Meeting ID (e.g. MTG-001)")]
     pub id: String,
-    /// Output file path (optional, defaults to {ID}.pdf)
-    #[schemars(description = "Output file path (optional)")]
+    /// Output file path (optional)
+    #[schemars(description = "Output file path (defaults to {id}.pdf)")]
     pub output: Option<String>,
 }
 
@@ -351,29 +365,29 @@ pub struct PrintResearchParams {
     /// Research ID (e.g. RES-001)
     #[schemars(description = "Research ID (e.g. RES-001)")]
     pub id: String,
-    /// Output file path (optional, defaults to {ID}-final-report.pdf)
-    #[schemars(description = "Output file path (optional)")]
+    /// Output file path (optional)
+    #[schemars(description = "Output file path (defaults to {id}-final-report.pdf)")]
     pub output: Option<String>,
-    /// Specific file from final/ directory (optional)
-    #[schemars(description = "Specific file from final/ (optional)")]
+    /// Filename from the research final/ directory (optional)
+    #[schemars(description = "Filename from the research final/ directory (optional)")]
     pub file: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct PrintFileParams {
     /// Path to markdown file
-    #[schemars(description = "Path to markdown file")]
+    #[schemars(description = "Path to markdown file (relative to repo root)")]
     pub path: String,
-    /// Output PDF path (optional, defaults to <filename>.pdf)
-    #[schemars(description = "Output PDF path (optional)")]
+    /// Output PDF path (optional)
+    #[schemars(description = "Output PDF path (defaults to <filename>.pdf)")]
     pub output: Option<String>,
     /// Cover page template: standard, meeting, research, sprint (optional, defaults to standard)
     #[schemars(
         description = "Cover page template: standard, meeting, research, sprint (defaults to standard)"
     )]
     pub template: Option<String>,
-    /// Override document title (optional, auto-detected from first H1 or filename)
-    #[schemars(description = "Override document title (optional)")]
+    /// Override document title (optional)
+    #[schemars(description = "Override document title (auto-detected from first H1 or filename)")]
     pub title: Option<String>,
 }
 
@@ -398,7 +412,9 @@ impl McServer {
 
 #[tool_router]
 impl McServer {
-    #[tool(description = "List entities of a given kind with optional status/tag filters")]
+    #[tool(
+        description = "List entities of a given kind with optional status/tag filters. Returns JSON array of entity objects. For tasks, prefer list_tasks which supports richer filters."
+    )]
     async fn list_entities(
         &self,
         Parameters(params): Parameters<ListEntitiesParams>,
@@ -420,7 +436,9 @@ impl McServer {
         Ok(CallToolResult::success(vec![Content::text(text)]))
     }
 
-    #[tool(description = "Get detailed information about an entity by its ID")]
+    #[tool(
+        description = "Get detailed information about an entity by its ID. Returns JSON object with frontmatter fields and _body_preview (first 500 chars of markdown body)."
+    )]
     async fn get_entity(
         &self,
         Parameters(params): Parameters<GetEntityParams>,
@@ -437,7 +455,9 @@ impl McServer {
         Ok(CallToolResult::success(vec![Content::text(text)]))
     }
 
-    #[tool(description = "Read the full markdown file content for an entity")]
+    #[tool(
+        description = "Read the full markdown content of an entity file (YAML frontmatter + body). Use this instead of get_entity when you need the complete document text."
+    )]
     async fn read_entity_file(
         &self,
         Parameters(params): Parameters<ReadEntityFileParams>,
@@ -447,7 +467,9 @@ impl McServer {
         Ok(CallToolResult::success(vec![Content::text(content)]))
     }
 
-    #[tool(description = "Create a new customer")]
+    #[tool(
+        description = "Create a new customer (standalone mode only). Returns JSON with id, name, and path."
+    )]
     async fn create_customer(
         &self,
         Parameters(params): Parameters<CreateCustomerParams>,
@@ -464,7 +486,9 @@ impl McServer {
         Ok(CallToolResult::success(vec![Content::text(text)]))
     }
 
-    #[tool(description = "Create a new project")]
+    #[tool(
+        description = "Create a new project (standalone mode only). Returns JSON with id, name, and path."
+    )]
     async fn create_project(
         &self,
         Parameters(params): Parameters<CreateProjectParams>,
@@ -482,7 +506,7 @@ impl McServer {
         Ok(CallToolResult::success(vec![Content::text(text)]))
     }
 
-    #[tool(description = "Create a new meeting")]
+    #[tool(description = "Create a new meeting. Returns JSON with id, title, and path.")]
     async fn create_meeting(
         &self,
         Parameters(params): Parameters<CreateMeetingParams>,
@@ -504,7 +528,9 @@ impl McServer {
         Ok(CallToolResult::success(vec![Content::text(text)]))
     }
 
-    #[tool(description = "Create a new research topic")]
+    #[tool(
+        description = "Create a new research topic. Status is always 'draft'. Returns JSON with id, title, and path."
+    )]
     async fn create_research(
         &self,
         Parameters(params): Parameters<CreateResearchParams>,
@@ -521,7 +547,7 @@ impl McServer {
         Ok(CallToolResult::success(vec![Content::text(text)]))
     }
 
-    #[tool(description = "Create a new task")]
+    #[tool(description = "Create a new task. Returns JSON with id, title, and path.")]
     async fn create_task(
         &self,
         Parameters(params): Parameters<CreateTaskParams>,
@@ -544,7 +570,7 @@ impl McServer {
         Ok(CallToolResult::success(vec![Content::text(text)]))
     }
 
-    #[tool(description = "Create a new sprint")]
+    #[tool(description = "Create a new sprint. Returns JSON with id, title, and path.")]
     async fn create_sprint(
         &self,
         Parameters(params): Parameters<CreateSprintParams>,
@@ -565,7 +591,9 @@ impl McServer {
         Ok(CallToolResult::success(vec![Content::text(text)]))
     }
 
-    #[tool(description = "Create a new proposal (BIP/ADR-style decision record)")]
+    #[tool(
+        description = "Create a new proposal (standalone mode only). Returns JSON with id, title, and path."
+    )]
     async fn create_proposal(
         &self,
         Parameters(params): Parameters<CreateProposalParams>,
@@ -604,7 +632,9 @@ impl McServer {
         Ok(CallToolResult::success(vec![Content::text(text)]))
     }
 
-    #[tool(description = "Move a task to a new status (and optionally update its sprint)")]
+    #[tool(
+        description = "Move a task to a new status (and optionally assign a sprint). Returns updated task as JSON."
+    )]
     async fn move_task(
         &self,
         Parameters(params): Parameters<MoveTaskParams>,
@@ -621,7 +651,7 @@ impl McServer {
     }
 
     #[tool(
-        description = "List tasks with rich filtering (project, customer, priority, sprint, owner, status, tag)"
+        description = "List tasks with rich filtering. Returns JSON array. Use this instead of list_entities for tasks."
     )]
     async fn list_tasks(
         &self,
@@ -642,7 +672,7 @@ impl McServer {
         Ok(CallToolResult::success(vec![Content::text(text)]))
     }
 
-    #[tool(description = "Export a meeting to PDF")]
+    #[tool(description = "Export a meeting to PDF. Returns JSON with the output file path.")]
     async fn print_meeting(
         &self,
         Parameters(params): Parameters<PrintMeetingParams>,
@@ -657,7 +687,9 @@ impl McServer {
         Ok(CallToolResult::success(vec![Content::text(text)]))
     }
 
-    #[tool(description = "Export a research topic to PDF")]
+    #[tool(
+        description = "Export a research final report to PDF. Returns JSON with the output file path."
+    )]
     async fn print_research(
         &self,
         Parameters(params): Parameters<PrintResearchParams>,
@@ -673,7 +705,9 @@ impl McServer {
         Ok(CallToolResult::success(vec![Content::text(text)]))
     }
 
-    #[tool(description = "Generate a branded PDF from any markdown file")]
+    #[tool(
+        description = "Generate a branded PDF from any markdown file. Returns JSON with the output file path."
+    )]
     async fn print_file(
         &self,
         Parameters(params): Parameters<PrintFileParams>,
@@ -697,7 +731,9 @@ impl McServer {
         Ok(CallToolResult::success(vec![Content::text(text)]))
     }
 
-    #[tool(description = "Validate the repo structure, naming conventions, and frontmatter")]
+    #[tool(
+        description = "Validate repo structure and frontmatter. Returns 'Validation passed: no issues found.' or a JSON array of issue objects."
+    )]
     async fn validate_repo(&self) -> Result<CallToolResult, McpError> {
         let issues = commands::validate::validate_programmatic(&self.cfg).map_err(mc_err)?;
         let text = if issues.is_empty() {
@@ -708,7 +744,9 @@ impl McServer {
         Ok(CallToolResult::success(vec![Content::text(text)]))
     }
 
-    #[tool(description = "Rebuild the JSON index files in data/")]
+    #[tool(
+        description = "Rebuild JSON index files in data/ for the web dashboard. Returns a summary string with entity counts."
+    )]
     async fn build_index(&self) -> Result<CallToolResult, McpError> {
         let result = commands::index::run_quiet(&self.cfg).map_err(mc_err)?;
         let text = format!(
@@ -718,7 +756,9 @@ impl McServer {
         Ok(CallToolResult::success(vec![Content::text(text)]))
     }
 
-    #[tool(description = "Get a status overview with entity counts and recent activity")]
+    #[tool(
+        description = "Get a status overview. Returns JSON with 'counts' (per-entity-kind totals and by_status breakdowns) and 'recent_activity' (last 10 modified entities)."
+    )]
     async fn get_status(&self) -> Result<CallToolResult, McpError> {
         let all_kinds = [
             EntityKind::Customer,
@@ -785,15 +825,17 @@ impl ServerHandler for McServer {
             RepoMode::Standalone => "standalone",
             RepoMode::Embedded => "embedded",
         };
+        let entities = match self.cfg.mode {
+            RepoMode::Standalone => {
+                "customers, projects, contacts, meetings, research, sprints, proposals, and tasks"
+            }
+            RepoMode::Embedded => "meetings, research, sprints, proposals, and tasks",
+        };
         let instructions = format!(
-            "MissionControl ({}) at {}. Manage {} in a git-based knowledge repository.",
+            "MissionControl ({}) at {}. Manage {} in a git-based knowledge repository.\n\nStart with get_status for an overview. Read the mc://config resource for valid status values and ID prefixes. Use list_tasks (not list_entities) for task queries — it supports richer filters.",
             mode_label,
             self.cfg.root.display(),
-            match self.cfg.mode {
-                RepoMode::Standalone =>
-                    "customers, projects, contacts, meetings, research, sprints, proposals, and tasks",
-                RepoMode::Embedded => "meetings, research, sprints, proposals, and tasks",
-            }
+            entities,
         );
         ServerInfo {
             instructions: Some(instructions),
@@ -810,45 +852,61 @@ impl ServerHandler for McServer {
         _request: Option<PaginatedRequestParams>,
         _context: RequestContext<RoleServer>,
     ) -> Result<ListResourcesResult, McpError> {
-        let mut resources = vec![Annotated::new(
-            RawResource::new("mc://config", "config"),
-            None,
+        fn described_resource(uri: &str, name: &str, desc: &str) -> Annotated<RawResource> {
+            let mut r = RawResource::new(uri, name);
+            r.description = Some(desc.to_string());
+            r.mime_type = Some("application/json".to_string());
+            Annotated::new(r, None)
+        }
+
+        let mut resources = vec![described_resource(
+            "mc://config",
+            "config",
+            "Repository configuration: valid status values, ID prefixes, and directory paths for each entity kind",
         )];
 
         if self.cfg.mode == RepoMode::Standalone {
-            resources.push(Annotated::new(
-                RawResource::new("mc://entities/customers", "customers"),
-                None,
+            resources.push(described_resource(
+                "mc://entities/customers",
+                "customers",
+                "All customers as a JSON array",
             ));
-            resources.push(Annotated::new(
-                RawResource::new("mc://entities/projects", "projects"),
-                None,
+            resources.push(described_resource(
+                "mc://entities/projects",
+                "projects",
+                "All projects as a JSON array",
             ));
         }
 
-        resources.push(Annotated::new(
-            RawResource::new("mc://entities/meetings", "meetings"),
-            None,
+        resources.push(described_resource(
+            "mc://entities/meetings",
+            "meetings",
+            "All meetings as a JSON array",
         ));
-        resources.push(Annotated::new(
-            RawResource::new("mc://entities/research", "research"),
-            None,
+        resources.push(described_resource(
+            "mc://entities/research",
+            "research",
+            "All research topics as a JSON array",
         ));
-        resources.push(Annotated::new(
-            RawResource::new("mc://entities/tasks", "tasks"),
-            None,
+        resources.push(described_resource(
+            "mc://entities/tasks",
+            "tasks",
+            "All tasks as a JSON array (unfiltered — use list_tasks tool for filtering)",
         ));
-        resources.push(Annotated::new(
-            RawResource::new("mc://entities/sprints", "sprints"),
-            None,
+        resources.push(described_resource(
+            "mc://entities/sprints",
+            "sprints",
+            "All sprints as a JSON array",
         ));
-        resources.push(Annotated::new(
-            RawResource::new("mc://entities/proposals", "proposals"),
-            None,
+        resources.push(described_resource(
+            "mc://entities/proposals",
+            "proposals",
+            "All proposals as a JSON array",
         ));
-        resources.push(Annotated::new(
-            RawResource::new("mc://entities/contacts", "contacts"),
-            None,
+        resources.push(described_resource(
+            "mc://entities/contacts",
+            "contacts",
+            "All contacts as a JSON array",
         ));
 
         Ok(ListResourcesResult {
