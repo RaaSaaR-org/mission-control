@@ -53,8 +53,35 @@ pub fn parse_file(path: &Path) -> McResult<(Value, String)> {
 pub fn serialize_document(frontmatter: &Value, body: &str) -> String {
     let yaml = serde_yaml::to_string(frontmatter)
         .expect("serializing a serde_yaml::Value to YAML should never fail");
-    // serde_yaml adds a trailing newline, remove it for cleanliness
     let yaml = yaml.trim_end();
+
+    // Replace single-quoted wiki-links with double-quoted for Obsidian compatibility.
+    // serde_yaml uses single quotes for strings containing `[`/`]`, but Obsidian
+    // only recognises wiki-links inside double quotes in frontmatter.
+    let re_quote = regex::Regex::new(r"'(\[\[.+?\]\])'").unwrap();
+    let yaml = re_quote.replace_all(yaml, "\"$1\"");
+
+    // Extract all [[...]] links from the frontmatter so we can mirror them in the
+    // document body.  Obsidian's graph view reliably picks up links from body text
+    // but not always from frontmatter properties.
+    let re_links = regex::Regex::new(r"\[\[(.+?)\]\]").unwrap();
+    let links: Vec<String> = re_links
+        .captures_iter(&yaml)
+        .map(|c| format!("[[{}]]", &c[1]))
+        .collect();
+
+    // Strip any existing mc-links comment so repeated serialisation is idempotent.
+    let re_mc = regex::Regex::new(r"\n?%% mc-links:.*%%\n?").unwrap();
+    let body = re_mc.replace_all(body, "");
+
+    // Append an Obsidian comment listing all frontmatter links.
+    let body = if links.is_empty() {
+        body.to_string()
+    } else {
+        let link_str = links.join(" ");
+        format!("{}\n%% mc-links: {} %%\n", body.trim_end(), link_str)
+    };
+
     format!("---\n{}\n---\n{}", yaml, body)
 }
 
@@ -81,6 +108,40 @@ pub fn get_string_list(val: &Value, key: &str) -> Vec<String> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// Strip `[[...]]` wiki-link brackets from a string.
+/// Handles `[[target|alias]]` by returning just the target.
+/// Returns the input unchanged if no brackets are found (backwards compat).
+pub fn strip_wikilink(s: &str) -> &str {
+    if let Some(inner) = s.strip_prefix("[[").and_then(|s| s.strip_suffix("]]")) {
+        // Handle [[target|alias]] -- return target
+        inner.split('|').next().unwrap_or(inner)
+    } else {
+        s
+    }
+}
+
+/// Wrap a non-empty string in `[[...]]` wiki-link brackets.
+pub fn wrap_wikilink(s: &str) -> String {
+    if s.is_empty() {
+        String::new()
+    } else {
+        format!("[[{}]]", s)
+    }
+}
+
+/// Get a string field, stripping any wiki-link brackets.
+pub fn get_link_str<'a>(val: &'a Value, key: &str) -> Option<&'a str> {
+    get_str(val, key).map(strip_wikilink)
+}
+
+/// Get a sequence of strings, stripping wiki-link brackets from each.
+pub fn get_link_list(val: &Value, key: &str) -> Vec<String> {
+    get_string_list(val, key)
+        .into_iter()
+        .map(|s| strip_wikilink(&s).to_string())
+        .collect()
 }
 
 /// Set a string field on a YAML Mapping Value.
@@ -160,6 +221,41 @@ mod tests {
     }
 
     #[test]
+    fn test_strip_wikilink() {
+        assert_eq!(strip_wikilink("[[CUST-001]]"), "CUST-001");
+        assert_eq!(strip_wikilink("[[target|alias]]"), "target");
+        assert_eq!(strip_wikilink("CUST-001"), "CUST-001");
+        assert_eq!(strip_wikilink(""), "");
+        assert_eq!(strip_wikilink("[[]]"), "");
+        assert_eq!(
+            strip_wikilink("[[nested[[brackets]]]]"),
+            "nested[[brackets]]"
+        );
+    }
+
+    #[test]
+    fn test_wrap_wikilink() {
+        assert_eq!(wrap_wikilink("CUST-001"), "[[CUST-001]]");
+        assert_eq!(wrap_wikilink(""), "");
+    }
+
+    #[test]
+    fn test_get_link_str() {
+        let fm_str = "sprint: '[[SPR-001]]'\ncustomer: CUST-001";
+        let fm = parse_raw(fm_str, std::path::Path::new("test.md")).unwrap();
+        assert_eq!(get_link_str(&fm, "sprint"), Some("SPR-001"));
+        assert_eq!(get_link_str(&fm, "customer"), Some("CUST-001"));
+        assert_eq!(get_link_str(&fm, "missing"), None);
+    }
+
+    #[test]
+    fn test_get_link_list() {
+        let fm_str = "projects:\n  - '[[PROJ-001]]'\n  - PROJ-002";
+        let fm = parse_raw(fm_str, std::path::Path::new("test.md")).unwrap();
+        assert_eq!(get_link_list(&fm, "projects"), vec!["PROJ-001", "PROJ-002"]);
+    }
+
+    #[test]
     fn test_serialize_document_format() {
         let fm_str = "id: TEST-001\nname: Test";
         let fm = parse_raw(fm_str, std::path::Path::new("test.md")).unwrap();
@@ -169,5 +265,78 @@ mod tests {
         assert!(doc.starts_with("---\n"));
         assert!(doc.contains("\n---\n"));
         assert!(doc.contains("# Test"));
+    }
+
+    #[test]
+    fn test_serialize_double_quotes_wikilinks() {
+        let fm_str = "id: PROJ-001\ncustomer: '[[CUST-001]]'";
+        let fm = parse_raw(fm_str, std::path::Path::new("test.md")).unwrap();
+        let doc = serialize_document(&fm, "\n");
+
+        // Must be double-quoted, not single-quoted
+        assert!(
+            doc.contains("\"[[CUST-001]]\""),
+            "expected double-quoted wiki-link, got:\n{doc}"
+        );
+        assert!(
+            !doc.contains("'[[CUST-001]]'"),
+            "single-quoted wiki-link should not appear"
+        );
+    }
+
+    #[test]
+    fn test_serialize_mc_links_comment() {
+        let fm_str = "id: PROJ-001\ncustomer: '[[CUST-001]]'";
+        let fm = parse_raw(fm_str, std::path::Path::new("test.md")).unwrap();
+        let doc = serialize_document(&fm, "\n# Project\n");
+
+        assert!(
+            doc.contains("%% mc-links: [[CUST-001]] %%"),
+            "expected mc-links comment, got:\n{doc}"
+        );
+    }
+
+    #[test]
+    fn test_serialize_mc_links_multiple() {
+        let fm_str = "id: MTG-001\ncustomers:\n  - '[[CUST-001]]'\nprojects:\n  - '[[PROJ-001]]'";
+        let fm = parse_raw(fm_str, std::path::Path::new("test.md")).unwrap();
+        let doc = serialize_document(&fm, "\n");
+
+        assert!(
+            doc.contains("[[CUST-001]]") && doc.contains("[[PROJ-001]]"),
+            "expected both links in mc-links comment, got:\n{doc}"
+        );
+        // The comment should contain both
+        let mc_line = doc.lines().find(|l| l.contains("%% mc-links:")).unwrap();
+        assert!(mc_line.contains("[[CUST-001]]"));
+        assert!(mc_line.contains("[[PROJ-001]]"));
+    }
+
+    #[test]
+    fn test_serialize_mc_links_idempotent() {
+        let fm_str = "id: PROJ-001\ncustomer: '[[CUST-001]]'";
+        let fm = parse_raw(fm_str, std::path::Path::new("test.md")).unwrap();
+
+        // Serialize once
+        let doc1 = serialize_document(&fm, "\n# Project\n");
+        // Extract body from first serialisation and re-serialize
+        let (_, body1) = split_frontmatter(&doc1).unwrap();
+        let doc2 = serialize_document(&fm, &body1);
+
+        // Count occurrences of mc-links -- should be exactly one
+        let count = doc2.matches("%% mc-links:").count();
+        assert_eq!(count, 1, "mc-links duplicated after re-serialise:\n{doc2}");
+    }
+
+    #[test]
+    fn test_serialize_no_links_no_comment() {
+        let fm_str = "id: RES-001\ntitle: Plain research";
+        let fm = parse_raw(fm_str, std::path::Path::new("test.md")).unwrap();
+        let doc = serialize_document(&fm, "\n# Research\n");
+
+        assert!(
+            !doc.contains("%% mc-links:"),
+            "no mc-links comment expected when no wiki-links:\n{doc}"
+        );
     }
 }
