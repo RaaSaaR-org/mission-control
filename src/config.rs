@@ -70,6 +70,7 @@ pub struct IdPrefixes {
     pub task: String,
     pub sprint: String,
     pub proposal: String,
+    pub contact: String,
 }
 
 #[derive(Debug, Clone)]
@@ -81,6 +82,7 @@ pub struct StatusConfig {
     pub task: Vec<String>,
     pub sprint: Vec<String>,
     pub proposal: Vec<String>,
+    pub contact: Vec<String>,
 }
 
 /// Walk up from `start` looking for a MissionControl config.
@@ -175,6 +177,10 @@ pub fn load_config(root: &Path, mode: RepoMode) -> McResult<ResolvedConfig> {
                 .get("proposal")
                 .cloned()
                 .unwrap_or_else(|| "PROP".into()),
+            contact: prefixes
+                .get("contact")
+                .cloned()
+                .unwrap_or_else(|| "CONT".into()),
         },
         statuses: StatusConfig {
             customer: statuses
@@ -222,6 +228,10 @@ pub fn load_config(root: &Path, mode: RepoMode) -> McResult<ResolvedConfig> {
                     "withdrawn".into(),
                 ]
             }),
+            contact: statuses
+                .get("contact")
+                .cloned()
+                .unwrap_or_else(|| vec!["active".into(), "inactive".into()]),
         },
         brand: resolve_brand(&base_dir, raw_brand),
     };
@@ -240,6 +250,7 @@ fn validate_status_config(statuses: &StatusConfig) -> McResult<()> {
         ("task", &statuses.task),
         ("sprint", &statuses.sprint),
         ("proposal", &statuses.proposal),
+        ("contact", &statuses.contact),
     ];
     for (name, list) in checks {
         if list.is_empty() {
@@ -265,6 +276,7 @@ mod tests {
             task: vec!["todo".into()],
             sprint: vec!["planning".into()],
             proposal: vec!["draft".into()],
+            contact: vec!["active".into()],
         }
     }
 

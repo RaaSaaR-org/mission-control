@@ -6,7 +6,7 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
-/// The seven entity kinds managed by MissionControl.
+/// The entity kinds managed by MissionControl.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EntityKind {
     Customer,
@@ -16,6 +16,7 @@ pub enum EntityKind {
     Task,
     Sprint,
     Proposal,
+    Contact,
 }
 
 impl EntityKind {
@@ -28,6 +29,7 @@ impl EntityKind {
             EntityKind::Task => "task",
             EntityKind::Sprint => "sprint",
             EntityKind::Proposal => "proposal",
+            EntityKind::Contact => "contact",
         }
     }
 
@@ -40,6 +42,7 @@ impl EntityKind {
             EntityKind::Task => "tasks",
             EntityKind::Sprint => "sprints",
             EntityKind::Proposal => "proposals",
+            EntityKind::Contact => "contacts",
         }
     }
 
@@ -52,6 +55,7 @@ impl EntityKind {
             EntityKind::Task => &cfg.id_prefixes.task,
             EntityKind::Sprint => &cfg.id_prefixes.sprint,
             EntityKind::Proposal => &cfg.id_prefixes.proposal,
+            EntityKind::Contact => &cfg.id_prefixes.contact,
         }
     }
 
@@ -64,6 +68,7 @@ impl EntityKind {
             EntityKind::Task => &cfg.tasks_dir,
             EntityKind::Sprint => &cfg.sprints_dir,
             EntityKind::Proposal => &cfg.proposals_dir,
+            EntityKind::Contact => &cfg.customers_dir, // contacts live under customers/*/contacts/
         }
     }
 
@@ -76,6 +81,7 @@ impl EntityKind {
             EntityKind::Task => &cfg.statuses.task,
             EntityKind::Sprint => &cfg.statuses.sprint,
             EntityKind::Proposal => &cfg.statuses.proposal,
+            EntityKind::Contact => &cfg.statuses.contact,
         }
     }
 
@@ -103,6 +109,7 @@ impl EntityKind {
             "task" | "tasks" => Ok(EntityKind::Task),
             "sprint" | "sprints" => Ok(EntityKind::Sprint),
             "proposal" | "proposals" | "prop" => Ok(EntityKind::Proposal),
+            "contact" | "contacts" => Ok(EntityKind::Contact),
             _ => Err(McError::Other(format!("Unknown entity kind: {s}"))),
         }
     }
@@ -123,9 +130,11 @@ impl EntityKind {
             Ok(EntityKind::Sprint)
         } else if id.starts_with(&format!("{}-", cfg.id_prefixes.proposal)) {
             Ok(EntityKind::Proposal)
+        } else if id.starts_with(&format!("{}-", cfg.id_prefixes.contact)) {
+            Ok(EntityKind::Contact)
         } else {
             Err(McError::InvalidId(format!(
-                "{} (expected format like {}-001, {}-002, {}-003, {}-001, {}-001, {}-001, or {}-001)",
+                "{} (expected format like {}-001, {}-002, {}-003, {}-001, {}-001, {}-001, {}-001, or {}-001)",
                 id,
                 cfg.id_prefixes.customer,
                 cfg.id_prefixes.project,
@@ -134,6 +143,7 @@ impl EntityKind {
                 cfg.id_prefixes.task,
                 cfg.id_prefixes.sprint,
                 cfg.id_prefixes.proposal,
+                cfg.id_prefixes.contact,
             )))
         }
     }
@@ -208,6 +218,31 @@ pub fn collect_all_task_dirs(cfg: &ResolvedConfig) -> Vec<TaskLocation> {
                     let tasks_subdir = entry.path().join("tasks");
                     locations.push(TaskLocation {
                         tasks_dir: tasks_subdir,
+                    });
+                }
+            }
+        }
+    }
+
+    locations
+}
+
+/// A contact directory discovered on disk.
+pub struct ContactLocation {
+    pub contacts_dir: PathBuf,
+}
+
+/// Collect all directories that can contain contacts: each `customers/*/contacts/`.
+pub fn collect_all_contact_dirs(cfg: &ResolvedConfig) -> Vec<ContactLocation> {
+    let mut locations = Vec::new();
+
+    if cfg.customers_dir.is_dir() {
+        if let Ok(entries) = std::fs::read_dir(&cfg.customers_dir) {
+            for entry in entries.filter_map(|e| e.ok()) {
+                if entry.file_type().is_ok_and(|ft| ft.is_dir()) {
+                    let contacts_subdir = entry.path().join("contacts");
+                    locations.push(ContactLocation {
+                        contacts_dir: contacts_subdir,
                     });
                 }
             }
@@ -292,6 +327,25 @@ pub fn next_id(kind: EntityKind, cfg: &ResolvedConfig) -> McResult<EntityId> {
                                     if let Ok(n) = caps[1].parse::<u32>() {
                                         max_num = max_num.max(n);
                                     }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        EntityKind::Contact => {
+            // Scan all contact locations (per-customer)
+            let locations = collect_all_contact_dirs(cfg);
+            for loc in &locations {
+                if loc.contacts_dir.is_dir() {
+                    if let Ok(entries) = std::fs::read_dir(&loc.contacts_dir) {
+                        for entry in entries.filter_map(|e| e.ok()) {
+                            let name = entry.file_name();
+                            let name = name.to_string_lossy();
+                            if let Some(caps) = id_re.captures(&name) {
+                                if let Ok(n) = caps[1].parse::<u32>() {
+                                    max_num = max_num.max(n);
                                 }
                             }
                         }

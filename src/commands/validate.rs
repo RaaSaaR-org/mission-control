@@ -46,6 +46,7 @@ pub fn validate_programmatic(cfg: &ResolvedConfig) -> McResult<Vec<ValidationIss
     if cfg.mode == RepoMode::Standalone {
         validate_entity_dirs(EntityKind::Customer, cfg, &mut issues)?;
         validate_entity_dirs(EntityKind::Project, cfg, &mut issues)?;
+        validate_contacts(cfg, &mut issues)?;
     }
     validate_meetings(cfg, &mut issues)?;
     validate_entity_dirs(EntityKind::Research, cfg, &mut issues)?;
@@ -75,6 +76,10 @@ fn validate_entity_dirs(
     ))
     .expect("regex with escaped prefix is always valid");
 
+    // Regex to extract entity ID from directory name (e.g. "CUST-001" from "CUST-001-acme")
+    let id_re = Regex::new(&format!(r"^({}-\d+)", regex::escape(prefix)))
+        .expect("regex with escaped prefix is always valid");
+
     for entry in std::fs::read_dir(base)? {
         let entry = entry?;
         if !entry.file_type()?.is_dir() {
@@ -94,10 +99,23 @@ fn validate_entity_dirs(
             });
         }
 
-        // Check for _index.md or overview.md
-        let index_file = match kind {
-            EntityKind::Project => entry.path().join("overview.md"),
-            _ => entry.path().join("_index.md"),
+        // Check for ID-based filename (e.g. CUST-001.md), falling back to legacy names
+        let index_file = if let Some(caps) = id_re.captures(&dir_name) {
+            let id_file = entry.path().join(format!("{}.md", &caps[1]));
+            if id_file.is_file() {
+                id_file
+            } else {
+                // Backward compat: try legacy filenames
+                match kind {
+                    EntityKind::Project => entry.path().join("overview.md"),
+                    _ => entry.path().join("_index.md"),
+                }
+            }
+        } else {
+            match kind {
+                EntityKind::Project => entry.path().join("overview.md"),
+                _ => entry.path().join("_index.md"),
+            }
         };
 
         if !index_file.is_file() {
@@ -279,6 +297,51 @@ fn validate_tasks(cfg: &ResolvedConfig, issues: &mut Vec<ValidationIssue>) -> Mc
                     // Validate frontmatter
                     validate_task_frontmatter_file(&path, prefix, cfg, expected_statuses, issues);
                 }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Validate all contact files across customer directories.
+fn validate_contacts(cfg: &ResolvedConfig, issues: &mut Vec<ValidationIssue>) -> McResult<()> {
+    let locations = entity::collect_all_contact_dirs(cfg);
+    let prefix = &cfg.id_prefixes.contact;
+    let filename_re = Regex::new(&format!(
+        r"^{}-\d{{3}}-[a-z0-9]+(-[a-z0-9]+)*\.md$",
+        regex::escape(prefix)
+    ))
+    .expect("regex with escaped prefix is always valid");
+
+    for loc in &locations {
+        if !loc.contacts_dir.is_dir() {
+            continue;
+        }
+        if let Ok(entries) = std::fs::read_dir(&loc.contacts_dir) {
+            for entry in entries.filter_map(|e| e.ok()) {
+                let path = entry.path();
+                if path.extension().is_none_or(|e| e != "md") {
+                    continue;
+                }
+
+                let Some(fname) = path.file_name() else {
+                    continue;
+                };
+                let filename = fname.to_string_lossy().to_string();
+
+                if !filename_re.is_match(&filename) {
+                    issues.push(ValidationIssue {
+                        path: path.display().to_string(),
+                        check: "contact-filename".into(),
+                        message: format!(
+                            "Contact filename does not match {}-NNN-slug.md pattern",
+                            prefix
+                        ),
+                    });
+                }
+
+                validate_frontmatter_file(&path, EntityKind::Contact, prefix, cfg, issues);
             }
         }
     }
@@ -488,7 +551,9 @@ fn validate_frontmatter_file(
 
     // Check 6: required name/title field
     let has_name = match kind {
-        EntityKind::Customer | EntityKind::Project => frontmatter::get_str(&fm, "name").is_some(),
+        EntityKind::Customer | EntityKind::Project | EntityKind::Contact => {
+            frontmatter::get_str(&fm, "name").is_some()
+        }
         EntityKind::Meeting
         | EntityKind::Research
         | EntityKind::Task
@@ -497,7 +562,7 @@ fn validate_frontmatter_file(
     };
     if !has_name {
         let field = match kind {
-            EntityKind::Customer | EntityKind::Project => "name",
+            EntityKind::Customer | EntityKind::Project | EntityKind::Contact => "name",
             _ => "title",
         };
         issues.push(ValidationIssue {
@@ -528,6 +593,7 @@ fn validate_frontmatter_file(
         && kind != EntityKind::Task
         && kind != EntityKind::Sprint
         && kind != EntityKind::Proposal
+        && kind != EntityKind::Contact
     {
         if let Some(slug) = frontmatter::get_str(&fm, "slug") {
             // Check that the parent directory contains the slug

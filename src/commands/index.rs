@@ -2,9 +2,44 @@ use crate::config::ResolvedConfig;
 use crate::data;
 use crate::entity::EntityKind;
 use crate::error::McResult;
+use crate::frontmatter;
 use crate::util;
 use colored::*;
 use serde_json::Value as JsonValue;
+
+/// Fields that may contain wiki-link brackets and should be stripped for JSON output.
+const WIKILINK_FIELDS: &[&str] = &[
+    "customers",
+    "projects",
+    "depends_on",
+    "sprint",
+    "supersedes",
+    "superseded_by",
+    "customer",
+];
+
+/// Strip wiki-link brackets from known cross-reference fields in a JSON object.
+fn strip_wikilinks_in_json(val: &mut JsonValue) {
+    if let Some(obj) = val.as_object_mut() {
+        for &field in WIKILINK_FIELDS {
+            if let Some(v) = obj.get_mut(field) {
+                match v {
+                    JsonValue::String(s) => {
+                        *s = frontmatter::strip_wikilink(s).to_string();
+                    }
+                    JsonValue::Array(arr) => {
+                        for item in arr.iter_mut() {
+                            if let JsonValue::String(s) = item {
+                                *s = frontmatter::strip_wikilink(s).to_string();
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+}
 
 pub fn run(cfg: &ResolvedConfig) -> McResult<()> {
     println!("{} Building indexes...", "⟳".blue());
@@ -12,7 +47,7 @@ pub fn run(cfg: &ResolvedConfig) -> McResult<()> {
     let result = run_quiet(cfg)?;
 
     println!(
-        "{} Index built: {} customers, {} projects, {} meetings, {} research, {} tasks, {} sprints, {} proposals",
+        "{} Index built: {} customers, {} projects, {} meetings, {} research, {} tasks, {} sprints, {} proposals, {} contacts",
         "✓".green().bold(),
         result.customers.to_string().cyan(),
         result.projects.to_string().cyan(),
@@ -21,6 +56,7 @@ pub fn run(cfg: &ResolvedConfig) -> McResult<()> {
         result.tasks.to_string().cyan(),
         result.sprints.to_string().cyan(),
         result.proposals.to_string().cyan(),
+        result.contacts.to_string().cyan(),
     );
 
     Ok(())
@@ -34,6 +70,7 @@ pub struct IndexResult {
     pub tasks: usize,
     pub sprints: usize,
     pub proposals: usize,
+    pub contacts: usize,
 }
 
 /// Build indexes without printing to stdout.
@@ -45,6 +82,7 @@ pub fn run_quiet(cfg: &ResolvedConfig) -> McResult<IndexResult> {
     let tasks = collect_json(EntityKind::Task, cfg)?;
     let sprints = collect_json(EntityKind::Sprint, cfg)?;
     let proposals = collect_json(EntityKind::Proposal, cfg)?;
+    let contacts = collect_json(EntityKind::Contact, cfg)?;
 
     std::fs::create_dir_all(&cfg.data_dir)?;
 
@@ -57,6 +95,7 @@ pub fn run_quiet(cfg: &ResolvedConfig) -> McResult<IndexResult> {
         "tasks": tasks,
         "sprints": sprints,
         "proposals": proposals,
+        "contacts": contacts,
     });
 
     let index_path = cfg.data_dir.join("index.json");
@@ -94,6 +133,12 @@ pub fn run_quiet(cfg: &ResolvedConfig) -> McResult<IndexResult> {
         proposals_data.as_bytes(),
     )?;
 
+    let contacts_data = serde_json::to_string_pretty(&contacts)? + "\n";
+    util::atomic_write(
+        &cfg.data_dir.join("contacts.json"),
+        contacts_data.as_bytes(),
+    )?;
+
     Ok(IndexResult {
         customers: customers.len(),
         projects: projects.len(),
@@ -102,6 +147,7 @@ pub fn run_quiet(cfg: &ResolvedConfig) -> McResult<IndexResult> {
         tasks: tasks.len(),
         sprints: sprints.len(),
         proposals: proposals.len(),
+        contacts: contacts.len(),
     })
 }
 
@@ -111,6 +157,7 @@ fn collect_json(kind: EntityKind, cfg: &ResolvedConfig) -> McResult<Vec<JsonValu
 
     for entity in &entities {
         let mut json_val = data::yaml_to_json(&entity.frontmatter);
+        strip_wikilinks_in_json(&mut json_val);
         if let Some(obj) = json_val.as_object_mut() {
             let rel = entity
                 .source_path

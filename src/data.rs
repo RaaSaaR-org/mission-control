@@ -2,11 +2,16 @@ use crate::config::ResolvedConfig;
 use crate::entity::{self, EntityKind};
 use crate::error::{McError, McResult};
 use crate::frontmatter;
+use regex::Regex;
 use serde_json::Value as JsonValue;
 use serde_yaml::Value;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use std::sync::LazyLock;
 use walkdir::WalkDir;
+
+/// Matches ID-based entity filenames like `CUST-001.md`, `PROJ-002.md`.
+static ID_FILENAME_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^[A-Z]+-\d+\.md$").unwrap());
 
 /// A loaded entity with frontmatter, body, and source path.
 pub struct EntityRecord {
@@ -43,10 +48,20 @@ pub struct TaskFilter<'a> {
     pub owner: Option<&'a str>,
 }
 
-/// Collect all canonical entities of a given kind (not tasks -- use collect_tasks for those).
+/// Filters for contact queries.
+pub struct ContactFilter<'a> {
+    pub status: Option<&'a str>,
+    pub tag: Option<&'a str>,
+    pub customer: Option<&'a str>,
+}
+
+/// Collect all canonical entities of a given kind (not tasks or contacts -- use dedicated functions).
 pub fn collect_entities(kind: EntityKind, cfg: &ResolvedConfig) -> McResult<Vec<EntityRecord>> {
     if kind == EntityKind::Task {
         return collect_tasks(cfg);
+    }
+    if kind == EntityKind::Contact {
+        return collect_contacts(cfg);
     }
 
     let base = kind.base_dir(cfg);
@@ -67,8 +82,10 @@ pub fn collect_entities(kind: EntityKind, cfg: &ResolvedConfig) -> McResult<Vec<
         }
 
         let filename = path.file_name().unwrap_or_default().to_string_lossy();
-        let is_canonical =
-            filename == "_index.md" || filename == "overview.md" || path.parent() == Some(base);
+        let is_canonical = path.parent() == Some(base)
+            || ID_FILENAME_RE.is_match(&filename)
+            || filename == "_index.md"
+            || filename == "overview.md";
 
         if !is_canonical {
             continue;
@@ -165,14 +182,14 @@ pub fn collect_tasks_filtered(
     }
     if let Some(project) = filter.project {
         tasks.retain(|e| {
-            frontmatter::get_string_list(&e.frontmatter, "projects")
+            frontmatter::get_link_list(&e.frontmatter, "projects")
                 .iter()
                 .any(|p| p.eq_ignore_ascii_case(project))
         });
     }
     if let Some(customer) = filter.customer {
         tasks.retain(|e| {
-            frontmatter::get_string_list(&e.frontmatter, "customers")
+            frontmatter::get_link_list(&e.frontmatter, "customers")
                 .iter()
                 .any(|c| c.eq_ignore_ascii_case(customer))
         });
@@ -182,7 +199,7 @@ pub fn collect_tasks_filtered(
     }
     if let Some(sprint) = filter.sprint {
         tasks.retain(|e| {
-            frontmatter::get_str(&e.frontmatter, "sprint")
+            frontmatter::get_link_str(&e.frontmatter, "sprint")
                 .is_some_and(|s| s.eq_ignore_ascii_case(sprint))
         });
     }
@@ -203,6 +220,9 @@ pub fn find_entity_by_id(id: &str, cfg: &ResolvedConfig) -> McResult<EntityRecor
 
     if kind == EntityKind::Task {
         return find_task_by_id(id, cfg);
+    }
+    if kind == EntityKind::Contact {
+        return find_contact_by_id(id, cfg);
     }
 
     let base = kind.base_dir(cfg);
@@ -307,6 +327,9 @@ pub fn count_by_status(kind: EntityKind, cfg: &ResolvedConfig) -> McResult<Statu
     if kind == EntityKind::Task {
         return count_tasks_by_status(cfg);
     }
+    if kind == EntityKind::Contact {
+        return count_contacts_by_status(cfg);
+    }
 
     let base = kind.base_dir(cfg);
     let prefix = kind.prefix(cfg);
@@ -323,8 +346,10 @@ pub fn count_by_status(kind: EntityKind, cfg: &ResolvedConfig) -> McResult<Statu
             }
 
             let filename = path.file_name().unwrap_or_default().to_string_lossy();
-            let is_canonical =
-                filename == "_index.md" || filename == "overview.md" || path.parent() == Some(base);
+            let is_canonical = path.parent() == Some(base)
+                || ID_FILENAME_RE.is_match(&filename)
+                || filename == "_index.md"
+                || filename == "overview.md";
             if !is_canonical {
                 continue;
             }
@@ -378,6 +403,139 @@ fn count_tasks_by_status(cfg: &ResolvedConfig) -> McResult<StatusCounts> {
         total,
         by_status,
     })
+}
+
+/// Collect all contacts from all customer directories.
+pub fn collect_contacts(cfg: &ResolvedConfig) -> McResult<Vec<EntityRecord>> {
+    let locations = entity::collect_all_contact_dirs(cfg);
+    let prefix = &cfg.id_prefixes.contact;
+    let id_prefix = format!("{}-", prefix);
+    let mut records = Vec::new();
+    let mut seen_ids = HashSet::new();
+
+    for loc in &locations {
+        if !loc.contacts_dir.is_dir() {
+            continue;
+        }
+        if let Ok(entries) = std::fs::read_dir(&loc.contacts_dir) {
+            for entry in entries.filter_map(|e| e.ok()) {
+                let path = entry.path();
+                if path.extension().is_none_or(|e| e != "md") {
+                    continue;
+                }
+                if let Ok(content) = std::fs::read_to_string(&path) {
+                    if let Some((fm_str, body)) = frontmatter::split_frontmatter(&content) {
+                        if let Ok(fm) = frontmatter::parse_raw(&fm_str, &path) {
+                            if let Some(id) = frontmatter::get_str(&fm, "id") {
+                                if id.starts_with(&id_prefix) && seen_ids.insert(id.to_string()) {
+                                    records.push(EntityRecord {
+                                        kind: EntityKind::Contact,
+                                        id: id.to_string(),
+                                        frontmatter: fm,
+                                        body,
+                                        source_path: path.to_path_buf(),
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    records.sort_by(|a, b| a.id.cmp(&b.id));
+    Ok(records)
+}
+
+/// Find a contact by its ID, scanning all customer contact directories.
+fn find_contact_by_id(id: &str, cfg: &ResolvedConfig) -> McResult<EntityRecord> {
+    let locations = entity::collect_all_contact_dirs(cfg);
+
+    for loc in &locations {
+        if !loc.contacts_dir.is_dir() {
+            continue;
+        }
+        if let Ok(entries) = std::fs::read_dir(&loc.contacts_dir) {
+            for entry in entries.filter_map(|e| e.ok()) {
+                let path = entry.path();
+                if path.extension().is_none_or(|e| e != "md") {
+                    continue;
+                }
+                if let Ok(content) = std::fs::read_to_string(&path) {
+                    if let Some((fm_str, body)) = frontmatter::split_frontmatter(&content) {
+                        if let Ok(fm) = frontmatter::parse_raw(&fm_str, &path) {
+                            if frontmatter::get_str(&fm, "id") == Some(id) {
+                                return Ok(EntityRecord {
+                                    kind: EntityKind::Contact,
+                                    id: id.to_string(),
+                                    frontmatter: fm,
+                                    body,
+                                    source_path: path.to_path_buf(),
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Err(McError::EntityNotFound(id.to_string()))
+}
+
+/// Count contacts by status across all customer directories.
+fn count_contacts_by_status(cfg: &ResolvedConfig) -> McResult<StatusCounts> {
+    let contacts = collect_contacts(cfg)?;
+    let mut status_counts: HashMap<String, usize> = HashMap::new();
+
+    for contact in &contacts {
+        let status = frontmatter::get_str(&contact.frontmatter, "status")
+            .unwrap_or("unknown")
+            .to_string();
+        *status_counts.entry(status).or_insert(0) += 1;
+    }
+
+    let total: usize = status_counts.values().sum();
+    let mut by_status: Vec<(String, usize)> = status_counts.into_iter().collect();
+    by_status.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+
+    Ok(StatusCounts {
+        label: "contacts".to_string(),
+        total,
+        by_status,
+    })
+}
+
+/// Collect contacts with rich filtering support.
+pub fn collect_contacts_filtered(
+    cfg: &ResolvedConfig,
+    filter: &ContactFilter,
+) -> McResult<Vec<EntityRecord>> {
+    let mut contacts = collect_contacts(cfg)?;
+
+    if let Some(status) = filter.status {
+        contacts.retain(|e| {
+            frontmatter::get_str(&e.frontmatter, "status")
+                .is_some_and(|s| s.eq_ignore_ascii_case(status))
+        });
+    }
+    if let Some(tag) = filter.tag {
+        contacts.retain(|e| {
+            frontmatter::get_string_list(&e.frontmatter, "tags")
+                .iter()
+                .any(|t| t.eq_ignore_ascii_case(tag))
+        });
+    }
+    if let Some(customer) = filter.customer {
+        contacts.retain(|e| {
+            frontmatter::get_link_str(&e.frontmatter, "customer")
+                .is_some_and(|c| c.eq_ignore_ascii_case(customer))
+        });
+    }
+
+    contacts.sort_by(|a, b| a.id.cmp(&b.id));
+    Ok(contacts)
 }
 
 /// Get recently modified files across all entity directories.
@@ -620,6 +778,120 @@ mod tests {
 
         let result = find_entity_by_id("CUST-999", &cfg);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_collect_contacts_empty() {
+        let (_tmp, cfg) = setup_repo();
+
+        let contacts = collect_contacts(&cfg).unwrap();
+        assert!(contacts.is_empty());
+    }
+
+    #[test]
+    fn test_collect_contacts_after_creation() {
+        let (_tmp, cfg) = setup_repo();
+
+        new::create_customer_programmatic(&cfg, "Acme", None, Some("active"), None).unwrap();
+        new::create_contact_programmatic(
+            &cfg,
+            "Alice",
+            "CUST-001",
+            Some("VP"),
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        new::create_contact_programmatic(
+            &cfg,
+            "Bob",
+            "CUST-001",
+            Some("CTO"),
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+
+        let contacts = collect_contacts(&cfg).unwrap();
+        assert_eq!(contacts.len(), 2);
+    }
+
+    #[test]
+    fn test_find_contact_by_id() {
+        let (_tmp, cfg) = setup_repo();
+
+        new::create_customer_programmatic(&cfg, "Acme", None, Some("active"), None).unwrap();
+        new::create_contact_programmatic(&cfg, "Alice", "CUST-001", None, None, None, None, None)
+            .unwrap();
+
+        let contact = find_contact_by_id("CONT-001", &cfg).unwrap();
+        assert_eq!(contact.id, "CONT-001");
+        assert_eq!(contact.kind, EntityKind::Contact);
+    }
+
+    #[test]
+    fn test_collect_contacts_filtered_by_customer() {
+        let (_tmp, cfg) = setup_repo();
+
+        new::create_customer_programmatic(&cfg, "Acme", None, Some("active"), None).unwrap();
+        new::create_customer_programmatic(&cfg, "Beta", None, Some("active"), None).unwrap();
+        new::create_contact_programmatic(&cfg, "Alice", "CUST-001", None, None, None, None, None)
+            .unwrap();
+        new::create_contact_programmatic(&cfg, "Bob", "CUST-002", None, None, None, None, None)
+            .unwrap();
+
+        let filter = ContactFilter {
+            status: None,
+            tag: None,
+            customer: Some("CUST-001"),
+        };
+        let filtered = collect_contacts_filtered(&cfg, &filter).unwrap();
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].id, "CONT-001");
+    }
+
+    #[test]
+    fn test_count_contacts_by_status() {
+        let (_tmp, cfg) = setup_repo();
+
+        new::create_customer_programmatic(&cfg, "Acme", None, Some("active"), None).unwrap();
+        new::create_contact_programmatic(
+            &cfg,
+            "Alice",
+            "CUST-001",
+            None,
+            None,
+            None,
+            Some("active"),
+            None,
+        )
+        .unwrap();
+        new::create_contact_programmatic(
+            &cfg,
+            "Bob",
+            "CUST-001",
+            None,
+            None,
+            None,
+            Some("inactive"),
+            None,
+        )
+        .unwrap();
+
+        let counts = count_contacts_by_status(&cfg).unwrap();
+        assert_eq!(counts.total, 2);
+        assert!(counts
+            .by_status
+            .iter()
+            .any(|(s, c)| s == "active" && *c == 1));
+        assert!(counts
+            .by_status
+            .iter()
+            .any(|(s, c)| s == "inactive" && *c == 1));
     }
 
     #[test]

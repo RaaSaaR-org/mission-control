@@ -2,6 +2,7 @@ use crate::commands;
 use crate::config::{RepoMode, ResolvedConfig};
 use crate::data;
 use crate::entity::EntityKind;
+use crate::frontmatter;
 use rmcp::handler::server::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{
@@ -14,9 +15,44 @@ use rmcp::{tool, tool_handler, tool_router, ErrorData as McpError, RoleServer, S
 use serde::Deserialize;
 use serde_json::Value as JsonValue;
 
+/// Fields that may contain wiki-link brackets and should be stripped for JSON output.
+const WIKILINK_FIELDS: &[&str] = &[
+    "customers",
+    "projects",
+    "depends_on",
+    "sprint",
+    "supersedes",
+    "superseded_by",
+    "customer",
+];
+
+/// Strip wiki-link brackets from known cross-reference fields in a JSON object.
+fn strip_wikilinks_in_json(val: &mut JsonValue) {
+    if let Some(obj) = val.as_object_mut() {
+        for &field in WIKILINK_FIELDS {
+            if let Some(v) = obj.get_mut(field) {
+                match v {
+                    JsonValue::String(s) => {
+                        *s = frontmatter::strip_wikilink(s).to_string();
+                    }
+                    JsonValue::Array(arr) => {
+                        for item in arr.iter_mut() {
+                            if let JsonValue::String(s) = item {
+                                *s = frontmatter::strip_wikilink(s).to_string();
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+}
+
 /// Helper: convert an EntityRecord's frontmatter to JSON, adding _source.
 fn entity_to_json(rec: &data::EntityRecord, cfg: &ResolvedConfig) -> JsonValue {
     let mut val = data::yaml_to_json(&rec.frontmatter);
+    strip_wikilinks_in_json(&mut val);
     if let Some(obj) = val.as_object_mut() {
         let rel = rec
             .source_path
@@ -40,8 +76,10 @@ fn mc_err(e: impl std::fmt::Display) -> McpError {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct ListEntitiesParams {
-    /// Entity kind: customers, projects, meetings, research, or tasks
-    #[schemars(description = "Entity kind: customers, projects, meetings, research, or tasks")]
+    /// Entity kind: customers, projects, meetings, research, tasks, or contacts
+    #[schemars(
+        description = "Entity kind: customers, projects, meetings, research, tasks, or contacts"
+    )]
     pub kind: String,
     /// Filter by status (optional)
     #[schemars(description = "Filter by status (e.g. active, draft)")]
@@ -126,6 +164,9 @@ pub struct CreateMeetingParams {
     /// Linked project IDs, comma-separated (optional)
     #[schemars(description = "Linked project IDs, comma-separated")]
     pub projects: Option<String>,
+    /// Comma-separated attendee names (optional)
+    #[schemars(description = "Comma-separated attendee names")]
+    pub attendees: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -230,6 +271,31 @@ pub struct CreateProposalParams {
     /// ID of proposal this supersedes (optional, e.g. PROP-001)
     #[schemars(description = "ID of proposal this supersedes (e.g. PROP-001)")]
     pub supersedes: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct CreateContactParams {
+    /// Contact full name
+    #[schemars(description = "Contact full name")]
+    pub name: String,
+    /// Customer ID (required, e.g. CUST-001)
+    #[schemars(description = "Customer ID (required, e.g. CUST-001)")]
+    pub customer: String,
+    /// Role / job title (optional)
+    #[schemars(description = "Role or job title")]
+    pub role: Option<String>,
+    /// Email address (optional)
+    #[schemars(description = "Email address")]
+    pub email: Option<String>,
+    /// Phone number (optional)
+    #[schemars(description = "Phone number")]
+    pub phone: Option<String>,
+    /// Status (optional, defaults to active)
+    #[schemars(description = "Status (defaults to active)")]
+    pub status: Option<String>,
+    /// Comma-separated tags (optional)
+    #[schemars(description = "Comma-separated tags")]
+    pub tags: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -431,6 +497,7 @@ impl McServer {
             params.tags.as_deref(),
             params.customers.as_deref(),
             params.projects.as_deref(),
+            params.attendees.as_deref(),
         )
         .map_err(mc_err)?;
         let text = serde_json::to_string_pretty(&result).map_err(mc_err)?;
@@ -511,6 +578,26 @@ impl McServer {
             params.proposal_type.as_deref(),
             params.tags.as_deref(),
             params.supersedes.as_deref(),
+        )
+        .map_err(mc_err)?;
+        let text = serde_json::to_string_pretty(&result).map_err(mc_err)?;
+        Ok(CallToolResult::success(vec![Content::text(text)]))
+    }
+
+    #[tool(description = "Create a new contact under a customer (standalone mode only)")]
+    async fn create_contact(
+        &self,
+        Parameters(params): Parameters<CreateContactParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let result = commands::new::create_contact_programmatic(
+            &self.cfg,
+            &params.name,
+            &params.customer,
+            params.role.as_deref(),
+            params.email.as_deref(),
+            params.phone.as_deref(),
+            params.status.as_deref(),
+            params.tags.as_deref(),
         )
         .map_err(mc_err)?;
         let text = serde_json::to_string_pretty(&result).map_err(mc_err)?;
@@ -625,8 +712,8 @@ impl McServer {
     async fn build_index(&self) -> Result<CallToolResult, McpError> {
         let result = commands::index::run_quiet(&self.cfg).map_err(mc_err)?;
         let text = format!(
-            "Index built: {} customers, {} projects, {} meetings, {} research, {} tasks, {} sprints, {} proposals",
-            result.customers, result.projects, result.meetings, result.research, result.tasks, result.sprints, result.proposals,
+            "Index built: {} customers, {} projects, {} meetings, {} research, {} tasks, {} sprints, {} proposals, {} contacts",
+            result.customers, result.projects, result.meetings, result.research, result.tasks, result.sprints, result.proposals, result.contacts,
         );
         Ok(CallToolResult::success(vec![Content::text(text)]))
     }
@@ -641,6 +728,7 @@ impl McServer {
             EntityKind::Task,
             EntityKind::Sprint,
             EntityKind::Proposal,
+            EntityKind::Contact,
         ];
 
         let mut counts = serde_json::Map::new();
@@ -703,7 +791,7 @@ impl ServerHandler for McServer {
             self.cfg.root.display(),
             match self.cfg.mode {
                 RepoMode::Standalone =>
-                    "customers, projects, meetings, research, sprints, proposals, and tasks",
+                    "customers, projects, contacts, meetings, research, sprints, proposals, and tasks",
                 RepoMode::Embedded => "meetings, research, sprints, proposals, and tasks",
             }
         );
@@ -758,6 +846,10 @@ impl ServerHandler for McServer {
             RawResource::new("mc://entities/proposals", "proposals"),
             None,
         ));
+        resources.push(Annotated::new(
+            RawResource::new("mc://entities/contacts", "contacts"),
+            None,
+        ));
 
         Ok(ListResourcesResult {
             resources,
@@ -784,6 +876,7 @@ impl ServerHandler for McServer {
                         "task": &self.cfg.id_prefixes.task,
                         "sprint": &self.cfg.id_prefixes.sprint,
                         "proposal": &self.cfg.id_prefixes.proposal,
+                        "contact": &self.cfg.id_prefixes.contact,
                     },
                     "statuses": {
                         "customer": &self.cfg.statuses.customer,
@@ -793,6 +886,7 @@ impl ServerHandler for McServer {
                         "task": &self.cfg.statuses.task,
                         "sprint": &self.cfg.statuses.sprint,
                         "proposal": &self.cfg.statuses.proposal,
+                        "contact": &self.cfg.statuses.contact,
                     },
                     "paths": {
                         "customers": self.cfg.customers_dir.display().to_string(),
@@ -832,6 +926,10 @@ impl ServerHandler for McServer {
             }
             "mc://entities/proposals" => {
                 let entities = collect_entity_json(EntityKind::Proposal, &self.cfg)?;
+                serde_json::to_string_pretty(&entities).map_err(mc_err)?
+            }
+            "mc://entities/contacts" => {
+                let entities = collect_entity_json(EntityKind::Contact, &self.cfg)?;
                 serde_json::to_string_pretty(&entities).map_err(mc_err)?
             }
             _ => {

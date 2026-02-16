@@ -83,6 +83,7 @@ pub fn run(entity: &NewEntity, cfg: &ResolvedConfig, yes: bool) -> McResult<()> 
             tags,
             customers,
             projects,
+            attendees,
         } => new_meeting(
             cfg,
             title,
@@ -93,6 +94,7 @@ pub fn run(entity: &NewEntity, cfg: &ResolvedConfig, yes: bool) -> McResult<()> 
             tags.as_deref(),
             customers.as_deref(),
             projects.as_deref(),
+            attendees.as_deref(),
             yes,
         ),
         NewEntity::Research {
@@ -169,6 +171,25 @@ pub fn run(entity: &NewEntity, cfg: &ResolvedConfig, yes: bool) -> McResult<()> 
             proposal_type.as_deref(),
             tags.as_deref(),
             supersedes.as_deref(),
+            yes,
+        ),
+        NewEntity::Contact {
+            name,
+            customer,
+            role,
+            email,
+            phone,
+            status,
+            tags,
+        } => new_contact(
+            cfg,
+            name,
+            customer,
+            role.as_deref(),
+            email.as_deref(),
+            phone.as_deref(),
+            status.as_deref(),
+            tags.as_deref(),
             yes,
         ),
     }
@@ -305,6 +326,10 @@ fn new_customer(
     // Build fields
     let mut fields = HashMap::new();
     fields.insert("id".into(), Value::String(id.to_string()));
+    fields.insert(
+        "aliases".into(),
+        Value::Sequence(vec![Value::String(id.to_string())]),
+    );
     fields.insert("name".into(), Value::String(name.to_string()));
     fields.insert("slug".into(), Value::String(slug.clone()));
     fields.insert("status".into(), Value::String(status));
@@ -329,11 +354,8 @@ fn new_customer(
     let dir_name = format!("{}-{}", id, slug);
     let dir_path = cfg.customers_dir.join(&dir_name);
     fs::create_dir_all(&dir_path)?;
-    util::atomic_write(&dir_path.join("_index.md"), doc.as_bytes())?;
-    fs::write(
-        dir_path.join("contacts.md"),
-        format!("# {} -- Contacts\n", name),
-    )?;
+    util::atomic_write(&dir_path.join(format!("{}.md", id)), doc.as_bytes())?;
+    mkdir_with_gitkeep(&dir_path.join("contacts"))?;
     mkdir_with_gitkeep(&dir_path.join("contracts"))?;
     mkdir_with_gitkeep(&dir_path.join("meetings"))?;
     mkdir_with_gitkeep(&dir_path.join("projects"))?;
@@ -420,13 +442,22 @@ fn new_project(
 
     let mut fields = HashMap::new();
     fields.insert("id".into(), Value::String(id.to_string()));
+    fields.insert(
+        "aliases".into(),
+        Value::Sequence(vec![Value::String(id.to_string())]),
+    );
     fields.insert("name".into(), Value::String(name.to_string()));
     fields.insert("slug".into(), Value::String(slug.clone()));
     fields.insert("status".into(), Value::String(status));
     fields.insert("owner".into(), Value::String(owner));
     fields.insert(
         "customers".into(),
-        Value::Sequence(customers.iter().map(|c| Value::String(c.clone())).collect()),
+        Value::Sequence(
+            customers
+                .iter()
+                .map(|c| Value::String(frontmatter::wrap_wikilink(c)))
+                .collect(),
+        ),
     );
     fields.insert(
         "tags".into(),
@@ -446,7 +477,7 @@ fn new_project(
     let dir_name = format!("{}-{}", id, slug);
     let dir_path = cfg.projects_dir.join(&dir_name);
     fs::create_dir_all(&dir_path)?;
-    util::atomic_write(&dir_path.join("overview.md"), doc.as_bytes())?;
+    util::atomic_write(&dir_path.join(format!("{}.md", id)), doc.as_bytes())?;
     fs::write(
         dir_path.join("roadmap.md"),
         format!("# {} -- Roadmap\n", name),
@@ -481,6 +512,7 @@ fn new_meeting(
     tags: Option<&str>,
     customers: Option<&str>,
     projects: Option<&str>,
+    attendees: Option<&str>,
     yes: bool,
 ) -> McResult<()> {
     validate_name_not_empty(title, EntityKind::Meeting)?;
@@ -535,9 +567,12 @@ fn new_meeting(
         }
     };
 
+    let attendees: Vec<String> = attendees.map(util::parse_comma_list).unwrap_or_default();
+
     let tags_display = tags.join(", ");
     let customers_display = customers.join(", ");
     let projects_display = projects.join(", ");
+    let attendees_display = attendees.join(", ");
     print_summary(
         "meeting",
         &[
@@ -550,6 +585,7 @@ fn new_meeting(
             ("Tags", &tags_display),
             ("Customers", &customers_display),
             ("Projects", &projects_display),
+            ("Attendees", &attendees_display),
         ],
     );
 
@@ -562,6 +598,10 @@ fn new_meeting(
 
     let mut fields = HashMap::new();
     fields.insert("id".into(), Value::String(id.to_string()));
+    fields.insert(
+        "aliases".into(),
+        Value::Sequence(vec![Value::String(id.to_string())]),
+    );
     fields.insert("title".into(), Value::String(title.to_string()));
     fields.insert("date".into(), Value::String(date.clone()));
     fields.insert("time".into(), Value::String(time));
@@ -572,11 +612,25 @@ fn new_meeting(
     );
     fields.insert(
         "customers".into(),
-        Value::Sequence(customers.iter().map(|c| Value::String(c.clone())).collect()),
+        Value::Sequence(
+            customers
+                .iter()
+                .map(|c| Value::String(frontmatter::wrap_wikilink(c)))
+                .collect(),
+        ),
     );
     fields.insert(
         "projects".into(),
-        Value::Sequence(projects.iter().map(|p| Value::String(p.clone())).collect()),
+        Value::Sequence(
+            projects
+                .iter()
+                .map(|p| Value::String(frontmatter::wrap_wikilink(p)))
+                .collect(),
+        ),
+    );
+    fields.insert(
+        "attendees".into(),
+        Value::Sequence(attendees.iter().map(|a| Value::String(a.clone())).collect()),
     );
     fields.insert("status".into(), Value::String(status));
 
@@ -661,6 +715,10 @@ fn new_research(
 
     let mut fields = HashMap::new();
     fields.insert("id".into(), Value::String(id.to_string()));
+    fields.insert(
+        "aliases".into(),
+        Value::Sequence(vec![Value::String(id.to_string())]),
+    );
     fields.insert("title".into(), Value::String(title.to_string()));
     fields.insert("slug".into(), Value::String(slug.clone()));
     fields.insert("status".into(), Value::String("draft".into()));
@@ -688,7 +746,7 @@ fn new_research(
     let dir_name = format!("{}-{}", id, slug);
     let dir_path = cfg.research_dir.join(&dir_name);
     fs::create_dir_all(&dir_path)?;
-    util::atomic_write(&dir_path.join("_index.md"), doc.as_bytes())?;
+    util::atomic_write(&dir_path.join(format!("{}.md", id)), doc.as_bytes())?;
 
     // Create agent subdirectories
     for agent in &agents {
@@ -793,6 +851,10 @@ fn new_task(
 
     let mut fields = HashMap::new();
     fields.insert("id".into(), Value::String(id.to_string()));
+    fields.insert(
+        "aliases".into(),
+        Value::Sequence(vec![Value::String(id.to_string())]),
+    );
     fields.insert("title".into(), Value::String(title.to_string()));
     fields.insert("slug".into(), Value::String(slug.clone()));
     fields.insert("status".into(), Value::String(status));
@@ -803,23 +865,36 @@ fn new_task(
     fields.insert("owner".into(), Value::String(owner));
     fields.insert(
         "projects".into(),
-        Value::Sequence(projects.iter().map(|p| Value::String(p.clone())).collect()),
+        Value::Sequence(
+            projects
+                .iter()
+                .map(|p| Value::String(frontmatter::wrap_wikilink(p)))
+                .collect(),
+        ),
     );
     fields.insert(
         "customers".into(),
-        Value::Sequence(customers.iter().map(|c| Value::String(c.clone())).collect()),
+        Value::Sequence(
+            customers
+                .iter()
+                .map(|c| Value::String(frontmatter::wrap_wikilink(c)))
+                .collect(),
+        ),
     );
     fields.insert(
         "tags".into(),
         Value::Sequence(tags.iter().map(|t| Value::String(t.clone())).collect()),
     );
-    fields.insert("sprint".into(), Value::String(sprint));
+    fields.insert(
+        "sprint".into(),
+        Value::String(frontmatter::wrap_wikilink(&sprint)),
+    );
     fields.insert(
         "depends_on".into(),
         Value::Sequence(
             depends_on
                 .iter()
-                .map(|d| Value::String(d.clone()))
+                .map(|d| Value::String(frontmatter::wrap_wikilink(d)))
                 .collect(),
         ),
     );
@@ -948,6 +1023,10 @@ fn new_sprint(
 
     let mut fields = HashMap::new();
     fields.insert("id".into(), Value::String(id.to_string()));
+    fields.insert(
+        "aliases".into(),
+        Value::Sequence(vec![Value::String(id.to_string())]),
+    );
     fields.insert("title".into(), Value::String(title.to_string()));
     fields.insert("status".into(), Value::String(status));
     fields.insert("goal".into(), Value::String(goal));
@@ -956,7 +1035,12 @@ fn new_sprint(
     fields.insert("owner".into(), Value::String(owner));
     fields.insert(
         "projects".into(),
-        Value::Sequence(projects.iter().map(|p| Value::String(p.clone())).collect()),
+        Value::Sequence(
+            projects
+                .iter()
+                .map(|p| Value::String(frontmatter::wrap_wikilink(p)))
+                .collect(),
+        ),
     );
     fields.insert(
         "tags".into(),
@@ -974,7 +1058,7 @@ fn new_sprint(
     let dir_name = format!("{}-{}", id, slug);
     let dir_path = cfg.sprints_dir.join(&dir_name);
     fs::create_dir_all(&dir_path)?;
-    util::atomic_write(&dir_path.join("_index.md"), doc.as_bytes())?;
+    util::atomic_write(&dir_path.join(format!("{}.md", id)), doc.as_bytes())?;
 
     // Create ceremony stub files
     fs::write(
@@ -1083,11 +1167,18 @@ fn new_proposal(
 
     let mut fields = HashMap::new();
     fields.insert("id".into(), Value::String(id.to_string()));
+    fields.insert(
+        "aliases".into(),
+        Value::Sequence(vec![Value::String(id.to_string())]),
+    );
     fields.insert("title".into(), Value::String(title.to_string()));
     fields.insert("status".into(), Value::String(status));
     fields.insert("type".into(), Value::String(proposal_type));
     fields.insert("author".into(), Value::String(author));
-    fields.insert("supersedes".into(), Value::String(supersedes));
+    fields.insert(
+        "supersedes".into(),
+        Value::String(frontmatter::wrap_wikilink(&supersedes)),
+    );
     fields.insert("superseded_by".into(), Value::String(String::new()));
     fields.insert(
         "tags".into(),
@@ -1118,6 +1209,115 @@ fn new_proposal(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
+fn new_contact(
+    cfg: &ResolvedConfig,
+    name: &str,
+    customer: &str,
+    role: Option<&str>,
+    email: Option<&str>,
+    phone: Option<&str>,
+    status: Option<&str>,
+    tags: Option<&str>,
+    yes: bool,
+) -> McResult<()> {
+    check_mode(EntityKind::Contact, cfg)?;
+    validate_name_not_empty(name, EntityKind::Contact)?;
+
+    // Validate customer exists
+    let cust_dir = find_customer_dir(cfg, customer)?;
+
+    let id = entity::next_id(EntityKind::Contact, cfg)?;
+    let today = util::today_str();
+
+    let role = role.unwrap_or("").to_string();
+    let email = email.unwrap_or("").to_string();
+    let phone = phone.unwrap_or("").to_string();
+    let status = match status {
+        Some(s) => s.to_string(),
+        None => prompt_select("Status", &cfg.statuses.contact, 0, yes),
+    };
+    validate_status(&status, EntityKind::Contact, cfg)?;
+    let tags: Vec<String> = match tags {
+        Some(t) => util::parse_comma_list(t),
+        None => {
+            let input = prompt_input_optional("Tags (comma-separated)", yes);
+            if input.is_empty() {
+                vec![]
+            } else {
+                util::parse_comma_list(&input)
+            }
+        }
+    };
+
+    let tags_display = tags.join(", ");
+    print_summary(
+        "contact",
+        &[
+            ("ID", &id.to_string()),
+            ("Name", name),
+            ("Customer", customer),
+            ("Role", &role),
+            ("Email", &email),
+            ("Phone", &phone),
+            ("Status", &status),
+            ("Tags", &tags_display),
+        ],
+    );
+
+    if !confirm_creation(yes) {
+        println!("{}", "Cancelled.".dimmed());
+        return Ok(());
+    }
+
+    let (tmpl_fm, tmpl_body) = template::load_template(&cfg.templates_dir, "contact")?;
+
+    let mut fields = HashMap::new();
+    fields.insert("id".into(), Value::String(id.to_string()));
+    fields.insert(
+        "aliases".into(),
+        Value::Sequence(vec![Value::String(id.to_string())]),
+    );
+    fields.insert("name".into(), Value::String(name.to_string()));
+    fields.insert("role".into(), Value::String(role));
+    fields.insert("email".into(), Value::String(email));
+    fields.insert("phone".into(), Value::String(phone));
+    fields.insert(
+        "customer".into(),
+        Value::String(frontmatter::wrap_wikilink(customer)),
+    );
+    fields.insert("status".into(), Value::String(status));
+    fields.insert(
+        "tags".into(),
+        Value::Sequence(tags.iter().map(|t| Value::String(t.clone())).collect()),
+    );
+    fields.insert("created".into(), Value::String(today.clone()));
+    fields.insert("updated".into(), Value::String(today));
+
+    let mut placeholders = HashMap::new();
+    placeholders.insert("name".into(), name.to_string());
+
+    let (fm, body) = template::render_template(tmpl_fm, &tmpl_body, &fields, &placeholders);
+    let doc = frontmatter::serialize_document(&fm, &body);
+
+    let slug = util::slugify(name);
+    let filename = format!("{}-{}.md", id, slug);
+    let contacts_dir = cust_dir.join("contacts");
+    fs::create_dir_all(&contacts_dir)?;
+    let file_path = contacts_dir.join(&filename);
+    util::atomic_write(&file_path, doc.as_bytes())?;
+
+    println!(
+        "{} Created contact {} ({}) at {}",
+        "✓".green().bold(),
+        id.to_string().cyan().bold(),
+        name.bold(),
+        file_path.display().to_string().dimmed()
+    );
+
+    Ok(())
+}
+
 /// Find a project directory by its ID prefix (e.g. "PROJ-001").
 fn find_project_dir(cfg: &ResolvedConfig, proj_id: &str) -> McResult<std::path::PathBuf> {
     if cfg.projects_dir.is_dir() {
@@ -1135,7 +1335,7 @@ fn find_project_dir(cfg: &ResolvedConfig, proj_id: &str) -> McResult<std::path::
 }
 
 /// Find a customer directory by its ID prefix (e.g. "CUST-001").
-fn find_customer_dir(cfg: &ResolvedConfig, cust_id: &str) -> McResult<std::path::PathBuf> {
+pub fn find_customer_dir(cfg: &ResolvedConfig, cust_id: &str) -> McResult<std::path::PathBuf> {
     if cfg.customers_dir.is_dir() {
         for entry in std::fs::read_dir(&cfg.customers_dir)? {
             let entry = entry?;
@@ -1178,6 +1378,10 @@ pub fn create_customer_programmatic(
 
     let mut fields = HashMap::new();
     fields.insert("id".into(), Value::String(id.to_string()));
+    fields.insert(
+        "aliases".into(),
+        Value::Sequence(vec![Value::String(id.to_string())]),
+    );
     fields.insert("name".into(), Value::String(name.to_string()));
     fields.insert("slug".into(), Value::String(slug.clone()));
     fields.insert("status".into(), Value::String(status));
@@ -1201,11 +1405,8 @@ pub fn create_customer_programmatic(
     let dir_name = format!("{}-{}", id, slug);
     let dir_path = cfg.customers_dir.join(&dir_name);
     fs::create_dir_all(&dir_path)?;
-    util::atomic_write(&dir_path.join("_index.md"), doc.as_bytes())?;
-    fs::write(
-        dir_path.join("contacts.md"),
-        format!("# {} -- Contacts\n", name),
-    )?;
+    util::atomic_write(&dir_path.join(format!("{}.md", id)), doc.as_bytes())?;
+    mkdir_with_gitkeep(&dir_path.join("contacts"))?;
     mkdir_with_gitkeep(&dir_path.join("contracts"))?;
     mkdir_with_gitkeep(&dir_path.join("meetings"))?;
     mkdir_with_gitkeep(&dir_path.join("projects"))?;
@@ -1244,13 +1445,22 @@ pub fn create_project_programmatic(
 
     let mut fields = HashMap::new();
     fields.insert("id".into(), Value::String(id.to_string()));
+    fields.insert(
+        "aliases".into(),
+        Value::Sequence(vec![Value::String(id.to_string())]),
+    );
     fields.insert("name".into(), Value::String(name.to_string()));
     fields.insert("slug".into(), Value::String(slug.clone()));
     fields.insert("status".into(), Value::String(status));
     fields.insert("owner".into(), Value::String(owner));
     fields.insert(
         "customers".into(),
-        Value::Sequence(customers.iter().map(|c| Value::String(c.clone())).collect()),
+        Value::Sequence(
+            customers
+                .iter()
+                .map(|c| Value::String(frontmatter::wrap_wikilink(c)))
+                .collect(),
+        ),
     );
     fields.insert(
         "tags".into(),
@@ -1270,7 +1480,7 @@ pub fn create_project_programmatic(
     let dir_name = format!("{}-{}", id, slug);
     let dir_path = cfg.projects_dir.join(&dir_name);
     fs::create_dir_all(&dir_path)?;
-    util::atomic_write(&dir_path.join("overview.md"), doc.as_bytes())?;
+    util::atomic_write(&dir_path.join(format!("{}.md", id)), doc.as_bytes())?;
     fs::write(
         dir_path.join("roadmap.md"),
         format!("# {} -- Roadmap\n", name),
@@ -1301,6 +1511,7 @@ pub fn create_meeting_programmatic(
     tags: Option<&str>,
     customers: Option<&str>,
     projects: Option<&str>,
+    attendees: Option<&str>,
 ) -> McResult<JsonValue> {
     validate_name_not_empty(title, EntityKind::Meeting)?;
     let id = entity::next_id(EntityKind::Meeting, cfg)?;
@@ -1317,11 +1528,16 @@ pub fn create_meeting_programmatic(
     let tags: Vec<String> = tags.map(util::parse_comma_list).unwrap_or_default();
     let customers: Vec<String> = customers.map(util::parse_comma_list).unwrap_or_default();
     let projects: Vec<String> = projects.map(util::parse_comma_list).unwrap_or_default();
+    let attendees: Vec<String> = attendees.map(util::parse_comma_list).unwrap_or_default();
 
     let (tmpl_fm, tmpl_body) = template::load_template(&cfg.templates_dir, "meeting")?;
 
     let mut fields = HashMap::new();
     fields.insert("id".into(), Value::String(id.to_string()));
+    fields.insert(
+        "aliases".into(),
+        Value::Sequence(vec![Value::String(id.to_string())]),
+    );
     fields.insert("title".into(), Value::String(title.to_string()));
     fields.insert("date".into(), Value::String(date.clone()));
     fields.insert("time".into(), Value::String(time));
@@ -1332,11 +1548,25 @@ pub fn create_meeting_programmatic(
     );
     fields.insert(
         "customers".into(),
-        Value::Sequence(customers.iter().map(|c| Value::String(c.clone())).collect()),
+        Value::Sequence(
+            customers
+                .iter()
+                .map(|c| Value::String(frontmatter::wrap_wikilink(c)))
+                .collect(),
+        ),
     );
     fields.insert(
         "projects".into(),
-        Value::Sequence(projects.iter().map(|p| Value::String(p.clone())).collect()),
+        Value::Sequence(
+            projects
+                .iter()
+                .map(|p| Value::String(frontmatter::wrap_wikilink(p)))
+                .collect(),
+        ),
+    );
+    fields.insert(
+        "attendees".into(),
+        Value::Sequence(attendees.iter().map(|a| Value::String(a.clone())).collect()),
     );
     fields.insert("status".into(), Value::String(status));
 
@@ -1385,6 +1615,10 @@ pub fn create_research_programmatic(
 
     let mut fields = HashMap::new();
     fields.insert("id".into(), Value::String(id.to_string()));
+    fields.insert(
+        "aliases".into(),
+        Value::Sequence(vec![Value::String(id.to_string())]),
+    );
     fields.insert("title".into(), Value::String(title.to_string()));
     fields.insert("slug".into(), Value::String(slug.clone()));
     fields.insert("status".into(), Value::String("draft".into()));
@@ -1412,7 +1646,7 @@ pub fn create_research_programmatic(
     let dir_name = format!("{}-{}", id, slug);
     let dir_path = cfg.research_dir.join(&dir_name);
     fs::create_dir_all(&dir_path)?;
-    util::atomic_write(&dir_path.join("_index.md"), doc.as_bytes())?;
+    util::atomic_write(&dir_path.join(format!("{}.md", id)), doc.as_bytes())?;
 
     for agent in &agents {
         mkdir_with_gitkeep(&dir_path.join(agent))?;
@@ -1463,6 +1697,10 @@ pub fn create_task_programmatic(
 
     let mut fields = HashMap::new();
     fields.insert("id".into(), Value::String(id.to_string()));
+    fields.insert(
+        "aliases".into(),
+        Value::Sequence(vec![Value::String(id.to_string())]),
+    );
     fields.insert("title".into(), Value::String(title.to_string()));
     fields.insert("slug".into(), Value::String(slug.clone()));
     fields.insert("status".into(), Value::String(status));
@@ -1473,23 +1711,36 @@ pub fn create_task_programmatic(
     fields.insert("owner".into(), Value::String(owner));
     fields.insert(
         "projects".into(),
-        Value::Sequence(projects.iter().map(|p| Value::String(p.clone())).collect()),
+        Value::Sequence(
+            projects
+                .iter()
+                .map(|p| Value::String(frontmatter::wrap_wikilink(p)))
+                .collect(),
+        ),
     );
     fields.insert(
         "customers".into(),
-        Value::Sequence(customers.iter().map(|c| Value::String(c.clone())).collect()),
+        Value::Sequence(
+            customers
+                .iter()
+                .map(|c| Value::String(frontmatter::wrap_wikilink(c)))
+                .collect(),
+        ),
     );
     fields.insert(
         "tags".into(),
         Value::Sequence(tags.iter().map(|t| Value::String(t.clone())).collect()),
     );
-    fields.insert("sprint".into(), Value::String(sprint));
+    fields.insert(
+        "sprint".into(),
+        Value::String(frontmatter::wrap_wikilink(&sprint)),
+    );
     fields.insert(
         "depends_on".into(),
         Value::Sequence(
             depends_on
                 .iter()
-                .map(|d| Value::String(d.clone()))
+                .map(|d| Value::String(frontmatter::wrap_wikilink(d)))
                 .collect(),
         ),
     );
@@ -1563,6 +1814,10 @@ pub fn create_sprint_programmatic(
 
     let mut fields = HashMap::new();
     fields.insert("id".into(), Value::String(id.to_string()));
+    fields.insert(
+        "aliases".into(),
+        Value::Sequence(vec![Value::String(id.to_string())]),
+    );
     fields.insert("title".into(), Value::String(title.to_string()));
     fields.insert("status".into(), Value::String(status));
     fields.insert("goal".into(), Value::String(goal));
@@ -1571,7 +1826,12 @@ pub fn create_sprint_programmatic(
     fields.insert("owner".into(), Value::String(owner));
     fields.insert(
         "projects".into(),
-        Value::Sequence(projects.iter().map(|p| Value::String(p.clone())).collect()),
+        Value::Sequence(
+            projects
+                .iter()
+                .map(|p| Value::String(frontmatter::wrap_wikilink(p)))
+                .collect(),
+        ),
     );
     fields.insert(
         "tags".into(),
@@ -1589,7 +1849,7 @@ pub fn create_sprint_programmatic(
     let dir_name = format!("{}-{}", id, slug);
     let dir_path = cfg.sprints_dir.join(&dir_name);
     fs::create_dir_all(&dir_path)?;
-    util::atomic_write(&dir_path.join("_index.md"), doc.as_bytes())?;
+    util::atomic_write(&dir_path.join(format!("{}.md", id)), doc.as_bytes())?;
 
     // Create ceremony stub files
     fs::write(
@@ -1650,11 +1910,18 @@ pub fn create_proposal_programmatic(
 
     let mut fields = HashMap::new();
     fields.insert("id".into(), Value::String(id.to_string()));
+    fields.insert(
+        "aliases".into(),
+        Value::Sequence(vec![Value::String(id.to_string())]),
+    );
     fields.insert("title".into(), Value::String(title.to_string()));
     fields.insert("status".into(), Value::String(status));
     fields.insert("type".into(), Value::String(proposal_type));
     fields.insert("author".into(), Value::String(author));
-    fields.insert("supersedes".into(), Value::String(supersedes));
+    fields.insert(
+        "supersedes".into(),
+        Value::String(frontmatter::wrap_wikilink(&supersedes)),
+    );
     fields.insert("superseded_by".into(), Value::String(String::new()));
     fields.insert(
         "tags".into(),
@@ -1677,6 +1944,79 @@ pub fn create_proposal_programmatic(
     Ok(serde_json::json!({
         "id": id.to_string(),
         "title": title,
+        "path": file_path.display().to_string(),
+    }))
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn create_contact_programmatic(
+    cfg: &ResolvedConfig,
+    name: &str,
+    customer: &str,
+    role: Option<&str>,
+    email: Option<&str>,
+    phone: Option<&str>,
+    status: Option<&str>,
+    tags: Option<&str>,
+) -> McResult<JsonValue> {
+    check_mode(EntityKind::Contact, cfg)?;
+    validate_name_not_empty(name, EntityKind::Contact)?;
+
+    // Validate customer exists
+    let cust_dir = find_customer_dir(cfg, customer)?;
+
+    let id = entity::next_id(EntityKind::Contact, cfg)?;
+    let today = util::today_str();
+
+    let role = role.unwrap_or("").to_string();
+    let email_val = email.unwrap_or("").to_string();
+    let phone = phone.unwrap_or("").to_string();
+    let status = status
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| cfg.statuses.contact.first().cloned().unwrap_or_default());
+    validate_status(&status, EntityKind::Contact, cfg)?;
+    let tags: Vec<String> = tags.map(util::parse_comma_list).unwrap_or_default();
+
+    let (tmpl_fm, tmpl_body) = template::load_template(&cfg.templates_dir, "contact")?;
+
+    let mut fields = HashMap::new();
+    fields.insert("id".into(), Value::String(id.to_string()));
+    fields.insert(
+        "aliases".into(),
+        Value::Sequence(vec![Value::String(id.to_string())]),
+    );
+    fields.insert("name".into(), Value::String(name.to_string()));
+    fields.insert("role".into(), Value::String(role));
+    fields.insert("email".into(), Value::String(email_val));
+    fields.insert("phone".into(), Value::String(phone));
+    fields.insert(
+        "customer".into(),
+        Value::String(frontmatter::wrap_wikilink(customer)),
+    );
+    fields.insert("status".into(), Value::String(status));
+    fields.insert(
+        "tags".into(),
+        Value::Sequence(tags.iter().map(|t| Value::String(t.clone())).collect()),
+    );
+    fields.insert("created".into(), Value::String(today.clone()));
+    fields.insert("updated".into(), Value::String(today));
+
+    let mut placeholders = HashMap::new();
+    placeholders.insert("name".into(), name.to_string());
+
+    let (fm, body) = template::render_template(tmpl_fm, &tmpl_body, &fields, &placeholders);
+    let doc = frontmatter::serialize_document(&fm, &body);
+
+    let slug = util::slugify(name);
+    let filename = format!("{}-{}.md", id, slug);
+    let contacts_dir = cust_dir.join("contacts");
+    fs::create_dir_all(&contacts_dir)?;
+    let file_path = contacts_dir.join(&filename);
+    util::atomic_write(&file_path, doc.as_bytes())?;
+
+    Ok(serde_json::json!({
+        "id": id.to_string(),
+        "name": name,
         "path": file_path.display().to_string(),
     }))
 }
@@ -1706,17 +2046,17 @@ mod tests {
         assert_eq!(result["id"], "CUST-001");
         assert_eq!(result["name"], "Acme Inc");
 
-        // Verify directory and _index.md exist
+        // Verify directory and entity file exist
         let dir = cfg.customers_dir.join("CUST-001-acme-inc");
         assert!(dir.is_dir());
-        assert!(dir.join("_index.md").is_file());
-        assert!(dir.join("contacts.md").is_file());
+        assert!(dir.join("CUST-001.md").is_file());
+        assert!(dir.join("contacts").is_dir());
         assert!(dir.join("contracts").is_dir());
 
         // Verify frontmatter
-        let content = std::fs::read_to_string(dir.join("_index.md")).unwrap();
+        let content = std::fs::read_to_string(dir.join("CUST-001.md")).unwrap();
         let (fm_str, _) = frontmatter::split_frontmatter(&content).unwrap();
-        let fm = frontmatter::parse_raw(&fm_str, &dir.join("_index.md")).unwrap();
+        let fm = frontmatter::parse_raw(&fm_str, &dir.join("CUST-001.md")).unwrap();
         assert_eq!(frontmatter::get_str(&fm, "id").unwrap(), "CUST-001");
         assert_eq!(frontmatter::get_str(&fm, "name").unwrap(), "Acme Inc");
         assert_eq!(frontmatter::get_str(&fm, "status").unwrap(), "active");
@@ -1848,12 +2188,126 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .unwrap();
         assert_eq!(result["id"], "MTG-001");
 
         let path_str = result["path"].as_str().unwrap();
         assert!(std::path::Path::new(path_str).is_file());
+    }
+
+    #[test]
+    fn test_create_contact() {
+        let (_tmp, cfg) = setup_repo();
+
+        // First create a customer to attach the contact to
+        create_customer_programmatic(&cfg, "Acme Inc", Some("alice"), Some("active"), None)
+            .unwrap();
+
+        let result = create_contact_programmatic(
+            &cfg,
+            "Alice Smith",
+            "CUST-001",
+            Some("VP Engineering"),
+            Some("alice@acme.com"),
+            Some("+1-555-0101"),
+            Some("active"),
+            None,
+        )
+        .unwrap();
+        assert_eq!(result["id"], "CONT-001");
+        assert_eq!(result["name"], "Alice Smith");
+
+        // Verify file location
+        let cust_dir = cfg.customers_dir.join("CUST-001-acme-inc");
+        let contact_path = cust_dir.join("contacts").join("CONT-001-alice-smith.md");
+        assert!(contact_path.is_file());
+
+        // Verify frontmatter
+        let content = std::fs::read_to_string(&contact_path).unwrap();
+        let (fm_str, _) = frontmatter::split_frontmatter(&content).unwrap();
+        let fm = frontmatter::parse_raw(&fm_str, &contact_path).unwrap();
+        assert_eq!(frontmatter::get_str(&fm, "id").unwrap(), "CONT-001");
+        assert_eq!(frontmatter::get_str(&fm, "name").unwrap(), "Alice Smith");
+        assert_eq!(frontmatter::get_str(&fm, "role").unwrap(), "VP Engineering");
+        assert_eq!(
+            frontmatter::get_str(&fm, "email").unwrap(),
+            "alice@acme.com"
+        );
+        assert_eq!(
+            frontmatter::get_str(&fm, "customer").unwrap(),
+            "[[CUST-001]]"
+        );
+        assert_eq!(frontmatter::get_str(&fm, "status").unwrap(), "active");
+    }
+
+    #[test]
+    fn test_create_contact_invalid_customer() {
+        let (_tmp, cfg) = setup_repo();
+
+        let result = create_contact_programmatic(
+            &cfg,
+            "Alice Smith",
+            "CUST-999",
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_create_contact_empty_name_rejected() {
+        let (_tmp, cfg) = setup_repo();
+
+        create_customer_programmatic(&cfg, "Acme", None, Some("active"), None).unwrap();
+
+        let result =
+            create_contact_programmatic(&cfg, "", "CUST-001", None, None, None, None, None);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("cannot be empty"));
+    }
+
+    #[test]
+    fn test_create_contact_invalid_status_rejected() {
+        let (_tmp, cfg) = setup_repo();
+
+        create_customer_programmatic(&cfg, "Acme", None, Some("active"), None).unwrap();
+
+        let result = create_contact_programmatic(
+            &cfg,
+            "Alice",
+            "CUST-001",
+            None,
+            None,
+            None,
+            Some("bogus"),
+            None,
+        );
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("Invalid contact status"));
+    }
+
+    #[test]
+    fn test_contact_sequential_ids_across_customers() {
+        let (_tmp, cfg) = setup_repo();
+
+        create_customer_programmatic(&cfg, "Acme", None, Some("active"), None).unwrap();
+        create_customer_programmatic(&cfg, "Beta", None, Some("active"), None).unwrap();
+
+        let r1 =
+            create_contact_programmatic(&cfg, "Alice", "CUST-001", None, None, None, None, None)
+                .unwrap();
+        let r2 = create_contact_programmatic(&cfg, "Bob", "CUST-002", None, None, None, None, None)
+            .unwrap();
+
+        assert_eq!(r1["id"], "CONT-001");
+        assert_eq!(r2["id"], "CONT-002");
     }
 
     #[test]
@@ -1875,7 +2329,7 @@ mod tests {
         assert_eq!(result["id"], "SPR-001");
 
         let dir = cfg.sprints_dir.join("SPR-001-sprint-1");
-        assert!(dir.join("_index.md").is_file());
+        assert!(dir.join("SPR-001.md").is_file());
         assert!(dir.join("planning.md").is_file());
         assert!(dir.join("review.md").is_file());
         assert!(dir.join("retrospective.md").is_file());

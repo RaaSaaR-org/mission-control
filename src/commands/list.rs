@@ -1,6 +1,6 @@
 use crate::cli::ListEntity;
 use crate::config::ResolvedConfig;
-use crate::data::{self, TaskFilter};
+use crate::data::{self, ContactFilter, TaskFilter};
 use crate::entity::EntityKind;
 use crate::error::{McError, McResult};
 use crate::frontmatter;
@@ -17,6 +17,11 @@ pub fn run(entity: &ListEntity, cfg: &ResolvedConfig) -> McResult<()> {
             sprint,
             owner,
         } => list_tasks(cfg, status, tag, project, customer, priority, sprint, owner),
+        ListEntity::Contacts {
+            status,
+            tag,
+            customer,
+        } => list_contacts(cfg, status, tag, customer),
         _ => {
             let (kind, status_filter, tag_filter) = match entity {
                 ListEntity::Customers { status, tag } => (EntityKind::Customer, status, tag),
@@ -25,7 +30,9 @@ pub fn run(entity: &ListEntity, cfg: &ResolvedConfig) -> McResult<()> {
                 ListEntity::Research { status, tag } => (EntityKind::Research, status, tag),
                 ListEntity::Sprints { status, tag } => (EntityKind::Sprint, status, tag),
                 ListEntity::Proposals { status, tag } => (EntityKind::Proposal, status, tag),
-                ListEntity::Tasks { .. } => unreachable!("Tasks handled in outer match arm"),
+                ListEntity::Tasks { .. } | ListEntity::Contacts { .. } => {
+                    unreachable!("Handled in outer match arms")
+                }
             };
             if !kind.available_in_mode(cfg.mode) {
                 return Err(McError::NotAvailableInMode {
@@ -250,6 +257,7 @@ fn list_standard(
             }
         }
         EntityKind::Task => unreachable!("Tasks use list_tasks(), not list_standard()"),
+        EntityKind::Contact => unreachable!("Contacts use list_contacts(), not list_standard()"),
     }
 
     println!(
@@ -369,9 +377,10 @@ fn list_tasks(
         let title = frontmatter::get_str_or(&e.frontmatter, "title", "");
         let status = frontmatter::get_str_or(&e.frontmatter, "status", "");
         let owner = frontmatter::get_str_or(&e.frontmatter, "owner", "");
-        let sprint = frontmatter::get_str_or(&e.frontmatter, "sprint", "");
+        let sprint_raw = frontmatter::get_str_or(&e.frontmatter, "sprint", "");
+        let sprint = frontmatter::strip_wikilink(sprint_raw);
         let priority = data::get_number(&e.frontmatter, "priority").unwrap_or(3);
-        let projects = frontmatter::get_string_list(&e.frontmatter, "projects");
+        let projects = frontmatter::get_link_list(&e.frontmatter, "projects");
         let proj_display = projects.first().map(|s| s.as_str()).unwrap_or("");
 
         let pri_display = match priority {
@@ -409,6 +418,100 @@ fn list_tasks(
     }
 
     println!("\n  {} tasks total", entries.len().to_string().bold());
+
+    Ok(())
+}
+
+fn list_contacts(
+    cfg: &ResolvedConfig,
+    status: &Option<String>,
+    tag: &Option<String>,
+    customer: &Option<String>,
+) -> McResult<()> {
+    if !EntityKind::Contact.available_in_mode(cfg.mode) {
+        return Err(McError::NotAvailableInMode {
+            kind: "contact".to_string(),
+        });
+    }
+
+    let filter = ContactFilter {
+        status: status.as_deref(),
+        tag: tag.as_deref(),
+        customer: customer.as_deref(),
+    };
+
+    let entries = data::collect_contacts_filtered(cfg, &filter)?;
+
+    let has_filters = status.is_some() || tag.is_some() || customer.is_some();
+
+    if entries.is_empty() {
+        if has_filters {
+            let mut filter_desc = Vec::new();
+            if let Some(s) = status {
+                filter_desc.push(format!("status '{}'", s));
+            }
+            if let Some(c) = customer {
+                filter_desc.push(format!("customer '{}'", c));
+            }
+            if let Some(t) = tag {
+                filter_desc.push(format!("tag '{}'", t));
+            }
+            println!(
+                "{} No contacts found with {}",
+                "i".blue(),
+                filter_desc.join(" and "),
+            );
+        } else {
+            println!("{} No contacts found.", "i".blue());
+        }
+        return Ok(());
+    }
+
+    if has_filters {
+        let mut parts = Vec::new();
+        if let Some(s) = status {
+            parts.push(format!("status = {}", s));
+        }
+        if let Some(c) = customer {
+            parts.push(format!("customer = {}", c));
+        }
+        if let Some(t) = tag {
+            parts.push(format!("tag = {}", t));
+        }
+        println!(
+            "{} Showing contacts with {}\n",
+            "i".blue(),
+            parts.join(", "),
+        );
+    }
+
+    println!(
+        "  {:<10} {:<24} {:<20} {:<12} {:<10}",
+        "ID".bold(),
+        "Name".bold(),
+        "Role".bold(),
+        "Customer".bold(),
+        "Status".bold()
+    );
+    println!("  {}", "─".repeat(76).dimmed());
+    for e in &entries {
+        let id = frontmatter::get_str_or(&e.frontmatter, "id", "");
+        let name = frontmatter::get_str_or(&e.frontmatter, "name", "");
+        let role = frontmatter::get_str_or(&e.frontmatter, "role", "");
+        let customer_raw = frontmatter::get_str_or(&e.frontmatter, "customer", "");
+        let customer_id = frontmatter::strip_wikilink(customer_raw);
+        let status = frontmatter::get_str_or(&e.frontmatter, "status", "");
+        println!(
+            "  {:<10} {:<24} {:<20} {:<12} {}",
+            id.cyan(),
+            truncate(name, 23),
+            truncate(role, 19).dimmed().to_string(),
+            customer_id,
+            format_status(status)
+        );
+    }
+
+    println!("\n  {} contacts total", entries.len().to_string().bold());
 
     Ok(())
 }

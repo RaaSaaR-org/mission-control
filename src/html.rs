@@ -18,6 +18,7 @@ pub fn layout(title: &str, active_nav: &str, body_html: &str) -> String {
         ("Tasks", "/tasks"),
         ("Sprints", "/sprints"),
         ("Proposals", "/proposals"),
+        ("Contacts", "/contacts"),
     ];
 
     let nav_links: String = nav_items
@@ -287,6 +288,8 @@ pub fn dashboard_page(counts: &[StatusCounts], recent: &[RecentFile]) -> String 
                     "task"
                 } else if f.id.starts_with("SPR") {
                     "sprint"
+                } else if f.id.starts_with("CONT") {
+                    "contact"
                 } else {
                     "entity"
                 };
@@ -514,18 +517,22 @@ pub fn detail_page(entity: &EntityRecord, prefixes: &[&str]) -> String {
                         .unwrap_or_default();
                     body.push_str(&tag_badges(&tags));
                 }
-                "customers" | "projects" => {
-                    // Render as entity links
+                "customers" | "projects" | "customer" => {
+                    // Render as entity links (stripping wiki-link brackets)
                     let ids = value
                         .as_sequence()
                         .map(|seq| {
                             seq.iter()
-                                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                                .filter_map(|v| {
+                                    v.as_str()
+                                        .map(|s| frontmatter::strip_wikilink(s).to_string())
+                                })
                                 .collect::<Vec<_>>()
                         })
                         .unwrap_or_default();
                     if ids.is_empty() {
                         if let Some(s) = value.as_str() {
+                            let s = frontmatter::strip_wikilink(s);
                             if !s.is_empty() {
                                 body.push_str(&entity_link(s));
                             }
@@ -628,10 +635,11 @@ pub fn tasks_list_page(
         let title = frontmatter::get_str_or(&e.frontmatter, "title", "");
         let status = frontmatter::get_str_or(&e.frontmatter, "status", "");
         let owner = frontmatter::get_str_or(&e.frontmatter, "owner", "");
-        let sprint = frontmatter::get_str_or(&e.frontmatter, "sprint", "");
+        let sprint_raw = frontmatter::get_str_or(&e.frontmatter, "sprint", "");
+        let sprint = frontmatter::strip_wikilink(sprint_raw);
         let priority = data::get_number(&e.frontmatter, "priority").unwrap_or(3);
         let tags = frontmatter::get_string_list(&e.frontmatter, "tags");
-        let projects = frontmatter::get_string_list(&e.frontmatter, "projects");
+        let projects = frontmatter::get_link_list(&e.frontmatter, "projects");
 
         let pri_label = match priority {
             1 => "Critical",
@@ -784,6 +792,7 @@ pub fn not_found_page(path: &str) -> String {
 fn format_value_html(value: &Value, prefixes: &[&str]) -> String {
     match value {
         Value::String(s) => {
+            let s = frontmatter::strip_wikilink(s);
             if s.is_empty() {
                 "<em>(empty)</em>".to_string()
             } else {

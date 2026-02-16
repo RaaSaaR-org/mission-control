@@ -1,6 +1,7 @@
 use crate::config::ResolvedConfig;
 use crate::data;
 use crate::error::McResult;
+use crate::frontmatter;
 use colored::*;
 use serde_yaml::Value;
 
@@ -15,6 +16,7 @@ pub fn run(id: &str, cfg: &ResolvedConfig) -> McResult<()> {
         "research" => kind_label.cyan().bold(),
         "task" => kind_label.purple().bold(),
         "sprint" => kind_label.yellow().bold(),
+        "contact" => kind_label.white().bold(),
         _ => kind_label.bold(),
     };
 
@@ -88,7 +90,7 @@ fn format_value(value: &Value) -> String {
             if s.is_empty() {
                 "(empty)".dimmed().to_string()
             } else {
-                s.clone()
+                frontmatter::strip_wikilink(s).to_string()
             }
         }
         Value::Sequence(seq) => {
@@ -98,7 +100,7 @@ fn format_value(value: &Value) -> String {
                 let items: Vec<String> = seq
                     .iter()
                     .map(|v| match v {
-                        Value::String(s) => s.clone(),
+                        Value::String(s) => frontmatter::strip_wikilink(s).to_string(),
                         Value::Mapping(_) => "(object)".to_string(),
                         _ => format!("{:?}", v),
                     })

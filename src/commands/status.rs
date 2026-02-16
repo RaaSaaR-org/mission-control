@@ -23,8 +23,10 @@ pub fn run(cfg: &ResolvedConfig) -> McResult<()> {
     if cfg.mode == RepoMode::Standalone {
         let customers = data::count_by_status(EntityKind::Customer, cfg)?;
         let projects = data::count_by_status(EntityKind::Project, cfg)?;
+        let contacts = data::count_by_status(EntityKind::Contact, cfg)?;
         print_section("Customers", &customers.by_status);
         print_section("Projects", &projects.by_status);
+        print_section("Contacts", &contacts.by_status);
     }
     print_section("Meetings", &meetings.by_status);
     print_section("Research", &research.by_status);

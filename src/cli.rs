@@ -221,6 +221,9 @@ pub enum NewEntity {
         /// Linked project IDs (comma-separated)
         #[arg(long)]
         projects: Option<String>,
+        /// Comma-separated attendee names
+        #[arg(long)]
+        attendees: Option<String>,
     },
     /// Create a new research topic
     #[command(after_help = "\x1b[1mExamples:\x1b[0m
@@ -332,6 +335,33 @@ pub enum NewEntity {
         #[arg(long)]
         supersedes: Option<String>,
     },
+    /// Create a new contact (standalone mode only)
+    #[command(after_help = "\x1b[1mExamples:\x1b[0m
+  mc new contact \"Alice Smith\" --customer CUST-001
+  mc new contact \"Bob Jones\" --customer CUST-001 --role \"VP Engineering\"
+  mc new contact \"Carol Lee\" --customer CUST-002 --email carol@example.com")]
+    Contact {
+        /// Contact name
+        name: String,
+        /// Customer ID (required, e.g. CUST-001)
+        #[arg(long)]
+        customer: String,
+        /// Role / job title
+        #[arg(long)]
+        role: Option<String>,
+        /// Email address
+        #[arg(long)]
+        email: Option<String>,
+        /// Phone number
+        #[arg(long)]
+        phone: Option<String>,
+        /// Status (default: active)
+        #[arg(long)]
+        status: Option<String>,
+        /// Comma-separated tags
+        #[arg(long)]
+        tags: Option<String>,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -413,6 +443,22 @@ pub enum ListEntity {
         /// Filter by tag
         #[arg(long)]
         tag: Option<String>,
+    },
+    /// List contacts (standalone mode only)
+    #[command(after_help = "\x1b[1mExamples:\x1b[0m
+  mc list contacts
+  mc list contacts --status active
+  mc list contacts --customer CUST-001")]
+    Contacts {
+        /// Filter by status
+        #[arg(long)]
+        status: Option<String>,
+        /// Filter by tag
+        #[arg(long)]
+        tag: Option<String>,
+        /// Filter by customer ID
+        #[arg(long)]
+        customer: Option<String>,
     },
     /// List tasks
     #[command(after_help = "\x1b[1mExamples:\x1b[0m

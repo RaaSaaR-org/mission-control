@@ -28,6 +28,7 @@ pub fn run(cfg: &ResolvedConfig, port: u16) -> McResult<()> {
             .route("/research", get(handle_research))
             .route("/sprints", get(handle_sprints))
             .route("/proposals", get(handle_proposals))
+            .route("/contacts", get(handle_contacts))
             .route("/tasks", get(handle_tasks))
             .route("/tasks/board", get(handle_tasks_board))
             .route("/entity/{id}", get(handle_detail))
@@ -64,6 +65,7 @@ async fn handle_dashboard(State(state): State<Arc<AppState>>) -> Html<String> {
         EntityKind::Task,
         EntityKind::Sprint,
         EntityKind::Proposal,
+        EntityKind::Contact,
     ];
 
     let counts: Vec<data::StatusCounts> = kinds
@@ -122,6 +124,13 @@ async fn handle_proposals(
     Query(params): Query<HashMap<String, String>>,
 ) -> Result<Html<String>, (StatusCode, Html<String>)> {
     handle_list(EntityKind::Proposal, &state.cfg, &params)
+}
+
+async fn handle_contacts(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<HashMap<String, String>>,
+) -> Result<Html<String>, (StatusCode, Html<String>)> {
+    handle_list(EntityKind::Contact, &state.cfg, &params)
 }
 
 async fn handle_tasks(
@@ -239,6 +248,7 @@ async fn handle_detail(
         cfg.id_prefixes.task.as_str(),
         cfg.id_prefixes.sprint.as_str(),
         cfg.id_prefixes.proposal.as_str(),
+        cfg.id_prefixes.contact.as_str(),
     ];
 
     Ok(Html(html::detail_page(&entity, &prefixes)))

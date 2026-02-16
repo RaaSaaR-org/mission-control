@@ -10,15 +10,11 @@ use std::process::Command;
 
 const TEMPLATE_CUSTOMER: &str = r#"---
 id: "CUST-NNN"
+aliases: []
 name: ""
 slug: ""
 status: "active"          # active | inactive | prospect | churned
 owner: ""
-contacts:
-  - name: ""
-    role: ""
-    email: ""
-    phone: ""
 tags: []
 projects: []
 contracts: []
@@ -47,11 +43,12 @@ updated: "YYYY-MM-DD"
 
 const TEMPLATE_PROJECT: &str = r#"---
 id: "PROJ-NNN"
+aliases: []
 name: ""
 slug: ""
 status: "active"          # active | on-hold | completed | cancelled
 owner: ""
-customers: []             # e.g., ["CUST-001"]
+customers: []             # e.g., ["[[CUST-001]]"]
 tags: []
 start_date: "YYYY-MM-DD"
 target_date: "YYYY-MM-DD"
@@ -83,16 +80,14 @@ updated: "YYYY-MM-DD"
 
 const TEMPLATE_MEETING: &str = r#"---
 id: "MTG-NNN"
+aliases: []
 title: ""
 date: "YYYY-MM-DD"
 time: "HH:MM"
 duration: ""              # e.g., "30m", "1h"
-customers: []             # e.g., ["CUST-001"]
-projects: []              # e.g., ["PROJ-001"]
-attendees:
-  - name: ""
-    role: ""
-    company: ""
+customers: []             # e.g., ["[[CUST-001]]"]
+projects: []              # e.g., ["[[PROJ-001]]"]
+attendees: []             # e.g., ["Alice Smith", "Bob Jones"]
 recording: ""             # path or URL to recording
 tags: []
 status: "scheduled"       # scheduled | completed | cancelled
@@ -120,12 +115,13 @@ status: "scheduled"       # scheduled | completed | cancelled
 
 const TEMPLATE_RESEARCH: &str = r#"---
 id: "RES-NNN"
+aliases: []
 title: ""
 slug: ""
 status: "draft"           # draft | in-progress | final | outdated
 owner: ""
-customers: []             # e.g., ["CUST-001"]
-projects: []              # e.g., ["PROJ-001"]
+customers: []             # e.g., ["[[CUST-001]]"]
+projects: []              # e.g., ["[[PROJ-001]]"]
 tags: []
 created: "YYYY-MM-DD"
 updated: "YYYY-MM-DD"
@@ -155,16 +151,17 @@ Not yet merged. See `final/` once agent reports are reviewed and consolidated.
 
 const TEMPLATE_TASK: &str = r#"---
 id: "TASK-NNN"
+aliases: []
 title: ""
 slug: ""
 status: "backlog"             # backlog | todo | in-progress | review | done | cancelled
 priority: 3                   # 1=critical, 2=high, 3=medium, 4=low
 owner: ""
-projects: []                  # e.g., ["PROJ-001"]
-customers: []                 # e.g., ["CUST-001"]
+projects: []                  # e.g., ["[[PROJ-001]]"]
+customers: []                 # e.g., ["[[CUST-001]]"]
 tags: []
-sprint: ""                    # e.g., "2026-W05"
-depends_on: []                # e.g., ["TASK-001"]
+sprint: ""                    # e.g., "[[SPR-001]]"
+depends_on: []                # e.g., ["[[TASK-001]]"]
 due_date: ""                  # YYYY-MM-DD
 created: "YYYY-MM-DD"
 updated: "YYYY-MM-DD"
@@ -183,13 +180,14 @@ updated: "YYYY-MM-DD"
 
 const TEMPLATE_SPRINT: &str = r#"---
 id: "SPR-NNN"
+aliases: []
 title: ""
 status: "planning"        # planning | active | review | completed | cancelled
 goal: ""
 start_date: "YYYY-MM-DD"
 end_date: "YYYY-MM-DD"
 owner: ""
-projects: []              # e.g., ["PROJ-001"]
+projects: []              # e.g., ["[[PROJ-001]]"]
 tags: []
 created: "YYYY-MM-DD"
 updated: "YYYY-MM-DD"
@@ -208,11 +206,12 @@ updated: "YYYY-MM-DD"
 
 const TEMPLATE_PROPOSAL: &str = r#"---
 id: "PROP-NNN"
+aliases: []
 title: ""
 status: "draft"           # draft | proposed | accepted | rejected | superseded | withdrawn
 type: "architecture"      # architecture | feature | process
 author: ""
-supersedes: ""            # optional, e.g. "PROP-003"
+supersedes: ""            # optional, e.g. "[[PROP-003]]"
 superseded_by: ""         # optional
 tags: []
 created: "YYYY-MM-DD"
@@ -233,6 +232,27 @@ updated: "YYYY-MM-DD"
 
 ## Consequences
 <!-- Implications — positive and negative -->
+"#;
+
+const TEMPLATE_CONTACT: &str = r#"---
+id: "CONT-NNN"
+aliases: []
+name: ""
+role: ""
+email: ""
+phone: ""
+customer: ""              # e.g., "[[CUST-001]]"
+status: "active"          # active | inactive
+tags: []
+created: "YYYY-MM-DD"
+updated: "YYYY-MM-DD"
+---
+
+# {{ name }}
+
+## Notes
+
+<!-- Notes about this contact. -->
 "#;
 
 // ---------------------------------------------------------------------------
@@ -336,6 +356,7 @@ id_prefixes:
   task: TASK
   sprint: SPR
   proposal: PROP
+  contact: CONT
 
 statuses:
   customer:
@@ -377,6 +398,9 @@ statuses:
     - rejected
     - superseded
     - withdrawn
+  contact:
+    - active
+    - inactive
 
 priorities:
   1: critical
@@ -641,7 +665,7 @@ pub fn run(
         write_if_missing_or_force(&templates_dir.join("task.md"), TEMPLATE_TASK, force)?;
         write_if_missing_or_force(&templates_dir.join("proposal.md"), TEMPLATE_PROPOSAL, force)?;
     } else {
-        // Full: all 7 templates
+        // Full: all templates
         write_if_missing_or_force(&templates_dir.join("customer.md"), TEMPLATE_CUSTOMER, force)?;
         write_if_missing_or_force(&templates_dir.join("project.md"), TEMPLATE_PROJECT, force)?;
         write_if_missing_or_force(&templates_dir.join("meeting.md"), TEMPLATE_MEETING, force)?;
@@ -649,6 +673,7 @@ pub fn run(
         write_if_missing_or_force(&templates_dir.join("task.md"), TEMPLATE_TASK, force)?;
         write_if_missing_or_force(&templates_dir.join("sprint.md"), TEMPLATE_SPRINT, force)?;
         write_if_missing_or_force(&templates_dir.join("proposal.md"), TEMPLATE_PROPOSAL, force)?;
+        write_if_missing_or_force(&templates_dir.join("contact.md"), TEMPLATE_CONTACT, force)?;
     }
 
     // Write .gitignore and .gitattributes
