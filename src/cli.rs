@@ -3,7 +3,7 @@ use clap::{Parser, Subcommand};
 #[derive(Parser, Debug)]
 #[command(
     name = "mc",
-    about = "MissionControl CLI -- manage customers, projects, meetings, research, tasks, and proposals",
+    about = "MissionControl CLI -- manage customers, contacts, projects, meetings, research, tasks, and proposals",
     version,
     after_help = "\x1b[1mExamples:\x1b[0m
   mc status                          Show dashboard
@@ -38,11 +38,13 @@ pub enum Command {
     /// Create a new entity
     #[command(after_help = "\x1b[1mExamples:\x1b[0m
   mc new customer \"Acme Inc\"
+  mc new contact \"Alice Smith\" --customer CUST-001
   mc new project \"Data Pipeline\" --owner alice --status active
   mc new meeting \"Weekly Sync\" --date 2025-06-01 --time 14:00
   mc new research \"LLM Benchmarks\" --agents claude,gemini
   mc new task \"Fix login bug\" --project PROJ-001 --priority 1
-  mc new sprint \"2026-W05\" --start-date 2026-01-27 --end-date 2026-02-07 --goal \"Auth module\"")]
+  mc new sprint \"2026-W05\" --start-date 2026-01-27 --end-date 2026-02-07 --goal \"Auth module\"
+  mc new proposal \"Use PostgreSQL\" --type architecture --author alice")]
     New {
         #[command(subcommand)]
         entity: NewEntity,
@@ -51,6 +53,7 @@ pub enum Command {
     #[command(after_help = "\x1b[1mExamples:\x1b[0m
   mc list customers
   mc list customers --status active
+  mc list contacts --customer CUST-001
   mc list projects --tag ml
   mc list meetings --status scheduled
   mc list tasks --status in-progress --project PROJ-001
@@ -63,6 +66,7 @@ pub enum Command {
     /// Show details for an entity by ID
     #[command(after_help = "\x1b[1mExamples:\x1b[0m
   mc show CUST-001
+  mc show CONT-001
   mc show PROJ-001
   mc show MTG-001
   mc show RES-001
@@ -70,12 +74,16 @@ pub enum Command {
   mc show SPR-001
   mc show PROP-001")]
     Show {
-        /// Entity ID (e.g., CUST-001, PROJ-001, MTG-001, RES-001, TASK-001, SPR-001, PROP-001)
+        /// Entity ID (e.g., CUST-001, CONT-001, PROJ-001, MTG-001, TASK-001, SPR-001, PROP-001)
         id: String,
     },
-    /// Rebuild data/*.json index files
+    /// Rebuild entity index files (data/*.json)
+    #[command(after_help = "\x1b[1mExamples:\x1b[0m
+  mc index          Rebuild all JSON indexes from entity files")]
     Index,
     /// Export an entity to a zip archive
+    #[command(after_help = "\x1b[1mExamples:\x1b[0m
+  mc export customer CUST-001     Export customer folder to a zip file")]
     Export {
         #[command(subcommand)]
         entity: ExportEntity,
@@ -93,19 +101,31 @@ pub enum Command {
         entity: PrintEntity,
     },
     /// Validate repo structure and frontmatter
+    #[command(after_help = "\x1b[1mExamples:\x1b[0m
+  mc validate       Check all entities for missing/invalid frontmatter fields
+
+Prints warnings for each issue found, or \"All files valid\" if clean.")]
     Validate,
     /// Show a dashboard with counts and recent activity
+    #[command(after_help = "\x1b[1mExamples:\x1b[0m
+  mc status         Show entity counts, recent activity, and task summary")]
     Status,
     /// Start a local web server to browse all MissionControl data
     #[command(after_help = "\x1b[1mExamples:\x1b[0m
   mc serve                Start on default port 5000
-  mc serve --port 8080    Start on port 8080")]
+  mc serve --port 8080    Start on port 8080
+
+Open http://localhost:<port> in your browser to view the dashboard.")]
     Serve {
         /// Port to listen on
         #[arg(long, default_value_t = 5000)]
         port: u16,
     },
     /// Start an MCP (Model Context Protocol) server over stdio
+    #[command(after_help = "\x1b[1mIntegration:\x1b[0m
+  Claude Code  Add to .mcp.json:  {\"mcpServers\":{\"mc\":{\"command\":\"mc\",\"args\":[\"mcp\"]}}}
+  Cursor       Settings > MCP > Add server: command = mc, args = [\"mcp\"]
+  VS Code      Add to .vscode/mcp.json with command \"mc\" and args [\"mcp\"]")]
     Mcp,
     /// Initialize a new MissionControl repository
     #[command(after_help = "\x1b[1mExamples:\x1b[0m
@@ -160,10 +180,10 @@ pub enum NewEntity {
     Customer {
         /// Customer name
         name: String,
-        /// Owner
+        /// Owner (username or name)
         #[arg(long)]
         owner: Option<String>,
-        /// Status
+        /// Status (e.g., active, inactive, prospect)
         #[arg(long)]
         status: Option<String>,
         /// Comma-separated tags
@@ -178,10 +198,10 @@ pub enum NewEntity {
     Project {
         /// Project name
         name: String,
-        /// Owner
+        /// Owner (username or name)
         #[arg(long)]
         owner: Option<String>,
-        /// Status
+        /// Status (e.g., active, completed, on-hold)
         #[arg(long)]
         status: Option<String>,
         /// Linked customer IDs (comma-separated)
@@ -233,10 +253,10 @@ pub enum NewEntity {
     Research {
         /// Research title
         title: String,
-        /// Owner
+        /// Owner (username or name)
         #[arg(long)]
         owner: Option<String>,
-        /// Comma-separated agent names
+        /// Comma-separated AI agent names (e.g., claude, gemini)
         #[arg(long)]
         agents: Option<String>,
         /// Comma-separated tags
@@ -248,6 +268,7 @@ pub enum NewEntity {
   mc new task \"Select motors\" --project PROJ-001 --priority 2
   mc new task \"Review contract\" --customer CUST-001
   mc new task \"Update CI pipeline\"
+  mc new task \"Write tests\" --sprint 2026-W05 --depends-on TASK-001
   mc -y new task \"Quick task\" --project PROJ-001")]
     Task {
         /// Task title
@@ -288,7 +309,7 @@ pub enum NewEntity {
     Sprint {
         /// Sprint title (e.g., 2026-W05)
         title: String,
-        /// Owner
+        /// Owner (username or name)
         #[arg(long)]
         owner: Option<String>,
         /// Status (default: planning)
@@ -326,7 +347,7 @@ pub enum NewEntity {
         #[arg(long)]
         status: Option<String>,
         /// Proposal type: architecture, feature, or process
-        #[arg(long, name = "type")]
+        #[arg(long = "type")]
         proposal_type: Option<String>,
         /// Comma-separated tags
         #[arg(long)]
@@ -355,7 +376,7 @@ pub enum NewEntity {
         /// Phone number
         #[arg(long)]
         phone: Option<String>,
-        /// Status (default: active)
+        /// Status (default: active; values: active, inactive)
         #[arg(long)]
         status: Option<String>,
         /// Comma-separated tags
@@ -448,7 +469,8 @@ pub enum ListEntity {
     #[command(after_help = "\x1b[1mExamples:\x1b[0m
   mc list contacts
   mc list contacts --status active
-  mc list contacts --customer CUST-001")]
+  mc list contacts --customer CUST-001
+  mc list contacts --tag engineering")]
     Contacts {
         /// Filter by status
         #[arg(long)]
@@ -464,7 +486,7 @@ pub enum ListEntity {
     #[command(after_help = "\x1b[1mExamples:\x1b[0m
   mc list tasks
   mc list tasks --status in-progress --project PROJ-001
-  mc list tasks --priority 1 --owner huhn511
+  mc list tasks --priority 1 --owner alice
   mc list tasks --sprint 2026-W05")]
     Tasks {
         /// Filter by status
@@ -521,14 +543,15 @@ pub enum TaskSubcommand {
         id: String,
         /// New status (backlog, todo, in-progress, review, done, cancelled)
         status: String,
-        /// Optionally set sprint label
+        /// Assign to a sprint (e.g., 2026-W05)
         #[arg(long)]
         sprint: Option<String>,
     },
     /// Show the next actionable task
     #[command(after_help = "\x1b[1mExamples:\x1b[0m
   mc task next
-  mc task next --project PROJ-001")]
+  mc task next --project PROJ-001
+  mc task next --customer CUST-001")]
     Next {
         /// Filter by project ID
         #[arg(long)]
@@ -542,6 +565,9 @@ pub enum TaskSubcommand {
 #[derive(Subcommand, Debug)]
 pub enum ExportEntity {
     /// Export a customer to a zip archive
+    #[command(after_help = "\x1b[1mExamples:\x1b[0m
+  mc export customer CUST-001       Export by ID
+  mc export customer acme-inc       Export by slug")]
     Customer {
         /// Customer ID or slug (e.g., CUST-001 or acme-inc)
         id: String,
