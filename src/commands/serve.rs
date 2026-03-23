@@ -16,9 +16,11 @@ struct AppState {
     cfg: ResolvedConfig,
     /// Cached custom CSS content (read once at startup).
     custom_css: String,
+    /// Base path prefix for reverse proxy deployments (e.g. "/hq").
+    base_path: String,
 }
 
-pub fn run(cfg: &ResolvedConfig, port: u16) -> McResult<()> {
+pub fn run(cfg: &ResolvedConfig, port: u16, base_path: &str) -> McResult<()> {
     // Read custom CSS once at startup
     let custom_css = cfg
         .brand
@@ -27,14 +29,18 @@ pub fn run(cfg: &ResolvedConfig, port: u16) -> McResult<()> {
         .and_then(|p| std::fs::read_to_string(p).ok())
         .unwrap_or_default();
 
+    // Normalize base_path: strip trailing slash, keep leading slash
+    let base_path = base_path.trim_end_matches('/').to_string();
+
     let state = Arc::new(AppState {
         cfg: cfg.clone(),
         custom_css,
+        base_path: base_path.clone(),
     });
 
     let rt = tokio::runtime::Runtime::new()?;
     rt.block_on(async move {
-        let app = Router::new()
+        let routes = Router::new()
             .route("/", get(handle_dashboard))
             .route("/customers", get(handle_customers))
             .route("/projects", get(handle_projects))
@@ -51,8 +57,20 @@ pub fn run(cfg: &ResolvedConfig, port: u16) -> McResult<()> {
             .fallback(handle_404)
             .with_state(state);
 
+        // If base_path is set, nest all routes under it; otherwise serve at root
+        let app: Router = if base_path.is_empty() {
+            routes
+        } else {
+            Router::new().nest(&base_path, routes)
+        };
+
         let addr = format!("127.0.0.1:{}", port);
-        println!("MissionControl web dashboard: http://{}", addr);
+        let url_path = if base_path.is_empty() {
+            String::new()
+        } else {
+            format!("{}/", base_path)
+        };
+        println!("MissionControl web dashboard: http://{}{}", addr, url_path);
         println!("Press Ctrl+C to stop.");
 
         let listener = tokio::net::TcpListener::bind(&addr).await.map_err(|e| {
@@ -97,13 +115,16 @@ async fn handle_dashboard(State(state): State<Arc<AppState>>) -> Html<String> {
         }
     };
 
-    Html(html::dashboard_page(
-        &counts,
-        &recent,
-        &cfg.mode,
-        &cfg.brand,
-        &state.custom_css,
-        &cfg.root,
+    Html(html::prefix_base_path(
+        &html::dashboard_page(
+            &counts,
+            &recent,
+            &cfg.mode,
+            &cfg.brand,
+            &state.custom_css,
+            &cfg.root,
+        ),
+        &state.base_path,
     ))
 }
 
@@ -111,49 +132,91 @@ async fn handle_customers(
     State(state): State<Arc<AppState>>,
     Query(params): Query<HashMap<String, String>>,
 ) -> Result<Html<String>, (StatusCode, Html<String>)> {
-    handle_list(EntityKind::Customer, &state.cfg, &params, &state.custom_css)
+    handle_list(
+        EntityKind::Customer,
+        &state.cfg,
+        &params,
+        &state.custom_css,
+        &state.base_path,
+    )
 }
 
 async fn handle_projects(
     State(state): State<Arc<AppState>>,
     Query(params): Query<HashMap<String, String>>,
 ) -> Result<Html<String>, (StatusCode, Html<String>)> {
-    handle_list(EntityKind::Project, &state.cfg, &params, &state.custom_css)
+    handle_list(
+        EntityKind::Project,
+        &state.cfg,
+        &params,
+        &state.custom_css,
+        &state.base_path,
+    )
 }
 
 async fn handle_meetings(
     State(state): State<Arc<AppState>>,
     Query(params): Query<HashMap<String, String>>,
 ) -> Result<Html<String>, (StatusCode, Html<String>)> {
-    handle_list(EntityKind::Meeting, &state.cfg, &params, &state.custom_css)
+    handle_list(
+        EntityKind::Meeting,
+        &state.cfg,
+        &params,
+        &state.custom_css,
+        &state.base_path,
+    )
 }
 
 async fn handle_research(
     State(state): State<Arc<AppState>>,
     Query(params): Query<HashMap<String, String>>,
 ) -> Result<Html<String>, (StatusCode, Html<String>)> {
-    handle_list(EntityKind::Research, &state.cfg, &params, &state.custom_css)
+    handle_list(
+        EntityKind::Research,
+        &state.cfg,
+        &params,
+        &state.custom_css,
+        &state.base_path,
+    )
 }
 
 async fn handle_sprints(
     State(state): State<Arc<AppState>>,
     Query(params): Query<HashMap<String, String>>,
 ) -> Result<Html<String>, (StatusCode, Html<String>)> {
-    handle_list(EntityKind::Sprint, &state.cfg, &params, &state.custom_css)
+    handle_list(
+        EntityKind::Sprint,
+        &state.cfg,
+        &params,
+        &state.custom_css,
+        &state.base_path,
+    )
 }
 
 async fn handle_proposals(
     State(state): State<Arc<AppState>>,
     Query(params): Query<HashMap<String, String>>,
 ) -> Result<Html<String>, (StatusCode, Html<String>)> {
-    handle_list(EntityKind::Proposal, &state.cfg, &params, &state.custom_css)
+    handle_list(
+        EntityKind::Proposal,
+        &state.cfg,
+        &params,
+        &state.custom_css,
+        &state.base_path,
+    )
 }
 
 async fn handle_contacts(
     State(state): State<Arc<AppState>>,
     Query(params): Query<HashMap<String, String>>,
 ) -> Result<Html<String>, (StatusCode, Html<String>)> {
-    handle_list(EntityKind::Contact, &state.cfg, &params, &state.custom_css)
+    handle_list(
+        EntityKind::Contact,
+        &state.cfg,
+        &params,
+        &state.custom_css,
+        &state.base_path,
+    )
 }
 
 async fn handle_tasks(
@@ -214,17 +277,20 @@ async fn handle_tasks(
     .unwrap_or_default();
     let filter_options = html::TaskFilterOptions::from_tasks(&all_tasks);
 
-    Ok(Html(html::tasks_list_page(
-        &tasks,
-        status_filter,
-        priority_filter,
-        owner_filter,
-        project_filter,
-        sprint_filter,
-        valid_statuses,
-        &filter_options,
-        &cfg.brand,
-        &state.custom_css,
+    Ok(Html(html::prefix_base_path(
+        &html::tasks_list_page(
+            &tasks,
+            status_filter,
+            priority_filter,
+            owner_filter,
+            project_filter,
+            sprint_filter,
+            valid_statuses,
+            &filter_options,
+            &cfg.brand,
+            &state.custom_css,
+        ),
+        &state.base_path,
     )))
 }
 
@@ -261,10 +327,9 @@ async fn handle_tasks_board(
         error_response(&e.to_string())
     })?;
 
-    Ok(Html(html::board_page(
-        &tasks,
-        &cfg.brand,
-        &state.custom_css,
+    Ok(Html(html::prefix_base_path(
+        &html::board_page(&tasks, &cfg.brand, &state.custom_css),
+        &state.base_path,
     )))
 }
 
@@ -273,6 +338,7 @@ fn handle_list(
     cfg: &ResolvedConfig,
     params: &HashMap<String, String>,
     custom_css: &str,
+    base_path: &str,
 ) -> Result<Html<String>, (StatusCode, Html<String>)> {
     let status_filter = params
         .get("status")
@@ -305,17 +371,20 @@ fn handle_list(
 
     let valid_statuses = kind.statuses(cfg);
 
-    Ok(Html(html::list_page(
-        kind.label_plural(),
-        &entities,
-        status_filter,
-        tag_filter,
-        valid_statuses,
-        sort_field,
-        sort_dir,
-        &cfg.mode,
-        &cfg.brand,
-        custom_css,
+    Ok(Html(html::prefix_base_path(
+        &html::list_page(
+            kind.label_plural(),
+            &entities,
+            status_filter,
+            tag_filter,
+            valid_statuses,
+            sort_field,
+            sort_dir,
+            &cfg.mode,
+            &cfg.brand,
+            custom_css,
+        ),
+        base_path,
     )))
 }
 
@@ -341,12 +410,9 @@ async fn handle_detail(
     // Collect related entities based on entity kind
     let related = collect_related_entities(&entity, cfg);
 
-    Ok(Html(html::detail_page(
-        &entity,
-        &prefixes,
-        &related,
-        cfg,
-        &state.custom_css,
+    Ok(Html(html::prefix_base_path(
+        &html::detail_page(&entity, &prefixes, &related, cfg, &state.custom_css),
+        &state.base_path,
     )))
 }
 
@@ -490,10 +556,9 @@ fn error_response(message: &str) -> (StatusCode, Html<String>) {
 }
 
 async fn handle_404(State(state): State<Arc<AppState>>, uri: axum::http::Uri) -> Html<String> {
-    Html(html::not_found_page(
-        uri.path(),
-        &state.cfg.brand,
-        &state.custom_css,
+    Html(html::prefix_base_path(
+        &html::not_found_page(uri.path(), &state.cfg.brand, &state.custom_css),
+        &state.base_path,
     ))
 }
 

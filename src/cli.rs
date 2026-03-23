@@ -120,6 +120,9 @@ Open http://localhost:<port> in your browser to view the dashboard.")]
         /// Port to listen on
         #[arg(long, default_value_t = 5000)]
         port: u16,
+        /// Base path prefix when served behind a reverse proxy (e.g. /hq)
+        #[arg(long, default_value = "")]
+        base_path: String,
     },
     /// Start an MCP (Model Context Protocol) server over stdio
     #[command(after_help = "\x1b[1mIntegration:\x1b[0m

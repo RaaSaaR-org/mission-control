@@ -73,7 +73,7 @@ fn run(cli: &Cli) -> McResult<()> {
         Command::Print { entity } => commands::print::run(entity, &cfg),
         Command::Validate => commands::validate::run(&cfg),
         Command::Status => commands::status::run(&cfg),
-        Command::Serve { port } => commands::serve::run(&cfg, *port),
+        Command::Serve { port, base_path } => commands::serve::run(&cfg, *port, base_path),
         Command::Mcp => commands::mcp::run(&cfg),
         Command::Task { subcmd } => commands::task::run(subcmd, &cfg),
     }

@@ -50,6 +50,18 @@ impl TaskFilterOptions {
 static SIMPLE_CSS: &str = include_str!("assets/simple.min.css");
 static CUSTOM_CSS: &str = include_str!("assets/custom.css");
 
+/// Rewrite absolute URLs in generated HTML to include a base path prefix.
+/// No-op when base_path is empty.
+pub fn prefix_base_path(html: &str, base_path: &str) -> String {
+    if base_path.is_empty() {
+        return html.to_string();
+    }
+    html.replace("href=\"/", &format!("href=\"{}/", base_path))
+        .replace("src=\"/", &format!("src=\"{}/", base_path))
+        .replace("action=\"/", &format!("action=\"{}/", base_path))
+        .replace("url(\"/", &format!("url(\"{}/", base_path))
+}
+
 /// Wrap body HTML in a full HTML page (default brand, standalone mode).
 pub fn layout(title: &str, active_nav: &str, body_html: &str) -> String {
     layout_branded(
