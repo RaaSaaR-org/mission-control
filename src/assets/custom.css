@@ -104,6 +104,14 @@ body > header h1 {
     letter-spacing: -0.01em;
     margin: 0 0 0.5rem 0;
     color: var(--mc-text-primary);
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+}
+
+.brand-logo {
+    height: 1.6rem;
+    width: auto;
 }
 
 body > header nav ul {
@@ -694,6 +702,67 @@ a {
 /* ── Counts Table (legacy compat) ──────────────────────────────────── */
 .counts-table td, .counts-table th {
     padding: 0.3rem 0.6rem;
+}
+
+/* ── Related Sections (Detail Page) ────────────────────────────────── */
+.related-section {
+    margin-bottom: 1.5rem;
+}
+.related-section h3 {
+    margin-top: 0.75rem;
+    margin-bottom: 0.5rem;
+}
+.related-count {
+    font-weight: normal;
+    color: var(--mc-text-muted);
+    font-size: 0.85em;
+}
+.related-table {
+    font-size: 0.88rem;
+}
+.related-table td {
+    padding: 0.35rem 0.6rem;
+}
+
+/* ── Progress Bar ─────────────────────────────────────────────────── */
+.progress-bar {
+    height: 0.5rem;
+    background: var(--mc-surface-muted);
+    border-radius: var(--mc-radius-full);
+    overflow: hidden;
+    margin-bottom: 0.3rem;
+    border: 1px solid var(--mc-border-light);
+}
+.progress-fill {
+    height: 100%;
+    background: var(--mc-green);
+    border-radius: var(--mc-radius-full);
+    transition: width 300ms ease;
+}
+.progress-label {
+    font-size: 0.78rem;
+    color: var(--mc-text-secondary);
+    display: block;
+    margin-bottom: 0.5rem;
+}
+
+/* ── Sortable Headers ─────────────────────────────────────────────── */
+a.sort-link {
+    color: var(--mc-text-secondary);
+    text-decoration: none;
+    white-space: nowrap;
+}
+a.sort-link:hover {
+    color: var(--mc-text-primary);
+}
+th.sorted a.sort-link {
+    color: var(--mc-blue);
+}
+
+/* ── Table Responsive Wrap ────────────────────────────────────────── */
+.table-wrap {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
 }
 
 /* ── Responsive ────────────────────────────────────────────────────── */

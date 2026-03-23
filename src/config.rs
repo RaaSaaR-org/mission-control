@@ -28,6 +28,8 @@ pub struct BrandConfig {
     pub font_name: Option<String>,
     pub primary_color: Option<Vec<u8>>,
     pub accent_color: Option<Vec<u8>>,
+    pub logo: Option<String>,
+    pub custom_css: Option<String>,
 }
 
 /// Resolved configuration with absolute paths.
@@ -50,6 +52,11 @@ pub struct ResolvedConfig {
     pub brand: ResolvedBrand,
 }
 
+/// Default primary color (blue).
+pub const DEFAULT_PRIMARY: [u8; 3] = [0, 82, 155];
+/// Default accent color (gray).
+pub const DEFAULT_ACCENT: [u8; 3] = [102, 102, 102];
+
 /// Resolved brand configuration with absolute paths and defaults applied.
 #[derive(Debug, Clone)]
 pub struct ResolvedBrand {
@@ -59,6 +66,8 @@ pub struct ResolvedBrand {
     pub font_name: String,
     pub primary_color: [u8; 3],
     pub accent_color: [u8; 3],
+    pub logo: Option<PathBuf>,
+    pub custom_css: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone)]
@@ -316,6 +325,8 @@ fn resolve_brand(root: &Path, raw: Option<BrandConfig>) -> ResolvedBrand {
     match raw {
         Some(b) => {
             let fonts_dir = b.fonts_dir.map(|p| root.join(p)).filter(|p| p.is_dir());
+            let logo = b.logo.map(|p| root.join(p)).filter(|p| p.is_file());
+            let custom_css = b.custom_css.map(|p| root.join(p)).filter(|p| p.is_file());
             ResolvedBrand {
                 name: b.name.unwrap_or_else(|| "MissionControl".into()),
                 tagline: b.tagline.unwrap_or_default(),
@@ -324,13 +335,15 @@ fn resolve_brand(root: &Path, raw: Option<BrandConfig>) -> ResolvedBrand {
                 primary_color: b
                     .primary_color
                     .as_deref()
-                    .map(|v| color_from_vec(v, [0, 82, 155]))
-                    .unwrap_or([0, 82, 155]),
+                    .map(|v| color_from_vec(v, DEFAULT_PRIMARY))
+                    .unwrap_or(DEFAULT_PRIMARY),
                 accent_color: b
                     .accent_color
                     .as_deref()
-                    .map(|v| color_from_vec(v, [102, 102, 102]))
-                    .unwrap_or([102, 102, 102]),
+                    .map(|v| color_from_vec(v, DEFAULT_ACCENT))
+                    .unwrap_or(DEFAULT_ACCENT),
+                logo,
+                custom_css,
             }
         }
         None => ResolvedBrand {
@@ -338,8 +351,10 @@ fn resolve_brand(root: &Path, raw: Option<BrandConfig>) -> ResolvedBrand {
             tagline: String::new(),
             fonts_dir: None,
             font_name: "LiberationSans".into(),
-            primary_color: [0, 82, 155],
-            accent_color: [102, 102, 102],
+            primary_color: DEFAULT_PRIMARY,
+            accent_color: DEFAULT_ACCENT,
+            logo: None,
+            custom_css: None,
         },
     }
 }

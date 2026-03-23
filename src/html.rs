@@ -1,29 +1,210 @@
+use crate::config::{RepoMode, ResolvedBrand, ResolvedConfig, DEFAULT_ACCENT, DEFAULT_PRIMARY};
 use crate::data::{self, EntityRecord, RecentFile, StatusCounts};
+use crate::entity::EntityKind;
 use crate::frontmatter;
 use regex::Regex;
 use serde_yaml::Value;
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
+
+/// A section of related entities to display on a detail page.
+pub struct RelatedSection {
+    pub title: String,
+    pub kind: EntityKind,
+    pub entities: Vec<EntityRecord>,
+}
+
+/// Filter options derived from all tasks for populating dropdowns.
+pub struct TaskFilterOptions {
+    pub owners: Vec<String>,
+    pub projects: Vec<String>,
+    pub sprints: Vec<String>,
+}
+
+impl TaskFilterOptions {
+    pub fn from_tasks(tasks: &[EntityRecord]) -> Self {
+        let mut owners = BTreeSet::new();
+        let mut projects = BTreeSet::new();
+        let mut sprints = BTreeSet::new();
+        for t in tasks {
+            let owner = frontmatter::get_str_or(&t.frontmatter, "owner", "");
+            if !owner.is_empty() {
+                owners.insert(owner.to_string());
+            }
+            for p in frontmatter::get_link_list(&t.frontmatter, "projects") {
+                projects.insert(p);
+            }
+            let sprint = frontmatter::get_str_or(&t.frontmatter, "sprint", "");
+            let sprint = frontmatter::strip_wikilink(sprint);
+            if !sprint.is_empty() {
+                sprints.insert(sprint.to_string());
+            }
+        }
+        Self {
+            owners: owners.into_iter().collect(),
+            projects: projects.into_iter().collect(),
+            sprints: sprints.into_iter().collect(),
+        }
+    }
+}
 
 static SIMPLE_CSS: &str = include_str!("assets/simple.min.css");
 static CUSTOM_CSS: &str = include_str!("assets/custom.css");
 
-/// Wrap body HTML in a full HTML page with header, nav, main, footer.
+/// Wrap body HTML in a full HTML page (default brand, standalone mode).
 pub fn layout(title: &str, active_nav: &str, body_html: &str) -> String {
-    let nav_items = [
-        ("Dashboard", "/"),
-        ("Customers", "/customers"),
-        ("Projects", "/projects"),
-        ("Meetings", "/meetings"),
-        ("Research", "/research"),
-        ("Tasks", "/tasks"),
-        ("Sprints", "/sprints"),
-        ("Proposals", "/proposals"),
-        ("Contacts", "/contacts"),
+    layout_branded(
+        title,
+        active_nav,
+        body_html,
+        &RepoMode::Standalone,
+        &default_brand(),
+        "",
+    )
+}
+
+fn default_brand() -> ResolvedBrand {
+    ResolvedBrand {
+        name: "MissionControl".into(),
+        tagline: String::new(),
+        fonts_dir: None,
+        font_name: "LiberationSans".into(),
+        primary_color: DEFAULT_PRIMARY,
+        accent_color: DEFAULT_ACCENT,
+        logo: None,
+        custom_css: None,
+    }
+}
+
+/// Generate CSS overrides from brand colors.
+pub fn brand_css(brand: &ResolvedBrand) -> String {
+    if brand.primary_color == DEFAULT_PRIMARY && brand.accent_color == DEFAULT_ACCENT {
+        return String::new();
+    }
+
+    let [pr, pg, pb] = brand.primary_color;
+    let [ar, ag, ab] = brand.accent_color;
+
+    // Darken for text variants
+    let darken = |r: u8, g: u8, b: u8, f: f32| -> (u8, u8, u8) {
+        (
+            (r as f32 * f) as u8,
+            (g as f32 * f) as u8,
+            (b as f32 * f) as u8,
+        )
+    };
+    // Lighten for dark mode
+    let lighten = |r: u8, g: u8, b: u8, f: f32| -> (u8, u8, u8) {
+        let l = |v: u8| -> u8 { (v as f32 + (255.0 - v as f32) * f) as u8 };
+        (l(r), l(g), l(b))
+    };
+
+    let (pdr, pdg, pdb) = darken(pr, pg, pb, 0.7);
+    let (plr, plg, plb) = lighten(pr, pg, pb, 0.35);
+    let (adr, adg, adb) = darken(ar, ag, ab, 0.7);
+    let (alr, alg, alb) = lighten(ar, ag, ab, 0.35);
+
+    format!(
+        r#"<style>
+:root {{
+  --mc-blue: rgb({pr},{pg},{pb});
+  --mc-blue-bg: rgba({pr},{pg},{pb},0.1);
+  --mc-blue-text: rgb({pdr},{pdg},{pdb});
+  --mc-amber: rgb({ar},{ag},{ab});
+  --mc-amber-bg: rgba({ar},{ag},{ab},0.1);
+  --mc-amber-text: rgb({adr},{adg},{adb});
+}}
+@media (prefers-color-scheme: dark) {{
+  :root {{
+    --mc-blue: rgb({plr},{plg},{plb});
+    --mc-blue-bg: rgba({pr},{pg},{pb},0.15);
+    --mc-blue-text: rgb({plr},{plg},{plb});
+    --mc-amber: rgb({alr},{alg},{alb});
+    --mc-amber-bg: rgba({ar},{ag},{ab},0.15);
+    --mc-amber-text: rgb({alr},{alg},{alb});
+  }}
+}}
+</style>"#
+    )
+}
+
+/// Generate @font-face CSS for brand fonts.
+pub fn font_face_css(brand: &ResolvedBrand) -> String {
+    let fonts_dir = match &brand.fonts_dir {
+        Some(d) => d,
+        None => return String::new(),
+    };
+
+    let mut faces = String::new();
+    let font_name = &brand.font_name;
+
+    if let Ok(entries) = std::fs::read_dir(fonts_dir) {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            let lower = name.to_lowercase();
+            if !lower.ends_with(".ttf") && !lower.ends_with(".woff2") {
+                continue;
+            }
+            let (weight, style) = if lower.contains("bolditalic") {
+                ("700", "italic")
+            } else if lower.contains("bold") {
+                ("700", "normal")
+            } else if lower.contains("italic") {
+                ("400", "italic")
+            } else {
+                ("400", "normal")
+            };
+            let format = if lower.ends_with(".woff2") {
+                "woff2"
+            } else {
+                "truetype"
+            };
+            faces.push_str(&format!(
+                r#"@font-face {{ font-family: "{font_name}"; src: url("/brand/fonts/{name}") format("{format}"); font-weight: {weight}; font-style: {style}; font-display: swap; }}
+"#
+            ));
+        }
+    }
+
+    if faces.is_empty() {
+        return String::new();
+    }
+
+    format!(
+        r#"<style>
+{faces}body {{ font-family: "{font_name}", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }}
+</style>"#
+    )
+}
+
+/// Full branded layout with mode, brand, and optional custom CSS content.
+#[allow(clippy::too_many_arguments)]
+pub fn layout_branded(
+    title: &str,
+    active_nav: &str,
+    body_html: &str,
+    mode: &RepoMode,
+    brand: &ResolvedBrand,
+    custom_css_content: &str,
+) -> String {
+    let all_nav_items: Vec<(&str, &str, Option<EntityKind>)> = vec![
+        ("Dashboard", "/", None),
+        ("Customers", "/customers", Some(EntityKind::Customer)),
+        ("Projects", "/projects", Some(EntityKind::Project)),
+        ("Meetings", "/meetings", Some(EntityKind::Meeting)),
+        ("Research", "/research", Some(EntityKind::Research)),
+        ("Tasks", "/tasks", Some(EntityKind::Task)),
+        ("Sprints", "/sprints", Some(EntityKind::Sprint)),
+        ("Proposals", "/proposals", Some(EntityKind::Proposal)),
+        ("Contacts", "/contacts", Some(EntityKind::Contact)),
     ];
 
-    let nav_links: String = nav_items
+    let nav_links: String = all_nav_items
         .iter()
-        .map(|(label, href)| {
+        .filter(|(_, _, kind)| match kind {
+            None => true,
+            Some(k) => k.available_in_mode(*mode),
+        })
+        .map(|(label, href, _)| {
             let class = if *href == active_nav {
                 " class=\"active\""
             } else {
@@ -34,19 +215,37 @@ pub fn layout(title: &str, active_nav: &str, body_html: &str) -> String {
         .collect::<Vec<_>>()
         .join("\n          ");
 
+    let brand_name = escape_html(&brand.name);
+    let brand_css_block = brand_css(brand);
+    let font_css_block = font_face_css(brand);
+    let custom_css_block = if custom_css_content.is_empty() {
+        String::new()
+    } else {
+        format!("<style>{}</style>", custom_css_content)
+    };
+
+    let logo_html = if brand.logo.is_some() {
+        r#"<img src="/brand/logo" alt="" class="brand-logo">"#
+    } else {
+        ""
+    };
+
     format!(
         r#"<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>{title} - MissionControl</title>
+  <title>{title} - {brand_name}</title>
   <style>{SIMPLE_CSS}</style>
   <style>{CUSTOM_CSS}</style>
+  {brand_css_block}
+  {font_css_block}
+  {custom_css_block}
 </head>
 <body>
   <header>
-    <h1>MissionControl</h1>
+    <h1>{logo_html}{brand_name}</h1>
     <nav>
       <ul>
         {nav_links}
@@ -57,7 +256,7 @@ pub fn layout(title: &str, active_nav: &str, body_html: &str) -> String {
     {body_html}
   </main>
   <footer>
-    <p>MissionControl &mdash; served by <code>mc serve</code></p>
+    <p>{brand_name} &mdash; served by <code>mc serve</code></p>
   </footer>
 </body>
 </html>"#,
@@ -194,7 +393,13 @@ fn initials(name: &str) -> String {
 }
 
 /// Render the dashboard page.
-pub fn dashboard_page(counts: &[StatusCounts], recent: &[RecentFile]) -> String {
+pub fn dashboard_page(
+    counts: &[StatusCounts],
+    recent: &[RecentFile],
+    mode: &RepoMode,
+    brand: &ResolvedBrand,
+    custom_css: &str,
+) -> String {
     let mut body = String::new();
     body.push_str("<h2>Dashboard</h2>\n");
 
@@ -315,16 +520,37 @@ pub fn dashboard_page(counts: &[StatusCounts], recent: &[RecentFile]) -> String 
         body.push_str("</ul>\n");
     }
 
-    layout("Dashboard", "/", &body)
+    layout_branded("Dashboard", "/", &body, mode, brand, custom_css)
+}
+
+/// Sort entities by a frontmatter field.
+pub fn sort_entities(entities: &mut [EntityRecord], field: &str, dir: &str) {
+    let descending = dir == "desc";
+    entities.sort_by(|a, b| {
+        let va = frontmatter::get_str_or(&a.frontmatter, field, "");
+        let vb = frontmatter::get_str_or(&b.frontmatter, field, "");
+        let cmp = va.to_lowercase().cmp(&vb.to_lowercase());
+        if descending {
+            cmp.reverse()
+        } else {
+            cmp
+        }
+    });
 }
 
 /// Render a list page for a given entity kind.
+#[allow(clippy::too_many_arguments)]
 pub fn list_page(
     kind_plural: &str,
     entities: &[EntityRecord],
     status_filter: Option<&str>,
     tag_filter: Option<&str>,
     valid_statuses: &[String],
+    sort_field: Option<&str>,
+    sort_dir: &str,
+    mode: &RepoMode,
+    brand: &ResolvedBrand,
+    custom_css: &str,
 ) -> String {
     let nav_path = format!("/{}", kind_plural);
     let mut body = String::new();
@@ -372,23 +598,128 @@ pub fn list_page(
     if entities.is_empty() {
         body.push_str(r#"<div class="empty-state"><span class="empty-state-icon">~</span>No entities match your filters.</div>"#);
         body.push('\n');
-        return layout(&capitalize(kind_plural), &nav_path, &body);
+        return layout_branded(
+            &capitalize(kind_plural),
+            &nav_path,
+            &body,
+            mode,
+            brand,
+            custom_css,
+        );
     }
 
     // Determine which columns to show based on kind
     let is_meeting = kind_plural == "meetings";
     let is_sprint = kind_plural == "sprints";
 
-    body.push_str("<table>\n<thead><tr>");
-    body.push_str("<th>ID</th>");
+    // Helper to build sortable header params
+    let base_params = build_filter_params(status_filter, tag_filter);
+
+    body.push_str(r#"<div class="table-wrap"><table>"#);
+    body.push_str("\n<thead><tr>");
+    body.push_str(&sortable_th(
+        "ID",
+        "id",
+        sort_field,
+        sort_dir,
+        kind_plural,
+        &base_params,
+    ));
     if is_meeting {
-        body.push_str("<th>Title</th><th>Date</th><th>Time</th><th>Status</th><th>Tags</th>");
+        body.push_str(&sortable_th(
+            "Title",
+            "title",
+            sort_field,
+            sort_dir,
+            kind_plural,
+            &base_params,
+        ));
+        body.push_str(&sortable_th(
+            "Date",
+            "date",
+            sort_field,
+            sort_dir,
+            kind_plural,
+            &base_params,
+        ));
+        body.push_str("<th>Time</th>");
+        body.push_str(&sortable_th(
+            "Status",
+            "status",
+            sort_field,
+            sort_dir,
+            kind_plural,
+            &base_params,
+        ));
+        body.push_str("<th>Tags</th>");
     } else if is_sprint {
-        body.push_str(
-            "<th>Title</th><th>Status</th><th>Start</th><th>End</th><th>Owner</th><th>Tags</th>",
-        );
+        body.push_str(&sortable_th(
+            "Title",
+            "title",
+            sort_field,
+            sort_dir,
+            kind_plural,
+            &base_params,
+        ));
+        body.push_str(&sortable_th(
+            "Status",
+            "status",
+            sort_field,
+            sort_dir,
+            kind_plural,
+            &base_params,
+        ));
+        body.push_str(&sortable_th(
+            "Start",
+            "start_date",
+            sort_field,
+            sort_dir,
+            kind_plural,
+            &base_params,
+        ));
+        body.push_str(&sortable_th(
+            "End",
+            "end_date",
+            sort_field,
+            sort_dir,
+            kind_plural,
+            &base_params,
+        ));
+        body.push_str(&sortable_th(
+            "Owner",
+            "owner",
+            sort_field,
+            sort_dir,
+            kind_plural,
+            &base_params,
+        ));
+        body.push_str("<th>Tags</th>");
     } else {
-        body.push_str("<th>Name</th><th>Status</th><th>Owner</th><th>Tags</th>");
+        body.push_str(&sortable_th(
+            "Name",
+            "name",
+            sort_field,
+            sort_dir,
+            kind_plural,
+            &base_params,
+        ));
+        body.push_str(&sortable_th(
+            "Status",
+            "status",
+            sort_field,
+            sort_dir,
+            kind_plural,
+            &base_params,
+        ));
+        body.push_str(&sortable_th(
+            "Owner",
+            "owner",
+            sort_field,
+            sort_dir,
+            kind_plural,
+            &base_params,
+        ));
+        body.push_str("<th>Tags</th>");
     }
     body.push_str("</tr></thead>\n<tbody>\n");
 
@@ -446,18 +777,83 @@ pub fn list_page(
         body.push_str("</tr>\n");
     }
 
-    body.push_str("</tbody></table>\n");
+    body.push_str("</tbody></table></div>\n");
     body.push_str(&format!(
         r#"<p class="table-count"><strong>{}</strong> {} total</p>"#,
         entities.len(),
         kind_plural
     ));
 
-    layout(&capitalize(kind_plural), &nav_path, &body)
+    layout_branded(
+        &capitalize(kind_plural),
+        &nav_path,
+        &body,
+        mode,
+        brand,
+        custom_css,
+    )
+}
+
+/// Build query string for filter params (to preserve when sorting).
+fn build_filter_params(status: Option<&str>, tag: Option<&str>) -> String {
+    let mut parts = Vec::new();
+    if let Some(s) = status {
+        parts.push(format!("status={}", escape_html(s)));
+    }
+    if let Some(t) = tag {
+        parts.push(format!("tag={}", escape_html(t)));
+    }
+    if parts.is_empty() {
+        String::new()
+    } else {
+        parts.join("&")
+    }
+}
+
+/// Render a sortable table header cell.
+fn sortable_th(
+    label: &str,
+    field: &str,
+    current_sort: Option<&str>,
+    current_dir: &str,
+    kind_plural: &str,
+    base_params: &str,
+) -> String {
+    let is_active = current_sort == Some(field);
+    let next_dir = if is_active && current_dir == "asc" {
+        "desc"
+    } else {
+        "asc"
+    };
+    let arrow = if is_active {
+        if current_dir == "asc" {
+            " &#9650;"
+        } else {
+            " &#9660;"
+        }
+    } else {
+        ""
+    };
+    let sep = if base_params.is_empty() { "" } else { "&" };
+    let href = format!(
+        "/{}?{}{}sort={}&dir={}",
+        kind_plural, base_params, sep, field, next_dir
+    );
+    let class = if is_active { " class=\"sorted\"" } else { "" };
+    format!(
+        r#"<th{}><a href="{}" class="sort-link">{}{}</a></th>"#,
+        class, href, label, arrow
+    )
 }
 
 /// Render a detail page for a single entity.
-pub fn detail_page(entity: &EntityRecord, prefixes: &[&str]) -> String {
+pub fn detail_page(
+    entity: &EntityRecord,
+    prefixes: &[&str],
+    related: &[RelatedSection],
+    cfg: &ResolvedConfig,
+    custom_css: &str,
+) -> String {
     let mut body = String::new();
 
     let display_name = frontmatter::get_str(&entity.frontmatter, "name")
@@ -567,27 +963,95 @@ pub fn detail_page(entity: &EntityRecord, prefixes: &[&str]) -> String {
         body.push_str("</div>\n");
     }
 
+    // Related entities sections
+    if !related.is_empty() {
+        body.push_str(r#"<hr class="detail-separator">"#);
+        body.push('\n');
+        for section in related {
+            body.push_str(&render_related_section(section));
+        }
+    }
+
     let nav_path = format!("/{}", entity.kind.label_plural());
 
-    layout(
+    layout_branded(
         &format!("{} - {}", display_name, entity.id),
         &nav_path,
         &body,
+        &cfg.mode,
+        &cfg.brand,
+        custom_css,
     )
 }
 
+/// Render a related entities section on a detail page.
+fn render_related_section(section: &RelatedSection) -> String {
+    let mut html = String::new();
+    html.push_str(&format!(
+        r#"<div class="related-section"><h3>{} <span class="related-count">{}</span></h3>"#,
+        escape_html(&section.title),
+        section.entities.len()
+    ));
+
+    // Progress bar for tasks
+    if section.kind == EntityKind::Task && !section.entities.is_empty() {
+        let done = section
+            .entities
+            .iter()
+            .filter(|e| {
+                let s = frontmatter::get_str_or(&e.frontmatter, "status", "");
+                s == "done" || s == "completed"
+            })
+            .count();
+        let pct = (done as f64 / section.entities.len() as f64 * 100.0) as u32;
+        html.push_str(&format!(
+            r#"<div class="progress-bar"><div class="progress-fill" style="width:{}%"></div></div>
+<span class="progress-label">{}/{} done ({}%)</span>"#,
+            pct,
+            done,
+            section.entities.len(),
+            pct
+        ));
+    }
+
+    html.push_str(r#"<div class="table-wrap"><table class="related-table"><tbody>"#);
+    for e in &section.entities {
+        let id = frontmatter::get_str_or(&e.frontmatter, "id", "");
+        let name = frontmatter::get_str(&e.frontmatter, "name")
+            .or_else(|| frontmatter::get_str(&e.frontmatter, "title"))
+            .unwrap_or("");
+        let status = frontmatter::get_str_or(&e.frontmatter, "status", "");
+        html.push_str(&format!(
+            "<tr><td>{}</td><td>{}</td><td>{}</td></tr>\n",
+            entity_link(id),
+            escape_html(name),
+            status_badge(status),
+        ));
+    }
+    html.push_str("</tbody></table></div></div>\n");
+    html
+}
+
 /// Render a tasks list page.
+#[allow(clippy::too_many_arguments)]
 pub fn tasks_list_page(
     entities: &[EntityRecord],
     status_filter: Option<&str>,
+    priority_filter: Option<u32>,
+    owner_filter: Option<&str>,
+    project_filter: Option<&str>,
+    sprint_filter: Option<&str>,
     valid_statuses: &[String],
+    filter_options: &TaskFilterOptions,
+    brand: &ResolvedBrand,
+    custom_css: &str,
 ) -> String {
     let mut body = String::new();
     body.push_str("<h2>Tasks</h2>\n");
     body.push_str(r#"<div class="view-toggle"><a href="/tasks" class="active">List</a><a href="/tasks/board">Board</a></div>"#);
     body.push('\n');
 
-    // Filter form
+    // Filter form with all dimensions
     body.push_str(
         r#"<form class="filter-form" method="get" action="/tasks">
   <div>
@@ -609,10 +1073,104 @@ pub fn tasks_list_page(
             escape_html(s)
         ));
     }
+    body.push_str("    </select>\n  </div>\n");
+
+    // Priority filter
     body.push_str(
-        r#"    </select>
-  </div>
-  <div>
+        r#"  <div>
+    <label for="priority">Priority</label>
+    <select name="priority" id="priority">
+      <option value="">All</option>
+"#,
+    );
+    for (val, label) in [(1, "Critical"), (2, "High"), (3, "Medium"), (4, "Low")] {
+        let selected = if priority_filter == Some(val) {
+            " selected"
+        } else {
+            ""
+        };
+        body.push_str(&format!(
+            "      <option value=\"{}\"{}>{}</option>\n",
+            val, selected, label
+        ));
+    }
+    body.push_str("    </select>\n  </div>\n");
+
+    // Owner filter
+    body.push_str(
+        r#"  <div>
+    <label for="owner">Owner</label>
+    <select name="owner" id="owner">
+      <option value="">All</option>
+"#,
+    );
+    for o in &filter_options.owners {
+        let selected = if owner_filter == Some(o.as_str()) {
+            " selected"
+        } else {
+            ""
+        };
+        body.push_str(&format!(
+            "      <option value=\"{}\"{}>{}</option>\n",
+            escape_html(o),
+            selected,
+            escape_html(o)
+        ));
+    }
+    body.push_str("    </select>\n  </div>\n");
+
+    // Project filter
+    if !filter_options.projects.is_empty() {
+        body.push_str(
+            r#"  <div>
+    <label for="project">Project</label>
+    <select name="project" id="project">
+      <option value="">All</option>
+"#,
+        );
+        for p in &filter_options.projects {
+            let selected = if project_filter == Some(p.as_str()) {
+                " selected"
+            } else {
+                ""
+            };
+            body.push_str(&format!(
+                "      <option value=\"{}\"{}>{}</option>\n",
+                escape_html(p),
+                selected,
+                escape_html(p)
+            ));
+        }
+        body.push_str("    </select>\n  </div>\n");
+    }
+
+    // Sprint filter
+    if !filter_options.sprints.is_empty() {
+        body.push_str(
+            r#"  <div>
+    <label for="sprint">Sprint</label>
+    <select name="sprint" id="sprint">
+      <option value="">All</option>
+"#,
+        );
+        for s in &filter_options.sprints {
+            let selected = if sprint_filter == Some(s.as_str()) {
+                " selected"
+            } else {
+                ""
+            };
+            body.push_str(&format!(
+                "      <option value=\"{}\"{}>{}</option>\n",
+                escape_html(s),
+                selected,
+                escape_html(s)
+            ));
+        }
+        body.push_str("    </select>\n  </div>\n");
+    }
+
+    body.push_str(
+        r#"  <div>
     <button type="submit">Filter</button>
   </div>
   <a href="/tasks" class="reset-link">Reset</a>
@@ -623,10 +1181,18 @@ pub fn tasks_list_page(
     if entities.is_empty() {
         body.push_str(r#"<div class="empty-state"><span class="empty-state-icon">~</span>No tasks found.</div>"#);
         body.push('\n');
-        return layout("Tasks", "/tasks", &body);
+        return layout_branded(
+            "Tasks",
+            "/tasks",
+            &body,
+            &RepoMode::Standalone,
+            brand,
+            custom_css,
+        );
     }
 
-    body.push_str("<table>\n<thead><tr>");
+    body.push_str(r#"<div class="table-wrap"><table>"#);
+    body.push_str("\n<thead><tr>");
     body.push_str("<th>ID</th><th>Title</th><th>Status</th><th>Pri</th><th>Owner</th><th>Project</th><th>Sprint</th><th>Tags</th>");
     body.push_str("</tr></thead>\n<tbody>\n");
 
@@ -668,17 +1234,24 @@ pub fn tasks_list_page(
         body.push_str("</tr>\n");
     }
 
-    body.push_str("</tbody></table>\n");
+    body.push_str("</tbody></table></div>\n");
     body.push_str(&format!(
         r#"<p class="table-count"><strong>{}</strong> tasks total</p>"#,
         entities.len()
     ));
 
-    layout("Tasks", "/tasks", &body)
+    layout_branded(
+        "Tasks",
+        "/tasks",
+        &body,
+        &RepoMode::Standalone,
+        brand,
+        custom_css,
+    )
 }
 
 /// Render a kanban board page for tasks.
-pub fn board_page(tasks: &[EntityRecord]) -> String {
+pub fn board_page(tasks: &[EntityRecord], brand: &ResolvedBrand, custom_css: &str) -> String {
     let mut body = String::new();
     body.push_str("<h2>Task Board</h2>\n");
     body.push_str(r#"<div class="view-toggle"><a href="/tasks">List</a><a href="/tasks/board" class="active">Board</a></div>"#);
@@ -767,7 +1340,14 @@ pub fn board_page(tasks: &[EntityRecord]) -> String {
 
     body.push_str("</div>\n");
 
-    layout("Task Board", "/tasks", &body)
+    layout_branded(
+        "Task Board",
+        "/tasks",
+        &body,
+        &RepoMode::Standalone,
+        brand,
+        custom_css,
+    )
 }
 
 /// Render a 500 error page.
