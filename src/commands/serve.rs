@@ -488,8 +488,12 @@ fn error_response(message: &str) -> (StatusCode, Html<String>) {
     )
 }
 
-async fn handle_404(uri: axum::http::Uri) -> Html<String> {
-    Html(html::not_found_page(uri.path()))
+async fn handle_404(State(state): State<Arc<AppState>>, uri: axum::http::Uri) -> Html<String> {
+    Html(html::not_found_page(
+        uri.path(),
+        &state.cfg.brand,
+        &state.custom_css,
+    ))
 }
 
 async fn handle_brand_logo(

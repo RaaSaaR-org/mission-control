@@ -894,8 +894,8 @@ pub fn detail_page(
             if key_str.starts_with('_') {
                 continue;
             }
-            // Skip id/name/title/status since they're in the hero
-            if key_str == "id" || key_str == "status" {
+            // Skip fields already shown in hero or as related sections
+            if matches!(key_str, "id" | "status" | "name" | "title" | "contacts") {
                 continue;
             }
             body.push_str(&format!("<dt>{}</dt>\n", escape_html(key_str)));
@@ -948,10 +948,16 @@ pub fn detail_page(
     }
     body.push_str("</dl>\n");
 
-    // Source path
+    // Source path (relative to repo root)
+    let source_display = entity
+        .source_path
+        .strip_prefix(&cfg.root)
+        .unwrap_or(&entity.source_path)
+        .display()
+        .to_string();
     body.push_str(&format!(
         r#"<p class="detail-source">Source: <code>{}</code></p>"#,
-        escape_html(&entity.source_path.display().to_string())
+        escape_html(&source_display)
     ));
 
     // Rendered markdown body
@@ -1360,12 +1366,19 @@ pub fn error_page(message: &str) -> String {
 }
 
 /// Render a 404 page.
-pub fn not_found_page(path: &str) -> String {
+pub fn not_found_page(path: &str, brand: &ResolvedBrand, custom_css: &str) -> String {
     let body = format!(
         r#"<div class="empty-state"><span class="empty-state-icon">?</span><h2>Not Found</h2><p>The page <code>{}</code> was not found.</p><p><a href="/">Back to Dashboard</a></p></div>"#,
         escape_html(path)
     );
-    layout("Not Found", "", &body)
+    layout_branded(
+        "Not Found",
+        "",
+        &body,
+        &RepoMode::Standalone,
+        brand,
+        custom_css,
+    )
 }
 
 /// Format a YAML value as HTML.
