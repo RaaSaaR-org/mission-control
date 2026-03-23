@@ -241,7 +241,7 @@ a.entity-link:hover {
 /* ── Dashboard Summary Cards ───────────────────────────────────────── */
 .summary-grid {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    grid-template-columns: repeat(3, 1fr);
     gap: 0.75rem;
     margin-bottom: 1.5rem;
 }
@@ -276,8 +276,46 @@ a.entity-link:hover {
     line-height: 1.2;
     color: var(--mc-text-primary);
 }
-.summary-card-breakdown {
+.summary-card-empty {
+    opacity: 0.5;
+}
+.summary-card-empty:hover {
+    opacity: 0.75;
+}
+
+/* Mini stacked bar inside summary cards */
+.card-bar {
+    display: flex;
+    height: 4px;
+    border-radius: 2px;
+    overflow: hidden;
     margin-top: 0.5rem;
+    background: var(--mc-surface-muted);
+}
+.card-bar-seg {
+    height: 100%;
+    transition: width var(--mc-transition);
+}
+.card-bar-seg.seg-active,
+.card-bar-seg.seg-completed,
+.card-bar-seg.seg-final,
+.card-bar-seg.seg-done { background-color: var(--mc-green); }
+.card-bar-seg.seg-inactive,
+.card-bar-seg.seg-cancelled,
+.card-bar-seg.seg-churned,
+.card-bar-seg.seg-outdated { background-color: var(--mc-red); }
+.card-bar-seg.seg-on-hold,
+.card-bar-seg.seg-draft,
+.card-bar-seg.seg-in-progress,
+.card-bar-seg.seg-review,
+.card-bar-seg.seg-planning { background-color: var(--mc-amber); }
+.card-bar-seg.seg-prospect,
+.card-bar-seg.seg-scheduled,
+.card-bar-seg.seg-todo { background-color: var(--mc-blue); }
+.card-bar-seg.seg-backlog { background-color: var(--mc-gray); }
+
+.summary-card-breakdown {
+    margin-top: 0.35rem;
     display: flex;
     gap: 0.3rem;
     flex-wrap: wrap;
@@ -382,15 +420,52 @@ a.entity-link:hover {
 .activity-timeline li:last-child {
     border-bottom: none;
 }
+.dashboard-activity {
+    margin-top: 1.5rem;
+    padding-top: 1rem;
+    border-top: 1px solid var(--mc-border-light);
+}
+
 .activity-type-badge {
-    font-size: 0.7rem;
+    font-size: 0.68rem;
     font-weight: 600;
-    padding: 0.1em 0.4em;
+    padding: 0.15em 0.45em;
     border-radius: var(--mc-radius-sm);
     text-transform: uppercase;
-    background: var(--mc-surface-muted);
-    color: var(--mc-text-secondary);
     white-space: nowrap;
+    min-width: 4.5em;
+    text-align: center;
+    display: inline-block;
+}
+.badge-type-customer { background: var(--mc-blue-bg); color: var(--mc-blue-text); }
+.badge-type-project { background: var(--mc-green-bg); color: var(--mc-green-text); }
+.badge-type-meeting { background: var(--mc-amber-bg); color: var(--mc-amber-text); }
+.badge-type-research { background: rgba(147,51,234,0.1); color: rgb(126,34,206); }
+.badge-type-task { background: var(--mc-blue-bg); color: var(--mc-blue-text); }
+.badge-type-sprint { background: var(--mc-green-bg); color: var(--mc-green-text); }
+.badge-type-proposal { background: var(--mc-amber-bg); color: var(--mc-amber-text); }
+.badge-type-contact { background: var(--mc-gray-bg); color: var(--mc-gray-text); }
+.badge-type-file { background: var(--mc-gray-bg); color: var(--mc-gray-text); }
+
+@media (prefers-color-scheme: dark) {
+    .badge-type-research { background: rgba(147,51,234,0.15); color: rgb(192,132,252); }
+}
+
+.activity-name {
+    color: var(--mc-text-primary);
+    font-weight: 500;
+}
+.activity-context {
+    font-size: 0.82em;
+    color: var(--mc-text-muted);
+}
+.activity-context::before {
+    content: "\2014\00a0";
+}
+.activity-path {
+    font-family: var(--mono-font);
+    font-size: 0.82em;
+    color: var(--mc-text-muted);
 }
 
 /* ── Tables ────────────────────────────────────────────────────────── */
@@ -775,6 +850,9 @@ th.sorted a.sort-link {
     }
     .summary-grid {
         grid-template-columns: repeat(2, 1fr);
+    }
+    .summary-grid .summary-card:last-child:nth-child(odd) {
+        grid-column: span 2;
     }
     body > header,
     body > main,

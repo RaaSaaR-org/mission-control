@@ -399,79 +399,64 @@ pub fn dashboard_page(
     mode: &RepoMode,
     brand: &ResolvedBrand,
     custom_css: &str,
+    repo_root: &std::path::Path,
 ) -> String {
     let mut body = String::new();
     body.push_str("<h2>Dashboard</h2>\n");
 
-    // Summary card grid
+    // Summary card grid — with inline mini stacked bar
     body.push_str(r#"<div class="summary-grid">"#);
     body.push('\n');
     for sc in counts {
+        let muted = if sc.total == 0 {
+            " summary-card-empty"
+        } else {
+            ""
+        };
         body.push_str(&format!(
-            r#"<a href="/{}" class="summary-card">
+            r#"<a href="/{}" class="summary-card{}">
   <div class="summary-card-label">{}</div>
-  <div class="summary-card-count">{}</div>
-  <div class="summary-card-breakdown">"#,
+  <div class="summary-card-count">{}</div>"#,
             sc.label,
+            muted,
             capitalize(&sc.label),
             sc.total
         ));
-        for (status, count) in &sc.by_status {
-            body.push_str(&format!(
-                r#"<span class="badge badge-{}">{} {}</span> "#,
-                escape_html(status),
-                count,
-                escape_html(status)
-            ));
+        // Mini stacked bar inside card
+        if sc.total > 0 && !sc.by_status.is_empty() {
+            body.push_str(r#"<div class="card-bar">"#);
+            for (status, count) in &sc.by_status {
+                if *count == 0 {
+                    continue;
+                }
+                let pct = (*count as f64 / sc.total as f64 * 100.0).max(2.0);
+                body.push_str(&format!(
+                    r#"<div class="card-bar-seg {}" style="width:{:.1}%" title="{}: {}"></div>"#,
+                    segment_class(status),
+                    pct,
+                    escape_html(status),
+                    count
+                ));
+            }
+            body.push_str("</div>\n");
+            // Compact breakdown
+            body.push_str(r#"<div class="summary-card-breakdown">"#);
+            for (status, count) in &sc.by_status {
+                body.push_str(&format!(
+                    r#"<span class="badge badge-{}">{} {}</span> "#,
+                    escape_html(status),
+                    count,
+                    escape_html(status)
+                ));
+            }
+            body.push_str("</div>\n");
         }
-        body.push_str("</div>\n</a>\n");
+        body.push_str("</a>\n");
     }
     body.push_str("</div>\n");
 
-    // Stacked bar charts per entity type
-    for sc in counts {
-        if sc.by_status.is_empty() {
-            continue;
-        }
-        body.push_str(&format!(
-            r#"<div class="status-section"><h3>{}</h3>"#,
-            capitalize(&sc.label)
-        ));
-
-        // Build stacked bar
-        body.push_str(r#"<div class="stacked-bar-container">"#);
-        for (status, count) in &sc.by_status {
-            if *count == 0 {
-                continue;
-            }
-            let pct = if sc.total > 0 {
-                (*count as f64 / sc.total as f64 * 100.0).max(4.0)
-            } else {
-                0.0
-            };
-            body.push_str(&format!(
-                r#"<div class="stacked-bar-segment {}" style="flex:{:.1}">{}</div>"#,
-                segment_class(status),
-                pct,
-                count
-            ));
-        }
-        body.push_str("</div>\n");
-
-        // Legend
-        body.push_str(r#"<div class="bar-legend">"#);
-        for (status, count) in &sc.by_status {
-            body.push_str(&format!(
-                r#"<span class="bar-legend-item"><span class="bar-legend-dot stacked-bar-segment {}"></span>{} ({})</span>"#,
-                segment_class(status),
-                escape_html(status),
-                count
-            ));
-        }
-        body.push_str("</div>\n</div>\n");
-    }
-
     // Recent activity as timeline
+    body.push_str(r#"<div class="dashboard-activity">"#);
     body.push_str("<h3>Recent Activity</h3>\n");
     if recent.is_empty() {
         body.push_str(r#"<div class="empty-state"><span class="empty-state-icon">~</span>No recent files found.</div>"#);
@@ -480,47 +465,141 @@ pub fn dashboard_page(
         body.push_str(r#"<ul class="activity-timeline">"#);
         body.push('\n');
         for f in recent {
-            let type_badge = if !f.id.is_empty() {
-                let entity_type = if f.id.starts_with("CUST") {
-                    "customer"
-                } else if f.id.starts_with("PROJ") {
-                    "project"
-                } else if f.id.starts_with("MTG") {
-                    "meeting"
-                } else if f.id.starts_with("RES") {
-                    "research"
-                } else if f.id.starts_with("TSK") {
-                    "task"
-                } else if f.id.starts_with("SPR") {
-                    "sprint"
-                } else if f.id.starts_with("CONT") {
-                    "contact"
-                } else {
-                    "entity"
-                };
+            // Detect entity type from ID prefix or fall back to path heuristics
+            let entity_type = detect_entity_type(&f.id, &f.path);
+            let type_badge = format!(
+                r#"<span class="activity-type-badge badge-type-{}">{}</span>"#,
+                entity_type, entity_type
+            );
+
+            // Primary display: entity link or name
+            let primary = if !f.id.is_empty() {
+                entity_link(&f.id)
+            } else if !f.name.is_empty() {
                 format!(
-                    r#"<span class="activity-type-badge">{}</span>"#,
-                    entity_type
+                    r#"<span class="activity-name">{}</span>"#,
+                    escape_html(&f.name)
                 )
             } else {
-                String::new()
+                let rel = f
+                    .path
+                    .strip_prefix(repo_root)
+                    .unwrap_or(&f.path)
+                    .display()
+                    .to_string();
+                format!(
+                    r#"<span class="activity-path">{}</span>"#,
+                    escape_html(&rel)
+                )
             };
 
+            // Secondary: name + optional path context (e.g. customer name)
+            let mut secondary = String::new();
+            if !f.id.is_empty() && !f.name.is_empty() {
+                secondary.push_str(&format!(
+                    r#" <span class="activity-name">{}</span>"#,
+                    escape_html(&f.name)
+                ));
+            }
+            let ctx = extract_path_context(&f.path, repo_root);
+            if !ctx.is_empty() {
+                secondary.push_str(&format!(
+                    r#" <span class="activity-context">{}</span>"#,
+                    escape_html(&ctx)
+                ));
+            }
+
             body.push_str(&format!(
-                "<li>{} {} {}</li>\n",
-                type_badge,
-                if f.id.is_empty() {
-                    escape_html(&f.path.display().to_string())
-                } else {
-                    entity_link(&f.id)
-                },
-                escape_html(&f.name)
+                "<li>{} {}{}</li>\n",
+                type_badge, primary, secondary
             ));
         }
         body.push_str("</ul>\n");
     }
+    body.push_str("</div>\n");
 
     layout_branded("Dashboard", "/", &body, mode, brand, custom_css)
+}
+
+/// Detect entity type from ID prefix or path.
+fn detect_entity_type(id: &str, path: &std::path::Path) -> &'static str {
+    if !id.is_empty() {
+        // Match by prefix
+        if id.starts_with("CUST") {
+            return "customer";
+        } else if id.starts_with("PROJ") {
+            return "project";
+        } else if id.starts_with("MTG") {
+            return "meeting";
+        } else if id.starts_with("RES") {
+            return "research";
+        } else if id.starts_with("TASK") || id.starts_with("TSK") {
+            return "task";
+        } else if id.starts_with("SPR") {
+            return "sprint";
+        } else if id.starts_with("PROP") {
+            return "proposal";
+        } else if id.starts_with("CONT") {
+            return "contact";
+        }
+    }
+    // Fall back to path-based detection
+    let path_str = path.to_string_lossy();
+    if path_str.contains("/team/") || path_str.contains("/contacts/") {
+        "contact"
+    } else if path_str.contains("/customers/") {
+        "customer"
+    } else if path_str.contains("/projects/") {
+        "project"
+    } else if path_str.contains("/meetings/") {
+        "meeting"
+    } else if path_str.contains("/research/") {
+        "research"
+    } else if path_str.contains("/tasks/")
+        || path_str.contains("/todo/")
+        || path_str.contains("/done/")
+    {
+        "task"
+    } else if path_str.contains("/sprints/") {
+        "sprint"
+    } else if path_str.contains("/proposals/") {
+        "proposal"
+    } else {
+        "file"
+    }
+}
+
+/// Extract a short context string from a path (e.g. parent customer name).
+fn extract_path_context(path: &std::path::Path, root: &std::path::Path) -> String {
+    let rel = path.strip_prefix(root).unwrap_or(path);
+    let rel_str = rel.to_string_lossy();
+    let parts: Vec<&str> = rel_str.split('/').collect();
+
+    // For files inside customer directories, extract the customer slug
+    // e.g. customers/CUST-001-thyssenkrupp/contacts/foo.md → "thyssenkrupp"
+    for (i, part) in parts.iter().enumerate() {
+        if *part == "customers" || *part == "projects" {
+            if let Some(parent) = parts.get(i + 1) {
+                // Extract readable name: strip ID prefix (e.g. "CUST-001-" or "PROJ-002-")
+                let name = strip_id_prefix(parent);
+                if !name.is_empty() {
+                    return name.replace('-', " ");
+                }
+            }
+        }
+    }
+    String::new()
+}
+
+/// Strip entity ID prefix from a directory name (e.g. "CUST-001-thyssenkrupp" → "thyssenkrupp").
+fn strip_id_prefix(dirname: &str) -> String {
+    // Pattern: PREFIX-NNN-slug
+    let re = Regex::new(r"^[A-Z]+-\d+-(.+)$").expect("static regex");
+    if let Some(caps) = re.captures(dirname) {
+        caps[1].to_string()
+    } else {
+        dirname.to_string()
+    }
 }
 
 /// Sort entities by a frontmatter field.

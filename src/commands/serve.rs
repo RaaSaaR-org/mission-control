@@ -89,7 +89,7 @@ async fn handle_dashboard(State(state): State<Arc<AppState>>) -> Html<String> {
         .filter_map(|k| data::count_by_status(*k, cfg).ok())
         .collect();
 
-    let recent = match data::recent_activity(cfg, 10) {
+    let recent = match data::recent_activity(cfg, 15) {
         Ok(r) => r,
         Err(e) => {
             eprintln!("serve: error loading recent activity: {}", e);
@@ -103,6 +103,7 @@ async fn handle_dashboard(State(state): State<Arc<AppState>>) -> Html<String> {
         &cfg.mode,
         &cfg.brand,
         &state.custom_css,
+        &cfg.root,
     ))
 }
 
