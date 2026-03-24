@@ -281,6 +281,8 @@ The defaults work out of the box. Edit the config when you want to customize sta
 | `mc print meeting <ID>` | Export meeting to PDF |
 | `mc print research <ID>` | Export research to PDF |
 | `mc print file <path>` | Generate branded PDF from any markdown file |
+| `mc index` | Rebuild JSON index files (`data/*.json`) |
+| `mc export <type> <ID>` | Export entity to a zip archive |
 | `mc serve` | Start web dashboard |
 | `mc mcp` | Start MCP server |
 
