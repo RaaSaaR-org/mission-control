@@ -1,3 +1,6 @@
 /target/
 .obsidian
 .DS_Store
+*.png
+.claude/
+.playwright-mcp/
