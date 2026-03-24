@@ -268,7 +268,7 @@ pub fn layout_branded(
     {body_html}
   </main>
   <footer>
-    <p>{brand_name} &mdash; served by <code>mc serve</code></p>
+    <p>{brand_name} &mdash; <code>mc serve</code></p>
   </footer>
 </body>
 </html>"#,
@@ -408,13 +408,13 @@ fn initials(name: &str) -> String {
 pub fn dashboard_page(
     counts: &[StatusCounts],
     recent: &[RecentFile],
-    mode: &RepoMode,
-    brand: &ResolvedBrand,
+    cfg: &ResolvedConfig,
     custom_css: &str,
-    repo_root: &std::path::Path,
 ) -> String {
+    let mode = &cfg.mode;
+    let brand = &cfg.brand;
+    let repo_root = &cfg.root;
     let mut body = String::new();
-    body.push_str("<h2>Dashboard</h2>\n");
 
     // Summary card grid — with inline mini stacked bar
     body.push_str(r#"<div class="summary-grid">"#);
@@ -455,7 +455,7 @@ pub fn dashboard_page(
             body.push_str(r#"<div class="summary-card-breakdown">"#);
             for (status, count) in &sc.by_status {
                 body.push_str(&format!(
-                    r#"<span class="badge badge-{}">{} {}</span> "#,
+                    r#"<span class="badge badge-{}">{} {}</span>"#,
                     escape_html(status),
                     count,
                     escape_html(status)
@@ -469,16 +469,17 @@ pub fn dashboard_page(
 
     // Recent activity as timeline
     body.push_str(r#"<div class="dashboard-activity">"#);
-    body.push_str("<h3>Recent Activity</h3>\n");
+    body.push_str(r#"<h3>Recent Activity</h3>"#);
+    body.push('\n');
     if recent.is_empty() {
-        body.push_str(r#"<div class="empty-state"><span class="empty-state-icon">~</span>No recent files found.</div>"#);
+        body.push_str(r#"<p style="color:var(--mc-text-muted);font-size:0.875rem;">No recent files found.</p>"#);
         body.push('\n');
     } else {
         body.push_str(r#"<ul class="activity-timeline">"#);
         body.push('\n');
         for f in recent {
             // Detect entity type from ID prefix or fall back to path heuristics
-            let entity_type = detect_entity_type(&f.id, &f.path);
+            let entity_type = detect_entity_type(&f.id, &f.path, cfg);
             let type_badge = format!(
                 r#"<span class="activity-type-badge badge-type-{}">{}</span>"#,
                 entity_type, entity_type
@@ -533,31 +534,33 @@ pub fn dashboard_page(
     layout_branded("Dashboard", "/", &body, mode, brand, custom_css)
 }
 
-/// Detect entity type from ID prefix or path.
-fn detect_entity_type(id: &str, path: &std::path::Path) -> &'static str {
+/// Detect entity type label from an entity ID and file path, using configured prefixes.
+fn detect_entity_type(id: &str, path: &std::path::Path, cfg: &ResolvedConfig) -> &'static str {
     if !id.is_empty() {
-        // Match by prefix
-        if id.starts_with("CUST") {
-            return "customer";
-        } else if id.starts_with("PROJ") {
-            return "project";
-        } else if id.starts_with("MTG") {
-            return "meeting";
-        } else if id.starts_with("RES") {
-            return "research";
-        } else if id.starts_with("TASK") || id.starts_with("TSK") {
-            return "task";
-        } else if id.starts_with("SPR") {
-            return "sprint";
-        } else if id.starts_with("PROP") {
-            return "proposal";
-        } else if id.starts_with("CONT") {
-            return "contact";
+        // Match against configured prefixes (longest prefix wins to avoid e.g. "TASK" matching "TASK-001" before "TSK-001")
+        let candidates: &[(&str, &'static str)] = &[
+            (&cfg.id_prefixes.customer, EntityKind::Customer.label()),
+            (&cfg.id_prefixes.project, EntityKind::Project.label()),
+            (&cfg.id_prefixes.meeting, EntityKind::Meeting.label()),
+            (&cfg.id_prefixes.research, EntityKind::Research.label()),
+            (&cfg.id_prefixes.task, EntityKind::Task.label()),
+            (&cfg.id_prefixes.sprint, EntityKind::Sprint.label()),
+            (&cfg.id_prefixes.proposal, EntityKind::Proposal.label()),
+            (&cfg.id_prefixes.contact, EntityKind::Contact.label()),
+        ];
+        // Sort candidates by prefix length descending so longer prefixes match first
+        let mut sorted = candidates.to_vec();
+        sorted.sort_by(|a, b| b.0.len().cmp(&a.0.len()));
+        for (prefix, label) in &sorted {
+            let needle = format!("{}-", prefix);
+            if id.starts_with(needle.as_str()) {
+                return label;
+            }
         }
     }
-    // Fall back to path-based detection
+    // Fall back to path-based detection using standard directory segment names
     let path_str = path.to_string_lossy();
-    if path_str.contains("/team/") || path_str.contains("/contacts/") {
+    if path_str.contains("/contacts/") || path_str.contains("/team/") {
         "contact"
     } else if path_str.contains("/customers/") {
         "customer"
@@ -937,6 +940,387 @@ fn sortable_th(
     )
 }
 
+/// Map a numeric priority value (1-4) to a label string.
+fn priority_label(priority: u64) -> &'static str {
+    match priority {
+        1 => "Critical",
+        2 => "High",
+        3 => "Medium",
+        4 => "Low",
+        _ => "Unknown",
+    }
+}
+
+/// CSS class suffix for priority color (maps to existing `pri-*` classes in kanban).
+fn priority_class(priority: u64) -> &'static str {
+    match priority {
+        1 => "critical",
+        2 => "high",
+        3 => "medium",
+        4 => "low",
+        _ => "low",
+    }
+}
+
+/// Render the body HTML for a task detail page (two-column layout).
+fn task_detail_body(
+    entity: &EntityRecord,
+    prefixes: &[&str],
+    related: &[RelatedSection],
+    cfg: &ResolvedConfig,
+) -> String {
+    let mut body = String::new();
+
+    let display_name = frontmatter::get_str(&entity.frontmatter, "title")
+        .or_else(|| frontmatter::get_str(&entity.frontmatter, "name"))
+        .unwrap_or(&entity.id);
+    let status = frontmatter::get_str_or(&entity.frontmatter, "status", "");
+
+    // Read task-specific metadata
+    let priority_raw = entity
+        .frontmatter
+        .get("priority")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let owner = frontmatter::get_str_or(&entity.frontmatter, "owner", "");
+    let sprint_raw = frontmatter::get_str_or(&entity.frontmatter, "sprint", "");
+    let sprint = frontmatter::strip_wikilink(sprint_raw);
+    let due_date = frontmatter::get_str_or(&entity.frontmatter, "due_date", "");
+    let created = frontmatter::get_str_or(&entity.frontmatter, "created", "");
+    let updated = frontmatter::get_str_or(&entity.frontmatter, "updated", "");
+
+    let tags: Vec<String> = entity
+        .frontmatter
+        .get("tags")
+        .and_then(|v| v.as_sequence())
+        .map(|seq| {
+            seq.iter()
+                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let projects: Vec<String> = entity
+        .frontmatter
+        .get("projects")
+        .and_then(|v| v.as_sequence())
+        .map(|seq| {
+            seq.iter()
+                .filter_map(|v| {
+                    v.as_str()
+                        .map(|s| frontmatter::strip_wikilink(s).to_string())
+                })
+                .filter(|s| !s.is_empty())
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let customers: Vec<String> = entity
+        .frontmatter
+        .get("customers")
+        .and_then(|v| v.as_sequence())
+        .map(|seq| {
+            seq.iter()
+                .filter_map(|v| {
+                    v.as_str()
+                        .map(|s| frontmatter::strip_wikilink(s).to_string())
+                })
+                .filter(|s| !s.is_empty())
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let depends_on: Vec<String> = entity
+        .frontmatter
+        .get("depends_on")
+        .and_then(|v| v.as_sequence())
+        .map(|seq| {
+            seq.iter()
+                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .filter(|s| !s.is_empty())
+                .collect()
+        })
+        .unwrap_or_default();
+
+    // ── Breadcrumb ────────────────────────────────────────────────────
+    let kind_plural = entity.kind.label_plural();
+    body.push_str(&format!(
+        r#"<div class="breadcrumb"><a href="/">Dashboard</a><span class="sep">/</span><a href="/{}">{}</a><span class="sep">/</span>{}</div>"#,
+        kind_plural,
+        capitalize(kind_plural),
+        escape_html(&entity.id),
+    ));
+
+    // ── Priority accent header bar ────────────────────────────────────
+    let pri_cls = if priority_raw > 0 {
+        priority_class(priority_raw)
+    } else {
+        "low"
+    };
+    body.push_str(&format!(
+        r#"<div class="task-detail-card pri-{}">"#,
+        pri_cls
+    ));
+
+    // ── Hero ──────────────────────────────────────────────────────────
+    body.push_str(r#"<div class="task-detail-hero">"#);
+    body.push_str(&format!(
+        r#"<div class="task-detail-title-row">
+  <h2 class="task-detail-title">{}</h2>
+  <span class="entity-id task-detail-id">{}</span>
+</div>
+<div class="task-detail-badges">"#,
+        escape_html(display_name),
+        escape_html(&entity.id),
+    ));
+
+    // Status badge
+    if !status.is_empty() {
+        body.push_str(&status_badge(status));
+    }
+
+    // Priority badge
+    if priority_raw > 0 {
+        body.push_str(&format!(
+            r#" <span class="badge task-pri-badge task-pri-{}">{}</span>"#,
+            pri_cls,
+            priority_label(priority_raw),
+        ));
+    }
+
+    // Tags inline
+    if !tags.is_empty() {
+        body.push(' ');
+        body.push_str(&tag_badges(&tags));
+    }
+
+    body.push_str("</div>\n"); // .task-detail-badges
+    body.push_str("</div>\n"); // .task-detail-hero
+
+    // ── Two-column layout: main body + sidebar ────────────────────────
+    body.push_str(r#"<div class="task-detail-layout">"#);
+
+    // ── Main column: description ──────────────────────────────────────
+    body.push_str(r#"<div class="task-detail-main">"#);
+    if !entity.body.trim().is_empty() {
+        // Strip leading H1 that duplicates the page title
+        let md = strip_leading_h1(entity.body.trim());
+        body.push_str(r#"<div class="detail-body task-detail-description">"#);
+        body.push_str(&render_markdown(md, prefixes));
+        body.push_str("</div>\n");
+    } else {
+        body.push_str(r#"<p class="task-detail-no-desc">No description provided.</p>"#);
+    }
+    body.push_str("</div>\n"); // .task-detail-main
+
+    // ── Sidebar: metadata ─────────────────────────────────────────────
+    body.push_str(r#"<aside class="task-detail-sidebar">"#);
+
+    // Owner
+    if !owner.is_empty() {
+        let init = initials(owner);
+        body.push_str(&format!(
+            r#"<div class="task-meta-block">
+  <div class="task-meta-label">Owner</div>
+  <div class="task-meta-value task-owner-row">
+    <span class="owner-initials">{}</span>
+    <span>{}</span>
+  </div>
+</div>"#,
+            escape_html(&init),
+            escape_html(owner),
+        ));
+    }
+
+    // Project links
+    if !projects.is_empty() {
+        let links: Vec<String> = projects.iter().map(|id| entity_link(id)).collect();
+        body.push_str(&format!(
+            r#"<div class="task-meta-block">
+  <div class="task-meta-label">{}</div>
+  <div class="task-meta-value">{}</div>
+</div>"#,
+            if projects.len() == 1 {
+                "Project"
+            } else {
+                "Projects"
+            },
+            links.join(", "),
+        ));
+    }
+
+    // Customer links
+    if !customers.is_empty() {
+        let links: Vec<String> = customers.iter().map(|id| entity_link(id)).collect();
+        body.push_str(&format!(
+            r#"<div class="task-meta-block">
+  <div class="task-meta-label">{}</div>
+  <div class="task-meta-value">{}</div>
+</div>"#,
+            if customers.len() == 1 {
+                "Customer"
+            } else {
+                "Customers"
+            },
+            links.join(", "),
+        ));
+    }
+
+    // Sprint
+    if !sprint.is_empty() {
+        body.push_str(&format!(
+            r#"<div class="task-meta-block">
+  <div class="task-meta-label">Sprint</div>
+  <div class="task-meta-value">{}</div>
+</div>"#,
+            entity_link(sprint),
+        ));
+    }
+
+    // Depends on
+    if !depends_on.is_empty() {
+        let links: Vec<String> = depends_on.iter().map(|id| entity_link(id)).collect();
+        body.push_str(&format!(
+            r#"<div class="task-meta-block">
+  <div class="task-meta-label">Depends on</div>
+  <div class="task-meta-value">{}</div>
+</div>"#,
+            links.join(", "),
+        ));
+    }
+
+    // Dates block
+    let has_dates = !due_date.is_empty() || !created.is_empty() || !updated.is_empty();
+    if has_dates {
+        body.push_str(r#"<div class="task-meta-block task-meta-dates">"#);
+        if !due_date.is_empty() {
+            let urgency_class = due_date_urgency_class(due_date);
+            body.push_str(&format!(
+                r#"<div class="task-meta-date-row">
+  <span class="task-meta-label">Due</span>
+  <span class="task-date-value {}">{}</span>
+</div>"#,
+                urgency_class,
+                escape_html(due_date),
+            ));
+        }
+        if !created.is_empty() {
+            body.push_str(&format!(
+                r#"<div class="task-meta-date-row">
+  <span class="task-meta-label">Created</span>
+  <span class="task-date-value">{}</span>
+</div>"#,
+                escape_html(created),
+            ));
+        }
+        if !updated.is_empty() {
+            body.push_str(&format!(
+                r#"<div class="task-meta-date-row">
+  <span class="task-meta-label">Updated</span>
+  <span class="task-date-value">{}</span>
+</div>"#,
+                escape_html(updated),
+            ));
+        }
+        body.push_str("</div>\n"); // .task-meta-dates
+    }
+
+    // Source path — collapsed, subtle
+    let source_display = entity
+        .source_path
+        .strip_prefix(&cfg.root)
+        .unwrap_or(&entity.source_path)
+        .display()
+        .to_string();
+    body.push_str(&format!(
+        r#"<div class="task-meta-source"><code>{}</code></div>"#,
+        escape_html(&source_display)
+    ));
+
+    body.push_str("</aside>\n"); // .task-detail-sidebar
+    body.push_str("</div>\n"); // .task-detail-layout
+    body.push_str("</div>\n"); // .task-detail-card
+
+    // Related entities sections
+    if !related.is_empty() {
+        body.push_str(r#"<hr class="detail-separator">"#);
+        body.push('\n');
+        for section in related {
+            body.push_str(&render_related_section(section));
+        }
+    }
+
+    body
+}
+
+/// Strip a leading H1 heading from markdown that duplicates the page title.
+fn strip_leading_h1(md: &str) -> &str {
+    let mut rest = md;
+    // Skip an optional leading `# Title` line (H1)
+    if let Some(stripped) = rest.strip_prefix("# ") {
+        if let Some(newline_pos) = stripped.find('\n') {
+            rest = stripped[newline_pos..].trim_start_matches('\n');
+        } else {
+            // Entire string is the H1 with no body
+            rest = "";
+        }
+    }
+    rest
+}
+
+/// Return a CSS class for due date urgency ("", "date-overdue", "date-soon").
+fn due_date_urgency_class(due_date: &str) -> &'static str {
+    // Parse YYYY-MM-DD
+    let parts: Vec<&str> = due_date.split('-').collect();
+    if parts.len() != 3 {
+        return "";
+    }
+    let (Ok(y), Ok(m), Ok(d)) = (
+        parts[0].parse::<i32>(),
+        parts[1].parse::<u32>(),
+        parts[2].parse::<u32>(),
+    ) else {
+        return "";
+    };
+
+    // Get today's date from the system
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let today_days = secs / 86400; // days since epoch
+
+    // days since epoch for due date (simplified Gregorian)
+    let due_days = gregorian_to_days(y, m, d);
+    let today_days = today_days as i64;
+
+    let diff = due_days - today_days;
+    if diff < 0 {
+        "date-overdue"
+    } else if diff <= 7 {
+        "date-soon"
+    } else {
+        ""
+    }
+}
+
+/// Approximate days since Unix epoch for a Gregorian date (accurate enough for date comparison).
+fn gregorian_to_days(y: i32, m: u32, d: u32) -> i64 {
+    // Days from 1970-01-01 using a simple formula
+    let y = y as i64;
+    let m = m as i64;
+    let d = d as i64;
+
+    let adj_y = y - (14 - m) / 12;
+    let adj_m = m + 12 * ((14 - m) / 12) - 3;
+
+    let jdn =
+        d + (153 * adj_m + 2) / 5 + 365 * adj_y + adj_y / 4 - adj_y / 100 + adj_y / 400 + 1721119;
+    // JDN for 1970-01-01 = 2440588
+    jdn - 2440588
+}
+
 /// Render a detail page for a single entity.
 pub fn detail_page(
     entity: &EntityRecord,
@@ -945,6 +1329,22 @@ pub fn detail_page(
     cfg: &ResolvedConfig,
     custom_css: &str,
 ) -> String {
+    // Dispatch to the task-specific layout
+    if entity.kind == EntityKind::Task {
+        let body = task_detail_body(entity, prefixes, related, cfg);
+        let display_name = frontmatter::get_str(&entity.frontmatter, "title")
+            .or_else(|| frontmatter::get_str(&entity.frontmatter, "name"))
+            .unwrap_or(&entity.id);
+        return layout_branded(
+            &format!("{} - {}", display_name, entity.id),
+            "/tasks",
+            &body,
+            &cfg.mode,
+            &cfg.brand,
+            custom_css,
+        );
+    }
+
     let mut body = String::new();
 
     let display_name = frontmatter::get_str(&entity.frontmatter, "name")
@@ -956,43 +1356,71 @@ pub fn detail_page(
     // Breadcrumb
     let kind_plural = entity.kind.label_plural();
     body.push_str(&format!(
-        r#"<div class="breadcrumb"><a href="/">{}</a><span class="sep">/</span><a href="/{}">{}</a><span class="sep">/</span>{}</div>"#,
-        "Dashboard",
+        r#"<div class="breadcrumb"><a href="/">Dashboard</a><span class="sep">/</span><a href="/{}">{}</a><span class="sep">/</span>{}</div>"#,
         kind_plural,
         capitalize(kind_plural),
         escape_html(&entity.id),
     ));
 
+    // ── Card container ────────────────────────────────────────────────
+    body.push_str(r#"<div class="detail-card">"#);
+
     // Hero heading with inline status
     body.push_str(r#"<div class="detail-hero">"#);
     body.push_str(&format!(
-        "<h2>{}</h2> {} <span class=\"entity-id\">{}</span>",
+        "<h2>{}</h2>{}",
         escape_html(display_name),
         if !status.is_empty() {
-            status_badge(status)
+            format!(" {}", status_badge(status))
         } else {
             String::new()
         },
-        entity_link(&entity.id),
     ));
     body.push_str("</div>\n");
 
-    // Frontmatter as definition list
-    body.push_str("<dl class=\"frontmatter\">\n");
+    // ── Two-column layout: sidebar of metadata + main body ────────────
+    body.push_str(r#"<div class="detail-layout">"#);
+
+    // ── Main: markdown body ───────────────────────────────────────────
+    body.push_str(r#"<div class="detail-main">"#);
+    if !entity.body.trim().is_empty() {
+        let md = strip_leading_h1(entity.body.trim());
+        body.push_str(r#"<div class="detail-body">"#);
+        body.push_str(&render_markdown(md, prefixes));
+        body.push_str("</div>\n");
+    } else {
+        body.push_str(r#"<p style="color:var(--mc-text-muted);font-style:italic;">No description provided.</p>"#);
+    }
+    body.push_str("</div>\n"); // .detail-main
+
+    // ── Sidebar: frontmatter fields ───────────────────────────────────
+    body.push_str(r#"<aside class="detail-sidebar">"#);
+
+    // Emit entity-id block
+    body.push_str(&format!(
+        r#"<div class="detail-meta-block">
+  <div class="detail-meta-label">ID</div>
+  <div class="detail-meta-value">{}</div>
+</div>"#,
+        entity_link(&entity.id),
+    ));
+
+    // Emit remaining frontmatter fields as sidebar blocks
     if let Some(map) = entity.frontmatter.as_mapping() {
         for (key, value) in map {
             let key_str = key.as_str().unwrap_or("");
             if key_str.starts_with('_') {
                 continue;
             }
-            // Skip fields already shown in hero or as related sections
-            if matches!(key_str, "id" | "status" | "name" | "title" | "contacts") {
+            // Skip fields shown elsewhere
+            if matches!(
+                key_str,
+                "id" | "status" | "name" | "title" | "contacts" | "slug"
+            ) {
                 continue;
             }
-            body.push_str(&format!("<dt>{}</dt>\n", escape_html(key_str)));
-            body.push_str("<dd>");
-
-            match key_str {
+            // Skip empty values
+            let value_html = match key_str {
                 "tags" => {
                     let tags = value
                         .as_sequence()
@@ -1002,10 +1430,12 @@ pub fn detail_page(
                                 .collect::<Vec<_>>()
                         })
                         .unwrap_or_default();
-                    body.push_str(&tag_badges(&tags));
+                    if tags.is_empty() {
+                        continue;
+                    }
+                    tag_badges(&tags)
                 }
                 "customers" | "projects" | "customer" => {
-                    // Render as entity links (stripping wiki-link brackets)
                     let ids = value
                         .as_sequence()
                         .map(|seq| {
@@ -1014,32 +1444,47 @@ pub fn detail_page(
                                     v.as_str()
                                         .map(|s| frontmatter::strip_wikilink(s).to_string())
                                 })
+                                .filter(|s| !s.is_empty())
                                 .collect::<Vec<_>>()
                         })
                         .unwrap_or_default();
                     if ids.is_empty() {
                         if let Some(s) = value.as_str() {
                             let s = frontmatter::strip_wikilink(s);
-                            if !s.is_empty() {
-                                body.push_str(&entity_link(s));
+                            if s.is_empty() {
+                                continue;
                             }
+                            entity_link(s)
+                        } else {
+                            continue;
                         }
                     } else {
                         let links: Vec<String> = ids.iter().map(|id| entity_link(id)).collect();
-                        body.push_str(&links.join(", "));
+                        links.join(", ")
                     }
                 }
                 _ => {
-                    body.push_str(&format_value_html(value, prefixes));
+                    let v = format_value_html(value, prefixes);
+                    if v.contains("(empty)") || v.contains("(none)") || v.contains("(null)") {
+                        continue;
+                    }
+                    v
                 }
-            }
-
-            body.push_str("</dd>\n");
+            };
+            // Pretty-print key label
+            let label = key_str.replace('_', " ");
+            body.push_str(&format!(
+                r#"<div class="detail-meta-block">
+  <div class="detail-meta-label">{}</div>
+  <div class="detail-meta-value">{}</div>
+</div>"#,
+                escape_html(&label),
+                value_html,
+            ));
         }
     }
-    body.push_str("</dl>\n");
 
-    // Source path (relative to repo root)
+    // Source path — subtle, at bottom
     let source_display = entity
         .source_path
         .strip_prefix(&cfg.root)
@@ -1047,23 +1492,16 @@ pub fn detail_page(
         .display()
         .to_string();
     body.push_str(&format!(
-        r#"<p class="detail-source">Source: <code>{}</code></p>"#,
+        r#"<div class="detail-meta-source"><code>{}</code></div>"#,
         escape_html(&source_display)
     ));
 
-    // Rendered markdown body
-    if !entity.body.trim().is_empty() {
-        body.push_str(r#"<hr class="detail-separator">"#);
-        body.push('\n');
-        body.push_str(r#"<div class="detail-body">"#);
-        body.push_str(&render_markdown(&entity.body, prefixes));
-        body.push_str("</div>\n");
-    }
+    body.push_str("</aside>\n"); // .detail-sidebar
+    body.push_str("</div>\n"); // .detail-layout
+    body.push_str("</div>\n"); // .detail-card
 
     // Related entities sections
     if !related.is_empty() {
-        body.push_str(r#"<hr class="detail-separator">"#);
-        body.push('\n');
         for section in related {
             body.push_str(&render_related_section(section));
         }
@@ -1145,7 +1583,7 @@ pub fn tasks_list_page(
 ) -> String {
     let mut body = String::new();
     body.push_str("<h2>Tasks</h2>\n");
-    body.push_str(r#"<div class="view-toggle"><a href="/tasks" class="active">List</a><a href="/tasks/board">Board</a></div>"#);
+    body.push_str(r#"<div class="view-toggle"><a href="/tasks">Board</a><a href="/tasks/list" class="active">List</a></div>"#);
     body.push('\n');
 
     // Filter form with all dimensions
@@ -1350,8 +1788,7 @@ pub fn tasks_list_page(
 /// Render a kanban board page for tasks.
 pub fn board_page(tasks: &[EntityRecord], brand: &ResolvedBrand, custom_css: &str) -> String {
     let mut body = String::new();
-    body.push_str("<h2>Task Board</h2>\n");
-    body.push_str(r#"<div class="view-toggle"><a href="/tasks">List</a><a href="/tasks/board" class="active">Board</a></div>"#);
+    body.push_str(r#"<div class="board-header"><h2>Task Board</h2><div class="view-toggle"><a href="/tasks" class="active">Board</a><a href="/tasks/list">List</a></div></div>"#);
     body.push('\n');
 
     let columns = ["backlog", "todo", "in-progress", "review", "done"];
@@ -1388,6 +1825,13 @@ pub fn board_page(tasks: &[EntityRecord], brand: &ResolvedBrand, custom_css: &st
             tasks_in_col.len()
         ));
 
+        if tasks_in_col.is_empty() {
+            body.push_str(&format!(
+                r#"<div class="kanban-empty">No {} tasks</div>"#,
+                col.replace('-', " ")
+            ));
+        }
+
         for task in tasks_in_col {
             let id = frontmatter::get_str_or(&task.frontmatter, "id", "");
             let title = frontmatter::get_str_or(&task.frontmatter, "title", "");
@@ -1399,11 +1843,32 @@ pub fn board_page(tasks: &[EntityRecord], brand: &ResolvedBrand, custom_css: &st
                 3 => "pri-medium",
                 _ => "pri-low",
             };
-            let pri_dot_class = match priority {
-                1 => "pri-dot-critical",
-                2 => "pri-dot-high",
-                3 => "pri-dot-medium",
-                _ => "pri-dot-low",
+            // Non-empty only for critical/high/medium; low gets no dot
+            let has_pri_dot = matches!(priority, 1..=3);
+
+            // Project name (strip wikilink)
+            let projects = frontmatter::get_link_list(&task.frontmatter, "projects");
+            let project_html = if let Some(p) = projects.first() {
+                format!(
+                    r#"<span class="kanban-card-project">{}</span>"#,
+                    escape_html(p)
+                )
+            } else {
+                String::new()
+            };
+
+            // Tags (max 2)
+            let tags = frontmatter::get_string_list(&task.frontmatter, "tags");
+            let tags_html = if tags.is_empty() {
+                String::new()
+            } else {
+                let tag_spans: String = tags
+                    .iter()
+                    .take(2)
+                    .map(|t| format!(r#"<span class="kanban-tag">{}</span>"#, escape_html(t)))
+                    .collect::<Vec<_>>()
+                    .join("");
+                format!(r#"<div class="kanban-card-tags">{}</div>"#, tag_spans)
             };
 
             let owner_html = if owner.is_empty() {
@@ -1411,23 +1876,37 @@ pub fn board_page(tasks: &[EntityRecord], brand: &ResolvedBrand, custom_css: &st
             } else {
                 let ini = initials(owner);
                 format!(
-                    r#"<div class="kanban-card-owner"><span class="owner-initials">{}</span>{}</div>"#,
+                    r#"<span class="kanban-card-avatar" title="{}"><span class="owner-initials">{}</span></span>"#,
+                    escape_html(owner),
                     escape_html(&ini),
-                    escape_html(owner)
                 )
             };
 
+            let pri_html = if has_pri_dot {
+                format!(
+                    r#"<span class="kanban-pri {}" title="{}"></span>"#,
+                    pri_class,
+                    priority_label(priority as u64)
+                )
+            } else {
+                String::new()
+            };
+
             body.push_str(&format!(
-                r#"<div class="kanban-card {}">
-  <div class="kanban-card-id"><span class="pri-dot {}"></span>{}</div>
+                r#"<a href="/entity/{}" class="kanban-card {}">
   <div class="kanban-card-title">{}</div>
-  {}
-</div>
+  <div class="kanban-card-meta">
+    <span class="kanban-card-id">{}</span>{}{}</div>
+  <div class="kanban-card-footer">{}{}</div>
+</a>
 "#,
+                escape_html(id),
                 pri_class,
-                pri_dot_class,
-                entity_link(id),
                 escape_html(title),
+                escape_html(id),
+                pri_html,
+                project_html,
+                tags_html,
                 owner_html,
             ));
         }
