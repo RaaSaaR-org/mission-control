@@ -49,8 +49,8 @@ pub fn run(cfg: &ResolvedConfig, port: u16, base_path: &str) -> McResult<()> {
             .route("/sprints", get(handle_sprints))
             .route("/proposals", get(handle_proposals))
             .route("/contacts", get(handle_contacts))
-            .route("/tasks", get(handle_tasks))
-            .route("/tasks/board", get(handle_tasks_board))
+            .route("/tasks", get(handle_tasks_board))
+            .route("/tasks/list", get(handle_tasks))
             .route("/entity/{id}", get(handle_detail))
             .route("/brand/logo", get(handle_brand_logo))
             .route("/brand/fonts/{filename}", get(handle_brand_fonts))
@@ -91,7 +91,7 @@ pub fn run(cfg: &ResolvedConfig, port: u16, base_path: &str) -> McResult<()> {
 async fn handle_dashboard(State(state): State<Arc<AppState>>) -> Html<String> {
     let cfg = &state.cfg;
 
-    let kinds = [
+    let all_kinds = [
         EntityKind::Customer,
         EntityKind::Project,
         EntityKind::Meeting,
@@ -102,8 +102,9 @@ async fn handle_dashboard(State(state): State<Arc<AppState>>) -> Html<String> {
         EntityKind::Contact,
     ];
 
-    let counts: Vec<data::StatusCounts> = kinds
+    let counts: Vec<data::StatusCounts> = all_kinds
         .iter()
+        .filter(|k| k.available_in_mode(cfg.mode))
         .filter_map(|k| data::count_by_status(*k, cfg).ok())
         .collect();
 
@@ -116,14 +117,7 @@ async fn handle_dashboard(State(state): State<Arc<AppState>>) -> Html<String> {
     };
 
     Html(html::prefix_base_path(
-        &html::dashboard_page(
-            &counts,
-            &recent,
-            &cfg.mode,
-            &cfg.brand,
-            &state.custom_css,
-            &cfg.root,
-        ),
+        &html::dashboard_page(&counts, &recent, cfg, &state.custom_css),
         &state.base_path,
     ))
 }
