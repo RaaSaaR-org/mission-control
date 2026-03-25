@@ -13,7 +13,7 @@ use std::fs;
 use std::path::Path;
 
 fn check_mode(kind: EntityKind, cfg: &ResolvedConfig) -> McResult<()> {
-    if !kind.available_in_mode(cfg.mode) {
+    if !cfg.entity_available(&kind) {
         return Err(McError::NotAvailableInMode {
             kind: kind.label().to_string(),
         });

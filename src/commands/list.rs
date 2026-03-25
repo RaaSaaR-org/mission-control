@@ -34,7 +34,7 @@ pub fn run(entity: &ListEntity, cfg: &ResolvedConfig) -> McResult<()> {
                     unreachable!("Handled in outer match arms")
                 }
             };
-            if !kind.available_in_mode(cfg.mode) {
+            if !cfg.entity_available(&kind) {
                 return Err(McError::NotAvailableInMode {
                     kind: kind.label().to_string(),
                 });
@@ -428,7 +428,7 @@ fn list_contacts(
     tag: &Option<String>,
     customer: &Option<String>,
 ) -> McResult<()> {
-    if !EntityKind::Contact.available_in_mode(cfg.mode) {
+    if !cfg.entity_available(&EntityKind::Contact) {
         return Err(McError::NotAvailableInMode {
             kind: "contact".to_string(),
         });

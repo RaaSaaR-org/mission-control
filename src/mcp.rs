@@ -774,7 +774,7 @@ impl McServer {
         let mut counts = serde_json::Map::new();
         let kinds: Vec<_> = all_kinds
             .iter()
-            .filter(|k| k.available_in_mode(self.cfg.mode))
+            .filter(|k| self.cfg.entity_available(k))
             .collect();
         for kind in &kinds {
             let sc = data::count_by_status(**kind, &self.cfg).map_err(mc_err)?;

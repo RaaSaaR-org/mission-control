@@ -50,6 +50,9 @@ pub struct ResolvedConfig {
     pub id_prefixes: IdPrefixes,
     pub statuses: StatusConfig,
     pub brand: ResolvedBrand,
+    /// Entity path keys explicitly set in config (e.g. "tasks", "research").
+    /// If empty, all defaults apply (backwards compatible).
+    pub configured_entities: std::collections::HashSet<String>,
 }
 
 /// Default primary color (blue).
@@ -94,6 +97,47 @@ pub struct StatusConfig {
     pub contact: Vec<String>,
 }
 
+impl ResolvedConfig {
+    /// Check if an entity kind is available in this config.
+    /// In embedded mode, only task/meeting/research/sprint/proposal are available.
+    /// In standalone mode, if `paths` is configured, only explicitly listed entity types
+    /// are shown (plus their singular/plural variants). If no paths are configured,
+    /// all entity types are available (backwards compatible).
+    pub fn entity_available(&self, kind: &crate::entity::EntityKind) -> bool {
+        use crate::entity::EntityKind;
+        // Embedded mode filter
+        if self.mode == RepoMode::Embedded {
+            return matches!(
+                kind,
+                EntityKind::Task
+                    | EntityKind::Meeting
+                    | EntityKind::Research
+                    | EntityKind::Sprint
+                    | EntityKind::Proposal
+            );
+        }
+        // Standalone: if no paths configured, show all (backwards compatible)
+        if self.configured_entities.is_empty() {
+            return true;
+        }
+        // Check if this entity's path key is in the configured set
+        // Config uses plural keys (tasks, customers, etc.) or singular (task, customer)
+        let plural = kind.label_plural();
+        let singular = kind.label();
+        if self.configured_entities.contains(plural) || self.configured_entities.contains(singular)
+        {
+            return true;
+        }
+        // Contacts are a sub-entity of customers — they don't have their own path key
+        // but are available whenever customers are configured.
+        if matches!(kind, EntityKind::Contact) {
+            return self.configured_entities.contains("customers")
+                || self.configured_entities.contains("customer");
+        }
+        false
+    }
+}
+
 /// Walk up from `start` looking for a MissionControl config.
 /// Checks `.mc/config.yml` (embedded) first, then `config/config.yml` (standalone).
 pub fn find_repo_root(start: &Path) -> McResult<(PathBuf, RepoMode)> {
@@ -135,7 +179,10 @@ pub fn load_config(root: &Path, mode: RepoMode) -> McResult<ResolvedConfig> {
     let raw: RawConfig =
         serde_yaml::from_str(&content).map_err(|e| McError::ConfigParse(e.to_string()))?;
 
-    let paths = raw.paths.unwrap_or_default();
+    let raw_paths = raw.paths.unwrap_or_default();
+    let configured_entities: std::collections::HashSet<String> =
+        raw_paths.keys().cloned().collect();
+    let paths = raw_paths;
     let prefixes = raw.id_prefixes.unwrap_or_default();
     let statuses = raw.statuses.unwrap_or_default();
     let raw_brand = raw.brand;
@@ -243,6 +290,7 @@ pub fn load_config(root: &Path, mode: RepoMode) -> McResult<ResolvedConfig> {
                 .unwrap_or_else(|| vec!["active".into(), "inactive".into()]),
         },
         brand: resolve_brand(&base_dir, raw_brand),
+        configured_entities,
     };
 
     validate_status_config(&resolved.statuses)?;

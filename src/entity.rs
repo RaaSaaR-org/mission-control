@@ -86,6 +86,7 @@ impl EntityKind {
     }
 
     /// Whether this entity kind is available in the given repo mode.
+    #[allow(dead_code)]
     pub fn available_in_mode(&self, mode: RepoMode) -> bool {
         match mode {
             RepoMode::Standalone => true,
