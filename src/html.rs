@@ -2,9 +2,10 @@ use crate::config::{RepoMode, ResolvedBrand, ResolvedConfig, DEFAULT_ACCENT, DEF
 use crate::data::{self, EntityRecord, RecentFile, StatusCounts};
 use crate::entity::EntityKind;
 use crate::frontmatter;
+use chrono::NaiveDate;
 use regex::Regex;
 use serde_yaml::Value;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashSet, HashMap};
 
 /// A section of related entities to display on a detail page.
 pub struct RelatedSection {
@@ -69,6 +70,7 @@ pub fn layout(title: &str, active_nav: &str, body_html: &str) -> String {
         active_nav,
         body_html,
         &RepoMode::Standalone,
+        &HashSet::new(),
         &default_brand(),
         "",
     )
@@ -195,6 +197,7 @@ pub fn layout_branded(
     active_nav: &str,
     body_html: &str,
     mode: &RepoMode,
+    configured_entities: &HashSet<String>,
     brand: &ResolvedBrand,
     custom_css_content: &str,
 ) -> String {
@@ -210,11 +213,31 @@ pub fn layout_branded(
         ("Contacts", "/contacts", Some(EntityKind::Contact)),
     ];
 
+    // Build a temporary ResolvedConfig-like check using mode + configured_entities
+    let check_available = |kind: &EntityKind| -> bool {
+        if *mode == RepoMode::Embedded {
+            return matches!(
+                kind,
+                EntityKind::Task
+                    | EntityKind::Meeting
+                    | EntityKind::Research
+                    | EntityKind::Sprint
+                    | EntityKind::Proposal
+            );
+        }
+        if configured_entities.is_empty() {
+            return true;
+        }
+        let plural = kind.label_plural();
+        let singular = kind.label();
+        configured_entities.contains(plural) || configured_entities.contains(singular)
+    };
+
     let nav_links: String = all_nav_items
         .iter()
         .filter(|(_, _, kind)| match kind {
             None => true,
-            Some(k) => k.available_in_mode(*mode),
+            Some(k) => check_available(k),
         })
         .map(|(label, href, _)| {
             let class = if *href == active_nav {
@@ -248,6 +271,7 @@ pub fn layout_branded(
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📋</text></svg>">
   <title>{title} - {brand_name}</title>
   <style>{SIMPLE_CSS}</style>
   <style>{CUSTOM_CSS}</style>
@@ -258,6 +282,8 @@ pub fn layout_branded(
 <body>
   <header>
     <h1>{logo_html}{brand_name}</h1>
+    <input type="checkbox" id="nav-toggle" class="nav-toggle" aria-hidden="true">
+    <label for="nav-toggle" class="nav-toggle-label" aria-label="Toggle navigation"><span></span></label>
     <nav>
       <ul>
         {nav_links}
@@ -404,10 +430,79 @@ fn initials(name: &str) -> String {
     }
 }
 
+/// Insights extracted from tasks for the dashboard.
+pub struct TaskInsights {
+    pub overdue: Vec<(String, String, String)>,
+    pub due_this_week: Vec<(String, String, String)>,
+    pub in_progress: usize,
+    pub in_review: usize,
+    pub done: usize,
+    pub total_active: usize,
+}
+
+impl TaskInsights {
+    pub fn from_tasks(tasks: &[EntityRecord]) -> Self {
+        let today = chrono::Local::now().date_naive();
+        let week_end = today + chrono::Duration::days(7);
+
+        let mut overdue = Vec::new();
+        let mut due_this_week = Vec::new();
+        let mut in_progress: usize = 0;
+        let mut in_review: usize = 0;
+        let mut done: usize = 0;
+        let mut total_active: usize = 0;
+
+        for task in tasks {
+            let status = frontmatter::get_str_or(&task.frontmatter, "status", "");
+            let title = frontmatter::get_str_or(&task.frontmatter, "title", "");
+            let due_date = frontmatter::get_str_or(&task.frontmatter, "due_date", "");
+
+            if status == "cancelled" {
+                continue;
+            }
+            total_active += 1;
+
+            match status {
+                "in-progress" => in_progress += 1,
+                "review" => in_review += 1,
+                "done" => done += 1,
+                _ => {}
+            }
+
+            if status == "done" {
+                continue;
+            }
+
+            if let Ok(due) = NaiveDate::parse_from_str(due_date, "%Y-%m-%d") {
+                let id = frontmatter::get_str_or(&task.frontmatter, "id", "");
+                let entry = (id.to_string(), title.to_string(), due_date.to_string());
+                if due < today {
+                    overdue.push(entry);
+                } else if due <= week_end {
+                    due_this_week.push(entry);
+                }
+            }
+        }
+
+        overdue.truncate(5);
+        due_this_week.truncate(5);
+
+        Self {
+            overdue,
+            due_this_week,
+            in_progress,
+            in_review,
+            done,
+            total_active,
+        }
+    }
+}
+
 /// Render the dashboard page.
 pub fn dashboard_page(
     counts: &[StatusCounts],
     recent: &[RecentFile],
+    task_insights: &TaskInsights,
     cfg: &ResolvedConfig,
     custom_css: &str,
 ) -> String {
@@ -417,6 +512,12 @@ pub fn dashboard_page(
     let mut body = String::new();
 
     // Summary card grid — with inline mini stacked bar
+    let total_entities: usize = counts.iter().map(|c| c.total).sum();
+    body.push_str(&format!(
+        r#"<div class="dashboard-hero"><span class="hero-count">{}</span> entities tracked</div>"#,
+        total_entities
+    ));
+    body.push('\n');
     body.push_str(r#"<div class="summary-grid">"#);
     body.push('\n');
     for sc in counts {
@@ -425,12 +526,28 @@ pub fn dashboard_page(
         } else {
             ""
         };
+        let icon = match sc.label.as_str() {
+            "customers" => "👥",
+            "projects" => "📐",
+            "meetings" => "📅",
+            "research" => "🔬",
+            "tasks" => "✅",
+            "sprints" => "🏃",
+            "proposals" => "💡",
+            "contacts" => "📇",
+            _ => "📋",
+        };
         body.push_str(&format!(
-            r#"<a href="/{}" class="summary-card{}">
-  <div class="summary-card-label">{}</div>
-  <div class="summary-card-count">{}</div>"#,
+            r#"<a href="/{}" class="summary-card card-type-{}{}">
+  <div class="summary-card-icon">{}</div>
+  <div class="summary-card-body">
+    <div class="summary-card-label">{}</div>
+    <div class="summary-card-count">{}</div>
+  </div>"#,
+            sc.label,
             sc.label,
             muted,
+            icon,
             capitalize(&sc.label),
             sc.total
         ));
@@ -467,9 +584,83 @@ pub fn dashboard_page(
     }
     body.push_str("</div>\n");
 
+    // Task insights section
+    if task_insights.total_active > 0 {
+        body.push_str("<div class=\"dashboard-insights\">\n");
+
+        // Progress bar
+        let pct = if task_insights.total_active > 0 {
+            (task_insights.done as f64 / task_insights.total_active as f64 * 100.0).round() as u32
+        } else {
+            0
+        };
+        body.push_str(&format!(
+            r#"<div class="insights-progress">
+  <div class="insights-progress-label">
+    <span>Task Progress</span>
+    <span>{}/{} done</span>
+  </div>
+  <div class="insights-bar">
+    <div class="insights-bar-fill" style="width:{}%"></div>
+  </div>
+</div>
+"#,
+            task_insights.done, task_insights.total_active, pct
+        ));
+
+        // Status pills
+        body.push_str("<div class=\"insights-statuses\">\n");
+        body.push_str(&format!(
+            "<span class=\"insights-pill pill-progress\">{} in progress</span>\n",
+            task_insights.in_progress
+        ));
+        body.push_str(&format!(
+            "<span class=\"insights-pill pill-review\">{} in review</span>\n",
+            task_insights.in_review
+        ));
+        body.push_str("</div>\n");
+
+        // Overdue tasks
+        if !task_insights.overdue.is_empty() {
+            body.push_str("<div class=\"insights-section insights-overdue\">\n");
+            body.push_str("<h4>\u{26a0} Overdue</h4>\n<ul>\n");
+            for (id, title, due_date) in &task_insights.overdue {
+                body.push_str(&format!(
+                    "<li><a href=\"/entity/{}\">{}</a> {} <span class=\"due-date date-overdue\">{}</span></li>\n",
+                    escape_html(id),
+                    escape_html(id),
+                    escape_html(title),
+                    escape_html(due_date)
+                ));
+            }
+            body.push_str("</ul>\n</div>\n");
+        }
+
+        // Due this week
+        if !task_insights.due_this_week.is_empty() {
+            body.push_str("<div class=\"insights-section insights-upcoming\">\n");
+            body.push_str("<h4>\u{1f4c5} Due This Week</h4>\n<ul>\n");
+            for (id, title, due_date) in &task_insights.due_this_week {
+                body.push_str(&format!(
+                    "<li><a href=\"/entity/{}\">{}</a> {} <span class=\"due-date date-soon\">{}</span></li>\n",
+                    escape_html(id),
+                    escape_html(id),
+                    escape_html(title),
+                    escape_html(due_date)
+                ));
+            }
+            body.push_str("</ul>\n</div>\n");
+        }
+
+        body.push_str("</div>\n");
+    }
+
     // Recent activity as timeline
     body.push_str(r#"<div class="dashboard-activity">"#);
-    body.push_str(r#"<h3>Recent Activity</h3>"#);
+    body.push_str(&format!(
+        r#"<h3>Recent Activity <span class="activity-count">{}</span></h3>"#,
+        recent.len()
+    ));
     body.push('\n');
     if recent.is_empty() {
         body.push_str(r#"<p style="color:var(--mc-text-muted);font-size:0.875rem;">No recent files found.</p>"#);
@@ -531,7 +722,7 @@ pub fn dashboard_page(
     }
     body.push_str("</div>\n");
 
-    layout_branded("Dashboard", "/", &body, mode, brand, custom_css)
+    layout_branded("Dashboard", "/", &body, mode, &cfg.configured_entities, brand, custom_css)
 }
 
 /// Detect entity type label from an entity ID and file path, using configured prefixes.
@@ -643,13 +834,14 @@ pub fn list_page(
     sort_field: Option<&str>,
     sort_dir: &str,
     mode: &RepoMode,
+    configured_entities: &HashSet<String>,
     brand: &ResolvedBrand,
     custom_css: &str,
 ) -> String {
     let nav_path = format!("/{}", kind_plural);
     let mut body = String::new();
 
-    body.push_str(&format!("<h2>{}</h2>\n", capitalize(kind_plural)));
+    body.push_str(&format!("<h2 class=\"page-title\">{}</h2>\n", capitalize(kind_plural)));
 
     // Filter form
     body.push_str(&format!(
@@ -697,6 +889,7 @@ pub fn list_page(
             &nav_path,
             &body,
             mode,
+            configured_entities,
             brand,
             custom_css,
         );
@@ -883,6 +1076,7 @@ pub fn list_page(
         &nav_path,
         &body,
         mode,
+        configured_entities,
         brand,
         custom_css,
     )
@@ -1179,7 +1373,16 @@ fn task_detail_body(
 
     // Depends on
     if !depends_on.is_empty() {
-        let links: Vec<String> = depends_on.iter().map(|id| entity_link(id)).collect();
+        let links: Vec<String> = depends_on
+            .iter()
+            .map(|id| {
+                let stripped = id
+                    .strip_prefix("[[")
+                    .and_then(|s| s.strip_suffix("]]"))
+                    .unwrap_or(id);
+                entity_link(stripped)
+            })
+            .collect();
         body.push_str(&format!(
             r#"<div class="task-meta-block">
   <div class="task-meta-label">Depends on</div>
@@ -1340,6 +1543,7 @@ pub fn detail_page(
             "/tasks",
             &body,
             &cfg.mode,
+            &cfg.configured_entities,
             &cfg.brand,
             custom_css,
         );
@@ -1514,6 +1718,7 @@ pub fn detail_page(
         &nav_path,
         &body,
         &cfg.mode,
+        &cfg.configured_entities,
         &cfg.brand,
         custom_css,
     )
@@ -1578,17 +1783,16 @@ pub fn tasks_list_page(
     sprint_filter: Option<&str>,
     valid_statuses: &[String],
     filter_options: &TaskFilterOptions,
-    brand: &ResolvedBrand,
+    cfg: &ResolvedConfig,
     custom_css: &str,
 ) -> String {
     let mut body = String::new();
-    body.push_str("<h2>Tasks</h2>\n");
-    body.push_str(r#"<div class="view-toggle"><a href="/tasks">Board</a><a href="/tasks/list" class="active">List</a></div>"#);
+    body.push_str(r#"<div class="page-header"><h2 class="page-title">Tasks</h2><div class="view-toggle"><a href="/tasks">Board</a><a href="/tasks/list" class="active">List</a></div></div>"#);
     body.push('\n');
 
     // Filter form with all dimensions
     body.push_str(
-        r#"<form class="filter-form" method="get" action="/tasks">
+        r#"<form class="filter-form" method="get" action="/tasks/list">
   <div>
     <label for="status">Status</label>
     <select name="status" id="status">
@@ -1708,7 +1912,7 @@ pub fn tasks_list_page(
         r#"  <div>
     <button type="submit">Filter</button>
   </div>
-  <a href="/tasks" class="reset-link">Reset</a>
+  <a href="/tasks/list" class="reset-link">Reset</a>
 </form>
 "#,
     );
@@ -1720,8 +1924,9 @@ pub fn tasks_list_page(
             "Tasks",
             "/tasks",
             &body,
-            &RepoMode::Standalone,
-            brand,
+            &cfg.mode,
+            &cfg.configured_entities,
+            &cfg.brand,
             custom_css,
         );
     }
@@ -1779,16 +1984,17 @@ pub fn tasks_list_page(
         "Tasks",
         "/tasks",
         &body,
-        &RepoMode::Standalone,
-        brand,
+        &cfg.mode,
+        &cfg.configured_entities,
+        &cfg.brand,
         custom_css,
     )
 }
 
 /// Render a kanban board page for tasks.
-pub fn board_page(tasks: &[EntityRecord], brand: &ResolvedBrand, custom_css: &str) -> String {
+pub fn board_page(tasks: &[EntityRecord], cfg: &ResolvedConfig, custom_css: &str) -> String {
     let mut body = String::new();
-    body.push_str(r#"<div class="board-header"><h2>Task Board</h2><div class="view-toggle"><a href="/tasks" class="active">Board</a><a href="/tasks/list">List</a></div></div>"#);
+    body.push_str(r#"<div class="page-header"><h2 class="page-title">Task Board</h2><div class="view-toggle"><a href="/tasks" class="active">Board</a><a href="/tasks/list">List</a></div></div>"#);
     body.push('\n');
 
     let columns = ["backlog", "todo", "in-progress", "review", "done"];
@@ -1920,8 +2126,9 @@ pub fn board_page(tasks: &[EntityRecord], brand: &ResolvedBrand, custom_css: &st
         "Task Board",
         "/tasks",
         &body,
-        &RepoMode::Standalone,
-        brand,
+        &cfg.mode,
+        &cfg.configured_entities,
+        &cfg.brand,
         custom_css,
     )
 }
@@ -1936,7 +2143,7 @@ pub fn error_page(message: &str) -> String {
 }
 
 /// Render a 404 page.
-pub fn not_found_page(path: &str, brand: &ResolvedBrand, custom_css: &str) -> String {
+pub fn not_found_page(path: &str, cfg: &ResolvedConfig, custom_css: &str) -> String {
     let body = format!(
         r#"<div class="empty-state"><span class="empty-state-icon">?</span><h2>Not Found</h2><p>The page <code>{}</code> was not found.</p><p><a href="/">Back to Dashboard</a></p></div>"#,
         escape_html(path)
@@ -1945,8 +2152,9 @@ pub fn not_found_page(path: &str, brand: &ResolvedBrand, custom_css: &str) -> St
         "Not Found",
         "",
         &body,
-        &RepoMode::Standalone,
-        brand,
+        &cfg.mode,
+        &cfg.configured_entities,
+        &cfg.brand,
         custom_css,
     )
 }

@@ -61,7 +61,15 @@ pub fn run(cfg: &ResolvedConfig, port: u16, base_path: &str) -> McResult<()> {
         let app: Router = if base_path.is_empty() {
             routes
         } else {
-            Router::new().nest(&base_path, routes)
+            // Axum nest doesn't match trailing slash on the base path itself.
+            // Add explicit redirect: /base/path/ -> /base/path
+            let bp = base_path.clone();
+            Router::new()
+                .nest(&base_path, routes)
+                .route(
+                    &format!("{}/", base_path),
+                    get(move || async move { axum::response::Redirect::permanent(&bp) }),
+                )
         };
 
         let addr = format!("127.0.0.1:{}", port);
@@ -104,7 +112,7 @@ async fn handle_dashboard(State(state): State<Arc<AppState>>) -> Html<String> {
 
     let counts: Vec<data::StatusCounts> = all_kinds
         .iter()
-        .filter(|k| k.available_in_mode(cfg.mode))
+        .filter(|k| cfg.entity_available(k))
         .filter_map(|k| data::count_by_status(*k, cfg).ok())
         .collect();
 
@@ -116,8 +124,12 @@ async fn handle_dashboard(State(state): State<Arc<AppState>>) -> Html<String> {
         }
     };
 
+    // Collect task insights for the dashboard
+    let tasks = data::collect_tasks(cfg).unwrap_or_default();
+    let task_insights = html::TaskInsights::from_tasks(&tasks);
+
     Html(html::prefix_base_path(
-        &html::dashboard_page(&counts, &recent, cfg, &state.custom_css),
+        &html::dashboard_page(&counts, &recent, &task_insights, cfg, &state.custom_css),
         &state.base_path,
     ))
 }
@@ -281,7 +293,7 @@ async fn handle_tasks(
             sprint_filter,
             valid_statuses,
             &filter_options,
-            &cfg.brand,
+            cfg,
             &state.custom_css,
         ),
         &state.base_path,
@@ -322,7 +334,7 @@ async fn handle_tasks_board(
     })?;
 
     Ok(Html(html::prefix_base_path(
-        &html::board_page(&tasks, &cfg.brand, &state.custom_css),
+        &html::board_page(&tasks, cfg, &state.custom_css),
         &state.base_path,
     )))
 }
@@ -375,6 +387,7 @@ fn handle_list(
             sort_field,
             sort_dir,
             &cfg.mode,
+            &cfg.configured_entities,
             &cfg.brand,
             custom_css,
         ),
@@ -551,7 +564,7 @@ fn error_response(message: &str) -> (StatusCode, Html<String>) {
 
 async fn handle_404(State(state): State<Arc<AppState>>, uri: axum::http::Uri) -> Html<String> {
     Html(html::prefix_base_path(
-        &html::not_found_page(uri.path(), &state.cfg.brand, &state.custom_css),
+        &html::not_found_page(uri.path(), &state.cfg, &state.custom_css),
         &state.base_path,
     ))
 }
