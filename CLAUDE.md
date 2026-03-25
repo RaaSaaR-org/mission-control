@@ -12,7 +12,7 @@ cargo clippy -- -D warnings    # Lint (CI treats warnings as errors)
 cargo test <test_name>         # Run a single test by name
 ```
 
-CI runs fmt, clippy, test, and release build on every push to `main` and every PR.
+CI runs fmt, clippy, test, and release build on every push to `main` and every PR. MSRV is 1.88 (pinned in `Cargo.toml` and validated in CI).
 
 ## Architecture
 
