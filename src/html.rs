@@ -5,7 +5,7 @@ use crate::frontmatter;
 use chrono::NaiveDate;
 use regex::Regex;
 use serde_yaml::Value;
-use std::collections::{BTreeSet, HashSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 /// A section of related entities to display on a detail page.
 pub struct RelatedSection {
@@ -722,7 +722,15 @@ pub fn dashboard_page(
     }
     body.push_str("</div>\n");
 
-    layout_branded("Dashboard", "/", &body, mode, &cfg.configured_entities, brand, custom_css)
+    layout_branded(
+        "Dashboard",
+        "/",
+        &body,
+        mode,
+        &cfg.configured_entities,
+        brand,
+        custom_css,
+    )
 }
 
 /// Detect entity type label from an entity ID and file path, using configured prefixes.
@@ -841,7 +849,10 @@ pub fn list_page(
     let nav_path = format!("/{}", kind_plural);
     let mut body = String::new();
 
-    body.push_str(&format!("<h2 class=\"page-title\">{}</h2>\n", capitalize(kind_plural)));
+    body.push_str(&format!(
+        "<h2 class=\"page-title\">{}</h2>\n",
+        capitalize(kind_plural)
+    ));
 
     // Filter form
     body.push_str(&format!(

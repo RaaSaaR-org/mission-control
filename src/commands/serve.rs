@@ -64,12 +64,10 @@ pub fn run(cfg: &ResolvedConfig, port: u16, base_path: &str) -> McResult<()> {
             // Axum nest doesn't match trailing slash on the base path itself.
             // Add explicit redirect: /base/path/ -> /base/path
             let bp = base_path.clone();
-            Router::new()
-                .nest(&base_path, routes)
-                .route(
-                    &format!("{}/", base_path),
-                    get(move || async move { axum::response::Redirect::permanent(&bp) }),
-                )
+            Router::new().nest(&base_path, routes).route(
+                &format!("{}/", base_path),
+                get(move || async move { axum::response::Redirect::permanent(&bp) }),
+            )
         };
 
         let addr = format!("127.0.0.1:{}", port);
