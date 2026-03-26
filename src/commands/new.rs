@@ -254,6 +254,10 @@ fn confirm_creation(yes: bool) -> bool {
     if yes {
         return true;
     }
+    // Auto-confirm in non-interactive environments (pipes, agent shells, CI)
+    if !std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+        return true;
+    }
     let result = dialoguer::Confirm::new()
         .with_prompt("Create this entity?")
         .default(true)
