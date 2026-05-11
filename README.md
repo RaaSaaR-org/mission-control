@@ -222,6 +222,27 @@ mc serve
 # Open http://localhost:5000
 ```
 
+## REST API
+
+For non-LLM clients (custom UIs, mobile apps, CI bots, multi-tenant gateways), `mc api serve` exposes the same surface as MCP over HTTP/JSON with bearer auth and an OpenAPI 3.1 spec.
+
+```bash
+mc api hash-token "your-secret" > hash.txt
+cat > tokens.yml <<EOF
+tokens:
+  - name: deploy-bot
+    hash: "$(cat hash.txt)"
+    capabilities: [read, write]
+EOF
+mc api serve --tokens-file tokens.yml --port 5100
+```
+
+```bash
+curl -H "Authorization: Bearer your-secret" http://127.0.0.1:5100/v1/tasks
+```
+
+See [`docs/api.md`](docs/api.md) for the full reference (endpoints, auth, error model, multi-tenant gateway pattern) and [`docs/examples/curl-cookbook.md`](docs/examples/curl-cookbook.md) for copy-paste recipes. The live spec is at `/v1/openapi.json`.
+
 ## Installation
 
 ### From crates.io

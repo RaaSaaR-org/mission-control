@@ -7,7 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.1.14] - 2026-05-11
+
 ### Added
+- `mc api serve` — bearer-authenticated HTTP/JSON API mirroring the MCP tool surface (versioned `/v1`, OpenAPI 3.1 spec at `/v1/openapi.json`, RFC 7807 error responses, request-id propagation, structured tracing at INFO).
+- `mc api serve --insecure-dev-token` — generate a random read+write token at startup for zero-friction local dev.
+- `mc api serve --read-only` — reject every non-GET regardless of token capabilities.
+- `/v1/docs` — interactive RapiDoc viewer rendering the OpenAPI spec, no auth required.
+- `mc api hash-token` — generate argon2id hashes for the tokens file.
+- Cross-process safety: exclusive `flock` on `<repo>/.mc-api.lock`; a second `mc api serve` against the same repo fails fast.
+- SHA-256 fast-path cache for bearer verification — argon2 only runs on first-sight bearers, subsequent requests hit a hashmap.
+- 64 KiB request-body limit and 30 s request timeout (slowloris/oversized-body DoS guards).
+- `docs/api.md` — full API reference including a multi-tenant gateway pattern for downstream consumers.
+- `docs/examples/curl-cookbook.md`, `docs/examples/tokens.example.yml`.
+- Crate is now a hybrid lib+bin so integration tests under `tests/` can drive the API in-process.
 - Embedded mode for `.mc/` inside existing projects
 - CLAUDE.md with architecture and build documentation
 - CHANGELOG.md

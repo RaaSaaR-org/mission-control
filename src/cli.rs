@@ -130,6 +130,23 @@ Open http://localhost:<port> in your browser to view the dashboard.")]
   Cursor       Settings > MCP > Add server: command = mc, args = [\"mcp\"]
   VS Code      Add to .vscode/mcp.json with command \"mc\" and args [\"mcp\"]")]
     Mcp,
+    /// Start a JSON HTTP API server (REST surface mirroring MCP)
+    #[command(after_help = "\x1b[1mExamples:\x1b[0m
+  mc api serve --tokens-file tokens.yml                Start on default 127.0.0.1:5100
+  mc api serve --bind 0.0.0.0 --port 8080 --tokens-file tokens.yml
+  mc api serve --tokens-file tokens.yml --read-only    Reject every non-GET
+
+\x1b[1mAuth:\x1b[0m
+  --tokens-file is YAML with argon2id-hashed bearer tokens. See docs/api.md.
+
+\x1b[1mDocs:\x1b[0m
+  Endpoint reference                   docs/api.md
+  Curl recipes                         docs/examples/curl-cookbook.md
+  Live OpenAPI spec                    GET /v1/openapi.json")]
+    Api {
+        #[command(subcommand)]
+        subcmd: ApiSubcommand,
+    },
     /// Initialize a new MissionControl repository
     #[command(after_help = "\x1b[1mExamples:\x1b[0m
   mc init                            Full setup (customers, projects, meetings, etc.)
@@ -170,6 +187,39 @@ Open http://localhost:<port> in your browser to view the dashboard.")]
     Task {
         #[command(subcommand)]
         subcmd: TaskSubcommand,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum ApiSubcommand {
+    /// Start the HTTP API server.
+    Serve {
+        /// Port to listen on
+        #[arg(long, default_value_t = 5100)]
+        port: u16,
+        /// Bind address (default 127.0.0.1 — set to 0.0.0.0 only behind a trusted proxy)
+        #[arg(long, default_value = "127.0.0.1")]
+        bind: String,
+        /// Path to YAML tokens file (argon2id PHC hashes). Required unless --insecure-dev-token is set.
+        #[arg(long, conflicts_with = "insecure_dev_token")]
+        tokens_file: Option<String>,
+        /// Generate a single random read+write bearer token at startup and print it to
+        /// stderr. Skips the tokens file. NEVER use in production — anyone reading the
+        /// stderr stream gets full access to your repo. Use only for local dev/testing.
+        #[arg(long, conflicts_with = "tokens_file")]
+        insecure_dev_token: bool,
+        /// Reject every non-GET request, regardless of token capabilities
+        #[arg(long)]
+        read_only: bool,
+        /// Log format: human (default) or json
+        #[arg(long, default_value = "human")]
+        log_format: String,
+    },
+    /// Generate an argon2id PHC hash of a bearer token, for inclusion in tokens.yml.
+    /// The plaintext is read from the SECRET argument or stdin (one line).
+    HashToken {
+        /// Secret to hash; if omitted, read from stdin.
+        secret: Option<String>,
     },
 }
 

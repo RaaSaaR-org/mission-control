@@ -1,19 +1,8 @@
-mod cli;
-mod commands;
-mod config;
-mod data;
-mod entity;
-mod error;
-mod frontmatter;
-mod html;
-mod mcp;
-mod template;
-mod util;
-
 use clap::Parser;
-use cli::{Cli, Command};
 use colored::*;
-use error::McResult;
+use mc::cli::{ApiSubcommand, Cli, Command};
+use mc::error::McResult;
+use mc::{commands, config};
 
 fn main() {
     let cli = Cli::parse();
@@ -28,6 +17,14 @@ fn main() {
 }
 
 fn run(cli: &Cli) -> McResult<()> {
+    // hash-token doesn't need a repo — it's a pure utility.
+    if let Command::Api {
+        subcmd: ApiSubcommand::HashToken { secret },
+    } = &cli.command
+    {
+        return commands::api::run_hash_token(secret.as_deref());
+    }
+
     // Init is handled before config loading (config doesn't exist yet)
     if let Command::Init {
         project,
@@ -75,6 +72,7 @@ fn run(cli: &Cli) -> McResult<()> {
         Command::Status => commands::status::run(&cfg),
         Command::Serve { port, base_path } => commands::serve::run(&cfg, *port, base_path),
         Command::Mcp => commands::mcp::run(&cfg),
+        Command::Api { subcmd } => commands::api::run(subcmd, &cfg),
         Command::Task { subcmd } => commands::task::run(subcmd, &cfg),
     }
 }

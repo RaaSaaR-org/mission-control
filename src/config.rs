@@ -320,47 +320,6 @@ fn validate_status_config(statuses: &StatusConfig) -> McResult<()> {
     Ok(())
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn default_statuses() -> StatusConfig {
-        StatusConfig {
-            customer: vec!["active".into()],
-            project: vec!["active".into()],
-            meeting: vec!["scheduled".into()],
-            research: vec!["draft".into()],
-            task: vec!["todo".into()],
-            sprint: vec!["planning".into()],
-            proposal: vec!["draft".into()],
-            contact: vec!["active".into()],
-        }
-    }
-
-    #[test]
-    fn test_valid_statuses_pass() {
-        assert!(validate_status_config(&default_statuses()).is_ok());
-    }
-
-    #[test]
-    fn test_empty_customer_statuses_rejected() {
-        let mut s = default_statuses();
-        s.customer = vec![];
-        let err = validate_status_config(&s).unwrap_err();
-        assert!(err
-            .to_string()
-            .contains("statuses.customer must not be empty"));
-    }
-
-    #[test]
-    fn test_empty_task_statuses_rejected() {
-        let mut s = default_statuses();
-        s.task = vec![];
-        let err = validate_status_config(&s).unwrap_err();
-        assert!(err.to_string().contains("statuses.task must not be empty"));
-    }
-}
-
 fn resolve_brand(root: &Path, raw: Option<BrandConfig>) -> ResolvedBrand {
     let color_from_vec = |v: &[u8], default: [u8; 3]| -> [u8; 3] {
         if v.len() >= 3 {
@@ -404,5 +363,46 @@ fn resolve_brand(root: &Path, raw: Option<BrandConfig>) -> ResolvedBrand {
             logo: None,
             custom_css: None,
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn default_statuses() -> StatusConfig {
+        StatusConfig {
+            customer: vec!["active".into()],
+            project: vec!["active".into()],
+            meeting: vec!["scheduled".into()],
+            research: vec!["draft".into()],
+            task: vec!["todo".into()],
+            sprint: vec!["planning".into()],
+            proposal: vec!["draft".into()],
+            contact: vec!["active".into()],
+        }
+    }
+
+    #[test]
+    fn test_valid_statuses_pass() {
+        assert!(validate_status_config(&default_statuses()).is_ok());
+    }
+
+    #[test]
+    fn test_empty_customer_statuses_rejected() {
+        let mut s = default_statuses();
+        s.customer = vec![];
+        let err = validate_status_config(&s).unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("statuses.customer must not be empty"));
+    }
+
+    #[test]
+    fn test_empty_task_statuses_rejected() {
+        let mut s = default_statuses();
+        s.task = vec![];
+        let err = validate_status_config(&s).unwrap_err();
+        assert!(err.to_string().contains("statuses.task must not be empty"));
     }
 }

@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>mc API — interactive docs</title>
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📋</text></svg>">
+    <script type="module" src="https://unpkg.com/rapidoc@9.3.4/dist/rapidoc-min.js"></script>
+    <style>
+      html, body { margin: 0; padding: 0; height: 100%; }
+      rapi-doc { display: block; height: 100vh; }
+      .offline-warning {
+        display: none;
+        padding: 1rem 1.25rem;
+        background: #fff5d6;
+        border-bottom: 1px solid #e0c97a;
+        font-family: system-ui, -apple-system, sans-serif;
+        font-size: 0.95rem;
+      }
+    </style>
+  </head>
+  <body>
+    <noscript>
+      <p style="font-family:system-ui;padding:2rem">
+        This page renders the OpenAPI spec at
+        <a href="/v1/openapi.json"><code>/v1/openapi.json</code></a> using
+        RapiDoc, which requires JavaScript. Without it, fetch the spec
+        directly with <code>curl /v1/openapi.json</code>.
+      </p>
+    </noscript>
+    <div id="offline" class="offline-warning">
+      Couldn't load the RapiDoc viewer from unpkg.com (offline or blocked).
+      The OpenAPI spec is still available at
+      <a href="/v1/openapi.json"><code>/v1/openapi.json</code></a>.
+    </div>
+    <rapi-doc
+      spec-url="/v1/openapi.json"
+      theme="dark"
+      render-style="read"
+      schema-style="table"
+      show-header="false"
+      show-info="true"
+      allow-authentication="true"
+      allow-server-selection="true"
+      allow-spec-url-load="false"
+      allow-spec-file-load="false"
+      heading-text="mc API"
+      regular-font="system-ui, -apple-system, Segoe UI, Roboto, sans-serif"
+      mono-font="ui-monospace, Menlo, Consolas, monospace"
+    ></rapi-doc>
+    <script>
+      // If the rapidoc module fails to load (e.g. offline / firewall),
+      // surface a friendly notice instead of leaving the page blank.
+      window.addEventListener("error", (e) => {
+        if (e?.target?.src?.includes("rapidoc")) {
+          document.getElementById("offline").style.display = "block";
+        }
+      }, true);
+    </script>
+  </body>
+</html>

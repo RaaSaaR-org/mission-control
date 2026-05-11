@@ -516,6 +516,20 @@ fn list_contacts(
     Ok(())
 }
 
+pub fn format_status(status: &str) -> colored::ColoredString {
+    match status {
+        "active" | "completed" | "final" | "done" | "accepted" => status.green(),
+        "inactive" | "cancelled" | "churned" | "outdated" | "rejected" | "withdrawn" => {
+            status.red()
+        }
+        "on-hold" | "draft" | "in-progress" | "review" | "planning" | "proposed" => status.yellow(),
+        "prospect" | "scheduled" | "todo" => status.blue(),
+        "superseded" => status.dimmed(),
+        "backlog" => status.dimmed(),
+        _ => status.normal(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -538,19 +552,5 @@ mod tests {
         assert_eq!(truncate("abc", 3), "abc");
         assert_eq!(truncate("abcd", 3), "abcd"); // max <= 3 returns as-is
         assert_eq!(truncate("", 5), "");
-    }
-}
-
-pub fn format_status(status: &str) -> colored::ColoredString {
-    match status {
-        "active" | "completed" | "final" | "done" | "accepted" => status.green(),
-        "inactive" | "cancelled" | "churned" | "outdated" | "rejected" | "withdrawn" => {
-            status.red()
-        }
-        "on-hold" | "draft" | "in-progress" | "review" | "planning" | "proposed" => status.yellow(),
-        "prospect" | "scheduled" | "todo" => status.blue(),
-        "superseded" => status.dimmed(),
-        "backlog" => status.dimmed(),
-        _ => status.normal(),
     }
 }

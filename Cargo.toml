@@ -1,6 +1,6 @@
 [package]
 name = "mc"
-version = "0.1.13"
+version = "0.1.14"
 authors = ["huhn511 <huhn.dev@gmail.com>"]
 edition = "2021"
 rust-version = "1.88"
@@ -34,12 +34,24 @@ regex = "1"
 zip = "2"
 thiserror = "2"
 axum = "0.8"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "net"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "signal"] }
 pulldown-cmark = "0.12"
 genpdf = { version = "0.2", default-features = false }
 rmcp = { version = "0.14", features = ["server", "transport-io"] }
 schemars = "1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["trace", "cors", "request-id", "util", "timeout", "limit"] }
+utoipa = { version = "5", features = ["axum_extras"] }
+utoipa-axum = "0.2"
+argon2 = "0.5"
+password-hash = { version = "0.5", features = ["getrandom"] }
+uuid = { version = "1", features = ["v4"] }
+sha2 = "0.10"
+fs2 = "0.4"
 
 [dev-dependencies]
 tempfile = "3"
+http-body-util = "0.1"
+mime = "0.3"

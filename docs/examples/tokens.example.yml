@@ -1,0 +1,22 @@
+# Example tokens.yml for `mc api serve --tokens-file …`.
+#
+# Generate hashes with:
+#     mc api hash-token "your-secret"   # one secret per line
+#
+# - `name` is logged on every request the token authenticates; it is never
+#   returned to clients.
+# - `hash` must be an argon2id PHC string. Anything else is rejected at boot.
+# - `capabilities` accepts [read], [read, write], or omitted (defaults to
+#   [read]). A token without `write` cannot POST to any endpoint.
+#
+# Rotation: edit this file and restart the server. Hot-reload on SIGHUP is on
+# the roadmap but not yet implemented.
+
+tokens:
+  - name: deploy-bot
+    hash: "$argon2id$v=19$m=19456,t=2,p=1$REPLACEME$REPLACEME"
+    capabilities: [read, write]
+
+  - name: dashboard
+    hash: "$argon2id$v=19$m=19456,t=2,p=1$REPLACEME$REPLACEME"
+    capabilities: [read]
