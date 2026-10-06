@@ -12,15 +12,23 @@ pub enum RepoMode {
     Embedded,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
 pub struct RawConfig {
     pub paths: Option<HashMap<String, String>>,
     pub id_prefixes: Option<HashMap<String, String>>,
     pub statuses: Option<HashMap<String, Vec<String>>>,
     pub brand: Option<BrandConfig>,
+    pub site: Option<SiteConfig>,
 }
 
-#[derive(Debug, Deserialize)]
+/// The `site:` section written by `mc init` (`name`, `description`).
+#[derive(Debug, Default, Deserialize)]
+pub struct SiteConfig {
+    pub name: Option<String>,
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
 pub struct BrandConfig {
     pub name: Option<String>,
     pub tagline: Option<String>,
@@ -59,6 +67,8 @@ pub struct ResolvedConfig {
 pub const DEFAULT_PRIMARY: [u8; 3] = [0, 82, 155];
 /// Default accent color (gray).
 pub const DEFAULT_ACCENT: [u8; 3] = [102, 102, 102];
+/// Display name used when neither `brand.name` nor `site.name` is configured.
+pub const DEFAULT_BRAND_NAME: &str = "MissionControl";
 
 /// Resolved brand configuration with absolute paths and defaults applied.
 #[derive(Debug, Clone)]
@@ -176,8 +186,8 @@ pub fn load_config(root: &Path, mode: RepoMode) -> McResult<ResolvedConfig> {
     }
 
     let content = std::fs::read_to_string(&config_path)?;
-    let raw: RawConfig =
-        serde_yaml::from_str(&content).map_err(|e| McError::ConfigParse(e.to_string()))?;
+    let raw = parse_raw_config(&content)
+        .map_err(|e| McError::ConfigParse(format!("{}: {}", config_path.display(), e)))?;
 
     let raw_paths = raw.paths.unwrap_or_default();
     let configured_entities: std::collections::HashSet<String> =
@@ -186,9 +196,26 @@ pub fn load_config(root: &Path, mode: RepoMode) -> McResult<ResolvedConfig> {
     let prefixes = raw.id_prefixes.unwrap_or_default();
     let statuses = raw.statuses.unwrap_or_default();
     let raw_brand = raw.brand;
+    let site_name = raw
+        .site
+        .and_then(|s| s.name)
+        .map(|n| n.trim().to_string())
+        .filter(|n| !n.is_empty());
 
     let resolve = |key: &str, default: &str| -> PathBuf {
         base_dir.join(paths.get(key).map(|s| s.as_str()).unwrap_or(default))
+    };
+    let prefix = |key: &str, default: &str| -> String {
+        prefixes
+            .get(key)
+            .cloned()
+            .unwrap_or_else(|| default.to_string())
+    };
+    let status_list = |key: &str, default: &[&str]| -> Vec<String> {
+        statuses
+            .get(key)
+            .cloned()
+            .unwrap_or_else(|| default.iter().map(|s| s.to_string()).collect())
     };
 
     let resolved = ResolvedConfig {
@@ -205,97 +232,60 @@ pub fn load_config(root: &Path, mode: RepoMode) -> McResult<ResolvedConfig> {
         templates_dir: resolve("templates", "templates/"),
         archive_dir: resolve("archive", "archive/"),
         id_prefixes: IdPrefixes {
-            customer: prefixes
-                .get("customer")
-                .cloned()
-                .unwrap_or_else(|| "CUST".into()),
-            project: prefixes
-                .get("project")
-                .cloned()
-                .unwrap_or_else(|| "PROJ".into()),
-            meeting: prefixes
-                .get("meeting")
-                .cloned()
-                .unwrap_or_else(|| "MTG".into()),
-            research: prefixes
-                .get("research")
-                .cloned()
-                .unwrap_or_else(|| "RES".into()),
-            task: prefixes
-                .get("task")
-                .cloned()
-                .unwrap_or_else(|| "TASK".into()),
-            sprint: prefixes
-                .get("sprint")
-                .cloned()
-                .unwrap_or_else(|| "SPR".into()),
-            proposal: prefixes
-                .get("proposal")
-                .cloned()
-                .unwrap_or_else(|| "PROP".into()),
-            contact: prefixes
-                .get("contact")
-                .cloned()
-                .unwrap_or_else(|| "CONT".into()),
+            customer: prefix("customer", "CUST"),
+            project: prefix("project", "PROJ"),
+            meeting: prefix("meeting", "MTG"),
+            research: prefix("research", "RES"),
+            task: prefix("task", "TASK"),
+            sprint: prefix("sprint", "SPR"),
+            proposal: prefix("proposal", "PROP"),
+            contact: prefix("contact", "CONT"),
         },
         statuses: StatusConfig {
-            customer: statuses
-                .get("customer")
-                .cloned()
-                .unwrap_or_else(|| vec!["active".into(), "inactive".into()]),
-            project: statuses
-                .get("project")
-                .cloned()
-                .unwrap_or_else(|| vec!["active".into(), "on-hold".into(), "completed".into()]),
-            meeting: statuses
-                .get("meeting")
-                .cloned()
-                .unwrap_or_else(|| vec!["scheduled".into(), "completed".into()]),
-            research: statuses
-                .get("research")
-                .cloned()
-                .unwrap_or_else(|| vec!["draft".into(), "final".into()]),
-            task: statuses.get("task").cloned().unwrap_or_else(|| {
-                vec![
-                    "backlog".into(),
-                    "todo".into(),
-                    "in-progress".into(),
-                    "review".into(),
-                    "done".into(),
-                    "cancelled".into(),
-                ]
-            }),
-            sprint: statuses.get("sprint").cloned().unwrap_or_else(|| {
-                vec![
-                    "planning".into(),
-                    "active".into(),
-                    "review".into(),
-                    "completed".into(),
-                    "cancelled".into(),
-                ]
-            }),
-            proposal: statuses.get("proposal").cloned().unwrap_or_else(|| {
-                vec![
-                    "draft".into(),
-                    "proposed".into(),
-                    "accepted".into(),
-                    "rejected".into(),
-                    "superseded".into(),
-                    "withdrawn".into(),
-                ]
-            }),
-            contact: statuses
-                .get("contact")
-                .cloned()
-                .unwrap_or_else(|| vec!["active".into(), "inactive".into()]),
+            customer: status_list("customer", &["active", "inactive"]),
+            project: status_list("project", &["active", "on-hold", "completed"]),
+            meeting: status_list("meeting", &["scheduled", "completed"]),
+            research: status_list("research", &["draft", "final"]),
+            task: status_list(
+                "task",
+                &[
+                    "backlog",
+                    "todo",
+                    "in-progress",
+                    "review",
+                    "done",
+                    "cancelled",
+                ],
+            ),
+            sprint: status_list(
+                "sprint",
+                &["planning", "active", "review", "completed", "cancelled"],
+            ),
+            proposal: status_list(
+                "proposal",
+                &[
+                    "draft",
+                    "proposed",
+                    "accepted",
+                    "rejected",
+                    "superseded",
+                    "withdrawn",
+                ],
+            ),
+            contact: status_list("contact", &["active", "inactive"]),
         },
-        brand: resolve_brand(&base_dir, raw_brand),
+        brand: resolve_brand(&base_dir, raw_brand, site_name),
         configured_entities,
     };
 
     validate_status_config(&resolved.statuses)?;
 
     Ok(resolved)
+}
+
+/// Parse config YAML. A file that is empty or only comments yields all defaults.
+fn parse_raw_config(content: &str) -> Result<RawConfig, serde_yaml::Error> {
+    Ok(serde_yaml::from_str::<Option<RawConfig>>(content)?.unwrap_or_default())
 }
 
 fn validate_status_config(statuses: &StatusConfig) -> McResult<()> {
@@ -320,49 +310,37 @@ fn validate_status_config(statuses: &StatusConfig) -> McResult<()> {
     Ok(())
 }
 
-fn resolve_brand(root: &Path, raw: Option<BrandConfig>) -> ResolvedBrand {
-    let color_from_vec = |v: &[u8], default: [u8; 3]| -> [u8; 3] {
-        if v.len() >= 3 {
-            [v[0], v[1], v[2]]
-        } else {
-            default
+/// Resolve the brand section. The display name falls back from `brand.name`
+/// to `site.name` (what `mc init` writes) and finally to [`DEFAULT_BRAND_NAME`].
+fn resolve_brand(
+    root: &Path,
+    raw: Option<BrandConfig>,
+    site_name: Option<String>,
+) -> ResolvedBrand {
+    let color = |v: Option<Vec<u8>>, default: [u8; 3]| -> [u8; 3] {
+        match v.as_deref() {
+            Some([r, g, b, ..]) => [*r, *g, *b],
+            _ => default,
         }
     };
 
-    match raw {
-        Some(b) => {
-            let fonts_dir = b.fonts_dir.map(|p| root.join(p)).filter(|p| p.is_dir());
-            let logo = b.logo.map(|p| root.join(p)).filter(|p| p.is_file());
-            let custom_css = b.custom_css.map(|p| root.join(p)).filter(|p| p.is_file());
-            ResolvedBrand {
-                name: b.name.unwrap_or_else(|| "MissionControl".into()),
-                tagline: b.tagline.unwrap_or_default(),
-                fonts_dir,
-                font_name: b.font_name.unwrap_or_else(|| "LiberationSans".into()),
-                primary_color: b
-                    .primary_color
-                    .as_deref()
-                    .map(|v| color_from_vec(v, DEFAULT_PRIMARY))
-                    .unwrap_or(DEFAULT_PRIMARY),
-                accent_color: b
-                    .accent_color
-                    .as_deref()
-                    .map(|v| color_from_vec(v, DEFAULT_ACCENT))
-                    .unwrap_or(DEFAULT_ACCENT),
-                logo,
-                custom_css,
-            }
-        }
-        None => ResolvedBrand {
-            name: "MissionControl".into(),
-            tagline: String::new(),
-            fonts_dir: None,
-            font_name: "LiberationSans".into(),
-            primary_color: DEFAULT_PRIMARY,
-            accent_color: DEFAULT_ACCENT,
-            logo: None,
-            custom_css: None,
-        },
+    let b = raw.unwrap_or_default();
+    let name = b
+        .name
+        .map(|n| n.trim().to_string())
+        .filter(|n| !n.is_empty())
+        .or(site_name)
+        .unwrap_or_else(|| DEFAULT_BRAND_NAME.into());
+
+    ResolvedBrand {
+        name,
+        tagline: b.tagline.unwrap_or_default(),
+        fonts_dir: b.fonts_dir.map(|p| root.join(p)).filter(|p| p.is_dir()),
+        font_name: b.font_name.unwrap_or_else(|| "LiberationSans".into()),
+        primary_color: color(b.primary_color, DEFAULT_PRIMARY),
+        accent_color: color(b.accent_color, DEFAULT_ACCENT),
+        logo: b.logo.map(|p| root.join(p)).filter(|p| p.is_file()),
+        custom_css: b.custom_css.map(|p| root.join(p)).filter(|p| p.is_file()),
     }
 }
 
@@ -404,5 +382,83 @@ mod tests {
         s.task = vec![];
         let err = validate_status_config(&s).unwrap_err();
         assert!(err.to_string().contains("statuses.task must not be empty"));
+    }
+
+    fn write_config(yaml: &str) -> tempfile::TempDir {
+        let tmp = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir_all(tmp.path().join("config")).unwrap();
+        std::fs::write(tmp.path().join("config/config.yml"), yaml).unwrap();
+        tmp
+    }
+
+    fn load(yaml: &str) -> ResolvedConfig {
+        let tmp = write_config(yaml);
+        load_config(tmp.path(), RepoMode::Standalone).unwrap()
+    }
+
+    #[test]
+    fn test_brand_name_falls_back_to_site_name() {
+        let cfg = load("site:\n  name: headquarter\n  description: KB\n");
+        assert_eq!(cfg.brand.name, "headquarter");
+    }
+
+    #[test]
+    fn test_brand_name_wins_over_site_name() {
+        let cfg = load("site:\n  name: headquarter\nbrand:\n  name: EmAI\n");
+        assert_eq!(cfg.brand.name, "EmAI");
+    }
+
+    #[test]
+    fn test_brand_without_name_uses_site_name() {
+        let cfg = load("site:\n  name: Acme KB\nbrand:\n  primary_color: [1, 2, 3]\n");
+        assert_eq!(cfg.brand.name, "Acme KB");
+        assert_eq!(cfg.brand.primary_color, [1, 2, 3]);
+    }
+
+    #[test]
+    fn test_blank_names_fall_through_to_default() {
+        let cfg = load("site:\n  name: '  '\nbrand:\n  name: ''\n");
+        assert_eq!(cfg.brand.name, DEFAULT_BRAND_NAME);
+    }
+
+    #[test]
+    fn test_no_brand_no_site_uses_default() {
+        let cfg = load("paths:\n  tasks: tasks/\n");
+        assert_eq!(cfg.brand.name, DEFAULT_BRAND_NAME);
+        assert_eq!(cfg.brand.primary_color, DEFAULT_PRIMARY);
+        assert_eq!(cfg.brand.accent_color, DEFAULT_ACCENT);
+    }
+
+    #[test]
+    fn test_short_color_falls_back_to_default() {
+        let cfg = load("brand:\n  accent_color: [9, 9]\n");
+        assert_eq!(cfg.brand.accent_color, DEFAULT_ACCENT);
+    }
+
+    #[test]
+    fn test_empty_config_file_uses_defaults() {
+        let cfg = load("# only a comment\n");
+        assert_eq!(cfg.id_prefixes.task, "TASK");
+        assert_eq!(
+            cfg.statuses.task.first().map(String::as_str),
+            Some("backlog")
+        );
+        assert!(cfg.configured_entities.is_empty());
+    }
+
+    #[test]
+    fn test_custom_prefixes_and_statuses() {
+        let cfg = load("id_prefixes:\n  task: T\nstatuses:\n  task: [open, closed]\n");
+        assert_eq!(cfg.id_prefixes.task, "T");
+        assert_eq!(cfg.id_prefixes.customer, "CUST");
+        assert_eq!(cfg.statuses.task, vec!["open", "closed"]);
+        assert_eq!(cfg.statuses.contact, vec!["active", "inactive"]);
+    }
+
+    #[test]
+    fn test_parse_error_names_config_file() {
+        let tmp = write_config("paths: [unclosed\n");
+        let err = load_config(tmp.path(), RepoMode::Standalone).unwrap_err();
+        assert!(err.to_string().contains("config.yml"), "{err}");
     }
 }

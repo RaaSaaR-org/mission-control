@@ -1,4 +1,6 @@
 pub mod api;
+pub mod check;
+pub mod comment;
 pub mod export;
 pub mod index;
 pub mod init;

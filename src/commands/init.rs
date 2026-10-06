@@ -1,3 +1,4 @@
+use crate::cli::ui;
 use crate::error::{McError, McResult};
 use colored::*;
 use std::io::Write;
@@ -301,6 +302,9 @@ tools/mc/target/
 
 # Generated indexes (rebuilt by `mc index`)
 data/*.json
+
+# Lock file held by a running `mc api serve`
+.mc-api.lock
 
 # Temp files
 tmp/
@@ -647,9 +651,9 @@ pub fn run(
 
     // Write config
     let config_content = if project_mode {
-        PROJECT_CONFIG.replace("{name}", &repo_name)
+        PROJECT_CONFIG.replace("{name}", &yaml_scalar(&repo_name))
     } else {
-        FULL_CONFIG.replace("{name}", &repo_name)
+        FULL_CONFIG.replace("{name}", &yaml_scalar(&repo_name))
     };
     std::fs::create_dir_all(target.join("config"))?;
     std::fs::write(&config_path, config_content)?;
@@ -696,29 +700,36 @@ pub fn run(
             let status = Command::new("git").arg("init").current_dir(target).status();
             match status {
                 Ok(s) if s.success() => {
-                    println!("  {} git repository initialized", "✓".green());
+                    println!("  {} git repository initialized", ui::glyphs().ok.green());
                 }
                 Ok(s) => {
-                    eprintln!("  {} git init exited with {}", "⚠".yellow(), s);
+                    eprintln!(
+                        "  {} git init exited with {}",
+                        ui::glyphs().warn.yellow(),
+                        s
+                    );
                 }
                 Err(e) => {
                     eprintln!(
                         "  {} git init failed: {} (is git installed?)",
-                        "⚠".yellow(),
+                        ui::glyphs().warn.yellow(),
                         e
                     );
                 }
             }
         }
     } else {
-        println!("  {} .git already exists, skipping git init", "·".dimmed());
+        println!(
+            "  {} .git already exists, skipping git init",
+            ui::glyphs().sep.dimmed()
+        );
     }
 
     // Success
     println!();
     println!(
         "{} MissionControl repo initialized at {}",
-        "✓".green().bold(),
+        ui::glyphs().ok.green().bold(),
         target.display()
     );
     println!();
@@ -788,7 +799,7 @@ fn run_embedded(target: &Path, name: Option<&str>, force: bool, yes: bool) -> Mc
 
     // Write config (flat, not in config/ subdirectory)
     std::fs::create_dir_all(&mc_dir)?;
-    let config_content = EMBEDDED_CONFIG.replace("{name}", &repo_name);
+    let config_content = EMBEDDED_CONFIG.replace("{name}", &yaml_scalar(&repo_name));
     std::fs::write(&config_path, config_content)?;
 
     // Write templates
@@ -800,8 +811,12 @@ fn run_embedded(target: &Path, name: Option<&str>, force: bool, yes: bool) -> Mc
     write_if_missing_or_force(&templates_dir.join("sprint.md"), TEMPLATE_SPRINT, force)?;
     write_if_missing_or_force(&templates_dir.join("proposal.md"), TEMPLATE_PROPOSAL, force)?;
 
-    // Create .mc/.gitignore (only ignore generated index files)
-    write_if_missing_or_force(&mc_dir.join(".gitignore"), "data/*.json\n", force)?;
+    // Create .mc/.gitignore (generated index files and the API lock)
+    write_if_missing_or_force(
+        &mc_dir.join(".gitignore"),
+        "data/*.json\n.mc-api.lock\n",
+        force,
+    )?;
 
     // Remove .gitkeep from directories that now have content
     remove_gitkeep_if_nonempty(&templates_dir)?;
@@ -810,7 +825,7 @@ fn run_embedded(target: &Path, name: Option<&str>, force: bool, yes: bool) -> Mc
     println!();
     println!(
         "{} MissionControl embedded folder initialized at {}",
-        "✓".green().bold(),
+        ui::glyphs().ok.green().bold(),
         mc_dir.display()
     );
     println!();
@@ -826,6 +841,15 @@ fn run_embedded(target: &Path, name: Option<&str>, force: bool, yes: bool) -> Mc
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/// Render a string as a single-line YAML scalar, quoting it when needed so
+/// names like `Acme: Ops #1` don't corrupt the generated config.
+fn yaml_scalar(s: &str) -> String {
+    let one_line = s.replace(['\n', '\r'], " ");
+    serde_yaml::to_string(&serde_yaml::Value::String(one_line.trim().to_string()))
+        .map(|y| y.trim_end().to_string())
+        .unwrap_or_else(|_| format!("{:?}", one_line.trim()))
+}
 
 fn prompt_name(default: &str) -> McResult<String> {
     print!("  Repository name [{}]: ", default);
@@ -1051,6 +1075,26 @@ mod tests {
 
         let config = std::fs::read_to_string(root.join("config/config.yml")).unwrap();
         assert!(config.contains("name: Three"));
+    }
+
+    #[test]
+    fn test_init_name_with_yaml_special_chars() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        run_init(root, false, Some("Acme: Ops #1"), false).unwrap();
+
+        let cfg = resolve_config_after_init(root);
+        assert_eq!(cfg.brand.name, "Acme: Ops #1");
+    }
+
+    #[test]
+    fn test_init_site_name_becomes_brand_name() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        run_init(root, false, Some("Headquarter"), false).unwrap();
+
+        let cfg = resolve_config_after_init(root);
+        assert_eq!(cfg.brand.name, "Headquarter");
     }
 
     fn resolve_config_after_init(root: &Path) -> crate::config::ResolvedConfig {

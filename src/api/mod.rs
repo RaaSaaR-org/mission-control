@@ -1,7 +1,7 @@
 //! REST API for MissionControl.
 //!
 //! Exposes the entity surface (CRUD where supported, plus task move,
-//! validate, index) over HTTP/JSON. Mirrors the MCP tool surface so any
+//! checklists, comments, validate, index) over HTTP/JSON. Mirrors the MCP tool surface so any
 //! client that knows mc semantics can drive it without spawning a process
 //! per request.
 //!
@@ -20,8 +20,9 @@
 //! shows up, the next step is sharding by entity kind, then by repo subtree.
 //!
 //! Cross-process safety is enforced by an exclusive `flock` on
-//! `<repo>/.mc-api.lock` — a second `mc api serve` against the same repo
-//! fails fast at startup instead of handing out duplicate IDs.
+//! `<repo>/.mc-api.lock` (`<repo>/.mc/.mc-api.lock` when embedded) — a
+//! second `mc api serve` against the same repo fails fast at startup instead
+//! of handing out duplicate IDs.
 //!
 //! # Auth
 //!
@@ -154,6 +155,9 @@ impl Modify for SecurityAddon {
         handlers::entities::list_entities,
         handlers::entities::get_entity,
         handlers::entities::get_entity_raw,
+        handlers::notes::get_checklist,
+        handlers::notes::check_item,
+        handlers::notes::add_comment,
         handlers::tasks::list_tasks,
         handlers::tasks::move_task,
         handlers::creates::create_customer,
@@ -192,6 +196,13 @@ impl Modify for SecurityAddon {
         crate::api::schemas::CreateProposal,
         crate::api::schemas::CreateContact,
         crate::api::schemas::MoveTaskBody,
+        crate::api::schemas::CheckItemView,
+        crate::api::schemas::ChecklistResponse,
+        crate::api::schemas::CheckItemBody,
+        crate::api::schemas::CheckResult,
+        crate::api::schemas::AddCommentBody,
+        crate::api::schemas::CommentView,
+        crate::api::schemas::CommentResult,
     )),
     tags(
         (name = "meta", description = "Repository metadata (config, status)"),
@@ -238,6 +249,18 @@ pub fn build_router(cfg: ResolvedConfig, server_cfg: &ApiServerConfig) -> Router
         .route(
             "/v1/entities/{kind}/{id}/raw",
             get(handlers::entities::get_entity_raw),
+        )
+        .route(
+            "/v1/entities/{kind}/{id}/checklist",
+            get(handlers::notes::get_checklist),
+        )
+        .route(
+            "/v1/entities/{kind}/{id}/checklist/{item}",
+            post(handlers::notes::check_item),
+        )
+        .route(
+            "/v1/entities/{kind}/{id}/comments",
+            post(handlers::notes::add_comment),
         )
         // GET /v1/tasks lists with the full task filter set; POST creates.
         .route(

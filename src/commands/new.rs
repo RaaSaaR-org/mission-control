@@ -1,3 +1,12 @@
+//! `mc new <kind>`: entity creation.
+//!
+//! Every kind has an input struct (`CustomerInput`, `TaskInput`, ...) and a
+//! `create_*` function that validates it, renders the template and writes the
+//! files. The interactive CLI (`run`), the MCP server and the REST API all go
+//! through those functions; the `create_*_programmatic` wrappers keep the
+//! older string-based signatures working.
+
+use crate::cli::ui;
 use crate::cli::NewEntity;
 use crate::config::ResolvedConfig;
 use crate::entity::{self, EntityKind};
@@ -8,15 +17,183 @@ use crate::util;
 use colored::*;
 use serde_json::Value as JsonValue;
 use serde_yaml::Value;
-use std::collections::HashMap;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+
+/// Default AI agents for research topics.
+pub const DEFAULT_RESEARCH_AGENTS: [&str; 4] = ["claude", "gemini", "chatgpt", "perplexity"];
+/// Proposal types offered by the interactive prompt.
+pub const PROPOSAL_TYPES: [&str; 3] = ["architecture", "feature", "process"];
+/// Task priority used when none is given (3 = medium).
+pub const DEFAULT_PRIORITY: u32 = 3;
+
+// ---------------------------------------------------------------------------
+// Inputs and results
+// ---------------------------------------------------------------------------
+
+/// Fields for a new customer. `None` / empty values fall back to defaults.
+#[derive(Debug, Clone, Default)]
+pub struct CustomerInput {
+    pub name: String,
+    pub owner: Option<String>,
+    pub status: Option<String>,
+    pub tags: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ProjectInput {
+    pub name: String,
+    pub owner: Option<String>,
+    pub status: Option<String>,
+    /// Customer IDs (plain or `[[wiki-linked]]`).
+    pub customers: Vec<String>,
+    pub tags: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct MeetingInput {
+    pub title: String,
+    /// `YYYY-MM-DD`, defaults to today.
+    pub date: Option<String>,
+    /// `HH:MM`, defaults to `10:00`.
+    pub time: Option<String>,
+    /// e.g. `30m`, defaults to `30m`.
+    pub duration: Option<String>,
+    pub status: Option<String>,
+    pub tags: Vec<String>,
+    pub customers: Vec<String>,
+    pub projects: Vec<String>,
+    pub attendees: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ResearchInput {
+    pub title: String,
+    pub owner: Option<String>,
+    /// `None` uses [`DEFAULT_RESEARCH_AGENTS`]; `Some(vec![])` means no agents.
+    pub agents: Option<Vec<String>>,
+    pub tags: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct TaskInput {
+    pub title: String,
+    /// Scope the task to a project (stored under `projects/<PROJ>/tasks/`).
+    pub project: Option<String>,
+    /// Scope the task to a customer (used when no project is given).
+    pub customer: Option<String>,
+    pub owner: Option<String>,
+    pub status: Option<String>,
+    /// 1 (critical) to 4 (low), defaults to [`DEFAULT_PRIORITY`].
+    pub priority: Option<u32>,
+    pub tags: Vec<String>,
+    /// Sprint ID, e.g. `SPR-001`.
+    pub sprint: Option<String>,
+    pub depends_on: Vec<String>,
+    /// `YYYY-MM-DD`.
+    pub due_date: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct SprintInput {
+    pub title: String,
+    pub owner: Option<String>,
+    pub status: Option<String>,
+    pub goal: Option<String>,
+    /// `YYYY-MM-DD`, defaults to today.
+    pub start_date: Option<String>,
+    pub end_date: Option<String>,
+    pub projects: Vec<String>,
+    pub tags: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ProposalInput {
+    pub title: String,
+    pub author: Option<String>,
+    pub status: Option<String>,
+    /// Defaults to `architecture`.
+    pub proposal_type: Option<String>,
+    pub tags: Vec<String>,
+    /// ID of the proposal this one supersedes.
+    pub supersedes: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ContactInput {
+    pub name: String,
+    /// Customer ID the contact belongs to (required, must exist).
+    pub customer: String,
+    pub role: Option<String>,
+    pub email: Option<String>,
+    pub phone: Option<String>,
+    pub status: Option<String>,
+    pub tags: Vec<String>,
+}
+
+macro_rules! titled_input {
+    ($($ty:ident . $field:ident),* $(,)?) => {$(
+        impl $ty {
+            pub fn new(text: impl Into<String>) -> Self {
+                Self { $field: text.into(), ..Default::default() }
+            }
+        }
+    )*};
+}
+titled_input!(
+    CustomerInput.name,
+    ProjectInput.name,
+    MeetingInput.title,
+    ResearchInput.title,
+    TaskInput.title,
+    SprintInput.title,
+    ProposalInput.title,
+);
+
+impl ContactInput {
+    pub fn new(name: impl Into<String>, customer: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            customer: customer.into(),
+            ..Default::default()
+        }
+    }
+}
+
+/// A freshly created entity.
+#[derive(Debug, Clone)]
+pub struct Created {
+    pub kind: EntityKind,
+    pub id: String,
+    /// The entity's name or title.
+    pub name: String,
+    /// The entity directory (customers, projects, research, sprints) or file.
+    pub path: PathBuf,
+}
+
+impl Created {
+    /// `{"id", "name"|"title", "path"}` -- customers, projects and contacts use
+    /// `name`, everything else `title` (the shape MCP and API clients expect).
+    pub fn to_json(&self) -> JsonValue {
+        let name_key = match self.kind {
+            EntityKind::Customer | EntityKind::Project | EntityKind::Contact => "name",
+            _ => "title",
+        };
+        serde_json::json!({
+            "id": self.id,
+            name_key: self.name,
+            "path": self.path.display().to_string(),
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Validation and normalisation helpers
+// ---------------------------------------------------------------------------
 
 fn check_mode(kind: EntityKind, cfg: &ResolvedConfig) -> McResult<()> {
     if !cfg.entity_available(&kind) {
-        return Err(McError::NotAvailableInMode {
-            kind: kind.label().to_string(),
-        });
+        return Err(McError::not_available(kind, cfg));
     }
     Ok(())
 }
@@ -24,245 +201,136 @@ fn check_mode(kind: EntityKind, cfg: &ResolvedConfig) -> McResult<()> {
 fn validate_status(status: &str, kind: EntityKind, cfg: &ResolvedConfig) -> McResult<()> {
     let valid = kind.statuses(cfg);
     if !valid.iter().any(|s| s == status) {
-        return Err(McError::Other(format!(
-            "Invalid {} status '{}'. Valid statuses: {}",
-            kind.label(),
-            status,
-            valid.join(", ")
-        )));
+        return Err(McError::usage(
+            format!(
+                "Invalid {} status '{}'. Valid statuses: {}",
+                kind.label(),
+                status,
+                valid.join(", ")
+            ),
+            None,
+        ));
     }
     Ok(())
 }
 
 fn validate_name_not_empty(name: &str, kind: EntityKind) -> McResult<()> {
     if name.trim().is_empty() {
-        return Err(McError::Other(format!(
-            "{} name/title cannot be empty",
-            kind.label()
-        )));
+        return Err(McError::usage(
+            format!("{} name/title cannot be empty", kind.label()),
+            None,
+        ));
     }
     Ok(())
 }
 
-pub fn run(entity: &NewEntity, cfg: &ResolvedConfig, yes: bool) -> McResult<()> {
-    match entity {
-        NewEntity::Customer {
-            name,
-            owner,
-            status,
-            tags,
-        } => new_customer(
-            cfg,
-            name,
-            owner.as_deref(),
-            status.as_deref(),
-            tags.as_deref(),
-            yes,
-        ),
-        NewEntity::Project {
-            name,
-            owner,
-            status,
-            customers,
-            tags,
-        } => new_project(
-            cfg,
-            name,
-            owner.as_deref(),
-            status.as_deref(),
-            customers.as_deref(),
-            tags.as_deref(),
-            yes,
-        ),
-        NewEntity::Meeting {
-            title,
-            date,
-            time,
-            duration,
-            status,
-            tags,
-            customers,
-            projects,
-            attendees,
-        } => new_meeting(
-            cfg,
-            title,
-            date.as_deref(),
-            time.as_deref(),
-            duration.as_deref(),
-            status.as_deref(),
-            tags.as_deref(),
-            customers.as_deref(),
-            projects.as_deref(),
-            attendees.as_deref(),
-            yes,
-        ),
-        NewEntity::Research {
-            title,
-            owner,
-            agents,
-            tags,
-        } => new_research(
-            cfg,
-            title,
-            owner.as_deref(),
-            agents.as_deref(),
-            tags.as_deref(),
-            yes,
-        ),
-        NewEntity::Task {
-            title,
-            project,
-            customer,
-            owner,
-            status,
-            priority,
-            tags,
-            sprint,
-            depends_on,
-            due_date,
-        } => new_task(
-            cfg,
-            title,
-            project.as_deref(),
-            customer.as_deref(),
-            owner.as_deref(),
-            status.as_deref(),
-            *priority,
-            tags.as_deref(),
-            sprint.as_deref(),
-            depends_on.as_deref(),
-            due_date.as_deref(),
-            yes,
-        ),
-        NewEntity::Sprint {
-            title,
-            owner,
-            status,
-            goal,
-            start_date,
-            end_date,
-            projects,
-            tags,
-        } => new_sprint(
-            cfg,
-            title,
-            owner.as_deref(),
-            status.as_deref(),
-            goal.as_deref(),
-            start_date.as_deref(),
-            end_date.as_deref(),
-            projects.as_deref(),
-            tags.as_deref(),
-            yes,
-        ),
-        NewEntity::Proposal {
-            title,
-            author,
-            status,
-            proposal_type,
-            tags,
-            supersedes,
-        } => new_proposal(
-            cfg,
-            title,
-            author.as_deref(),
-            status.as_deref(),
-            proposal_type.as_deref(),
-            tags.as_deref(),
-            supersedes.as_deref(),
-            yes,
-        ),
-        NewEntity::Contact {
-            name,
-            customer,
-            role,
-            email,
-            phone,
-            status,
-            tags,
-        } => new_contact(
-            cfg,
-            name,
-            customer,
-            role.as_deref(),
-            email.as_deref(),
-            phone.as_deref(),
-            status.as_deref(),
-            tags.as_deref(),
-            yes,
-        ),
+/// Parse a strict `YYYY-MM-DD` date. chrono alone also accepts unpadded
+/// forms like `2026-1-5`, which would sort and name files inconsistently.
+fn validate_date(value: &str, field: &str) -> McResult<chrono::NaiveDate> {
+    chrono::NaiveDate::parse_from_str(value, "%Y-%m-%d")
+        .ok()
+        .filter(|d| d.format("%Y-%m-%d").to_string() == value)
+        .ok_or_else(|| {
+            McError::usage(
+                format!("Invalid {field} '{value}' (expected YYYY-MM-DD)"),
+                None,
+            )
+        })
+}
+
+fn validate_priority(priority: u32) -> McResult<()> {
+    if (1..=4).contains(&priority) {
+        Ok(())
+    } else {
+        Err(McError::usage(
+            format!(
+                "Invalid priority {priority} (expected 1-4: 1=critical, 2=high, 3=medium, 4=low)"
+            ),
+            None,
+        ))
     }
 }
 
-fn prompt_select(label: &str, options: &[String], default_idx: usize, yes: bool) -> String {
-    if yes || options.is_empty() {
-        return options.get(default_idx).cloned().unwrap_or_default();
-    }
-    let selection = dialoguer::Select::new()
-        .with_prompt(label)
-        .items(options)
-        .default(default_idx)
-        .interact_opt();
-    match selection {
-        Ok(Some(idx)) => options[idx].clone(),
-        _ => options.get(default_idx).cloned().unwrap_or_default(),
+/// Trimmed value, or `None` when missing or blank.
+fn present(v: &Option<String>) -> Option<&str> {
+    v.as_deref().map(str::trim).filter(|s| !s.is_empty())
+}
+
+/// The given status (validated) or the kind's first configured status.
+fn resolve_status(
+    status: &Option<String>,
+    kind: EntityKind,
+    cfg: &ResolvedConfig,
+) -> McResult<String> {
+    let status = match present(status) {
+        Some(s) => s.to_string(),
+        None => kind.statuses(cfg).first().cloned().unwrap_or_default(),
+    };
+    validate_status(&status, kind, cfg)?;
+    Ok(status)
+}
+
+/// Cross-reference IDs without wiki-link brackets or blanks.
+fn clean_refs(refs: &[String]) -> Vec<String> {
+    refs.iter()
+        .map(|r| frontmatter::strip_wikilink(r.trim()).trim().to_string())
+        .filter(|r| !r.is_empty())
+        .collect()
+}
+
+fn clean_ref(r: &Option<String>) -> Option<String> {
+    present(r)
+        .map(|r| frontmatter::strip_wikilink(r).trim().to_string())
+        .filter(|r| !r.is_empty())
+}
+
+/// Slug for file and directory names; never empty (`untitled` fallback).
+fn slug_for(name: &str) -> String {
+    let slug = util::slugify(name);
+    if slug.is_empty() {
+        "untitled".to_string()
+    } else {
+        slug
     }
 }
 
-fn prompt_input(label: &str, default: &str, yes: bool) -> String {
-    if yes {
-        return default.to_string();
+/// `dir/stem.md`, or `dir/stem-2.md`, `-3`, ... if that file already exists.
+fn unique_md_path(dir: &Path, stem: &str) -> PathBuf {
+    let mut path = dir.join(format!("{stem}.md"));
+    let mut n = 2;
+    while path.exists() {
+        path = dir.join(format!("{stem}-{n}.md"));
+        n += 1;
     }
-    let result = dialoguer::Input::<String>::new()
-        .with_prompt(label)
-        .default(default.to_string())
-        .interact_text();
-    match result {
-        Ok(val) => val,
-        _ => default.to_string(),
-    }
+    path
 }
 
-fn prompt_input_optional(label: &str, yes: bool) -> String {
-    if yes {
-        return String::new();
+/// Find an entity directory (`<base>/<ID>-<slug>`) by ID.
+fn find_entity_dir(base: &Path, id: &str) -> McResult<PathBuf> {
+    let id = frontmatter::strip_wikilink(id.trim());
+    if base.is_dir() && !id.is_empty() {
+        let dir_prefix = format!("{}-", id);
+        let mut entries: Vec<_> = fs::read_dir(base)?.filter_map(|e| e.ok()).collect();
+        entries.sort_by_key(|e| e.file_name());
+        for entry in entries {
+            if entry.file_type()?.is_dir()
+                && entry.file_name().to_string_lossy().starts_with(&dir_prefix)
+            {
+                return Ok(entry.path());
+            }
+        }
     }
-    let result = dialoguer::Input::<String>::new()
-        .with_prompt(format!("{} (blank to skip)", label))
-        .allow_empty(true)
-        .interact_text();
-    result.unwrap_or_default()
+    Err(McError::EntityNotFound(id.to_string()))
 }
 
-fn print_summary(kind: &str, fields: &[(&str, &str)]) {
-    println!();
-    println!("  {} {}", "New".bold(), kind.bold());
-    println!("  {}", "────────────────────────────────────".dimmed());
-    for (key, value) in fields {
-        let display = if value.is_empty() {
-            "(none)".dimmed().to_string()
-        } else {
-            value.to_string()
-        };
-        println!("  {:<14} {}", format!("{}:", key).dimmed(), display);
-    }
-    println!("  {}", "────────────────────────────────────".dimmed());
+/// Find a project directory by its ID (e.g. "PROJ-001").
+fn find_project_dir(cfg: &ResolvedConfig, proj_id: &str) -> McResult<PathBuf> {
+    find_entity_dir(&cfg.projects_dir, proj_id)
 }
 
-fn confirm_creation(yes: bool) -> bool {
-    if yes {
-        return true;
-    }
-    // Auto-confirm in non-interactive environments (pipes, agent shells, CI)
-    if !std::io::IsTerminal::is_terminal(&std::io::stdin()) {
-        return true;
-    }
-    let result = dialoguer::Confirm::new()
-        .with_prompt("Create this entity?")
-        .default(true)
-        .interact();
-    result.unwrap_or_default()
+/// Find a customer directory by its ID (e.g. "CUST-001").
+pub fn find_customer_dir(cfg: &ResolvedConfig, cust_id: &str) -> McResult<PathBuf> {
+    find_entity_dir(&cfg.customers_dir, cust_id)
 }
 
 /// Create a directory with a .gitkeep file so git tracks it.
@@ -272,1091 +340,469 @@ fn mkdir_with_gitkeep(path: &Path) -> McResult<()> {
     Ok(())
 }
 
-fn new_customer(
-    cfg: &ResolvedConfig,
-    name: &str,
-    owner: Option<&str>,
-    status: Option<&str>,
-    tags: Option<&str>,
-    yes: bool,
-) -> McResult<()> {
-    check_mode(EntityKind::Customer, cfg)?;
-    validate_name_not_empty(name, EntityKind::Customer)?;
-    let id = entity::next_id(EntityKind::Customer, cfg)?;
-    let slug = util::slugify(name);
-    let today = util::today_str();
+// ---------------------------------------------------------------------------
+// Frontmatter building and rendering
+// ---------------------------------------------------------------------------
 
-    let owner = match owner {
-        Some(o) => o.to_string(),
-        None => prompt_input("Owner", "", yes),
-    };
-    let status = match status {
-        Some(s) => s.to_string(),
-        None => prompt_select("Status", &cfg.statuses.customer, 0, yes),
-    };
-    validate_status(&status, EntityKind::Customer, cfg)?;
-    let tags: Vec<String> = match tags {
-        Some(t) => util::parse_comma_list(t),
-        None => {
-            let input = prompt_input_optional("Tags (comma-separated)", yes);
-            if input.is_empty() {
-                vec![]
-            } else {
-                util::parse_comma_list(&input)
-            }
-        }
-    };
-
-    let tags_display = tags.join(", ");
-    print_summary(
-        "customer",
-        &[
-            ("ID", &id.to_string()),
-            ("Name", name),
-            ("Owner", &owner),
-            ("Status", &status),
-            ("Tags", &tags_display),
-        ],
-    );
-
-    if !confirm_creation(yes) {
-        println!("{}", "Cancelled.".dimmed());
-        return Ok(());
-    }
-
-    // Load template
-    let (tmpl_fm, tmpl_body) = template::load_template(&cfg.templates_dir, "customer")?;
-
-    // Build fields
-    let mut fields = HashMap::new();
-    fields.insert("id".into(), Value::String(id.to_string()));
-    fields.insert(
-        "aliases".into(),
-        Value::Sequence(vec![Value::String(id.to_string())]),
-    );
-    fields.insert("name".into(), Value::String(name.to_string()));
-    fields.insert("slug".into(), Value::String(slug.clone()));
-    fields.insert("status".into(), Value::String(status));
-    fields.insert("owner".into(), Value::String(owner));
-    fields.insert(
-        "tags".into(),
-        Value::Sequence(tags.iter().map(|t| Value::String(t.clone())).collect()),
-    );
-    fields.insert("projects".into(), Value::Sequence(vec![]));
-    fields.insert("contracts".into(), Value::Sequence(vec![]));
-    fields.insert("notes".into(), Value::String(String::new()));
-    fields.insert("created".into(), Value::String(today.clone()));
-    fields.insert("updated".into(), Value::String(today));
-
-    let mut placeholders = HashMap::new();
-    placeholders.insert("name".into(), name.to_string());
-
-    let (fm, body) = template::render_template(tmpl_fm, &tmpl_body, &fields, &placeholders);
-    let doc = frontmatter::serialize_document(&fm, &body);
-
-    // Create directory structure
-    let dir_name = format!("{}-{}", id, slug);
-    let dir_path = cfg.customers_dir.join(&dir_name);
-    fs::create_dir_all(&dir_path)?;
-    util::atomic_write(&dir_path.join(format!("{}.md", id)), doc.as_bytes())?;
-    mkdir_with_gitkeep(&dir_path.join("contacts"))?;
-    mkdir_with_gitkeep(&dir_path.join("contracts"))?;
-    mkdir_with_gitkeep(&dir_path.join("meetings"))?;
-    mkdir_with_gitkeep(&dir_path.join("projects"))?;
-    mkdir_with_gitkeep(&dir_path.join("assets"))?;
-
-    println!(
-        "{} Created customer {} ({}) at {}",
-        "✓".green().bold(),
-        id.to_string().cyan().bold(),
-        name.bold(),
-        dir_path.display().to_string().dimmed()
-    );
-
-    Ok(())
+fn s(v: impl Into<String>) -> Value {
+    Value::String(v.into())
 }
 
-fn new_project(
-    cfg: &ResolvedConfig,
-    name: &str,
-    owner: Option<&str>,
-    status: Option<&str>,
-    customers: Option<&str>,
-    tags: Option<&str>,
-    yes: bool,
-) -> McResult<()> {
-    check_mode(EntityKind::Project, cfg)?;
-    validate_name_not_empty(name, EntityKind::Project)?;
-    let id = entity::next_id(EntityKind::Project, cfg)?;
-    let slug = util::slugify(name);
-    let today = util::today_str();
-
-    let owner = match owner {
-        Some(o) => o.to_string(),
-        None => prompt_input("Owner", "", yes),
-    };
-    let status = match status {
-        Some(s) => s.to_string(),
-        None => prompt_select("Status", &cfg.statuses.project, 0, yes),
-    };
-    validate_status(&status, EntityKind::Project, cfg)?;
-    let tags: Vec<String> = match tags {
-        Some(t) => util::parse_comma_list(t),
-        None => {
-            let input = prompt_input_optional("Tags (comma-separated)", yes);
-            if input.is_empty() {
-                vec![]
-            } else {
-                util::parse_comma_list(&input)
-            }
-        }
-    };
-    let customers: Vec<String> = match customers {
-        Some(c) => util::parse_comma_list(c),
-        None => {
-            let input = prompt_input_optional("Link customers (comma-separated IDs)", yes);
-            if input.is_empty() {
-                vec![]
-            } else {
-                util::parse_comma_list(&input)
-            }
-        }
-    };
-
-    let tags_display = tags.join(", ");
-    let customers_display = customers.join(", ");
-    print_summary(
-        "project",
-        &[
-            ("ID", &id.to_string()),
-            ("Name", name),
-            ("Owner", &owner),
-            ("Status", &status),
-            ("Tags", &tags_display),
-            ("Customers", &customers_display),
-        ],
-    );
-
-    if !confirm_creation(yes) {
-        println!("{}", "Cancelled.".dimmed());
-        return Ok(());
-    }
-
-    let (tmpl_fm, tmpl_body) = template::load_template(&cfg.templates_dir, "project")?;
-
-    let mut fields = HashMap::new();
-    fields.insert("id".into(), Value::String(id.to_string()));
-    fields.insert(
-        "aliases".into(),
-        Value::Sequence(vec![Value::String(id.to_string())]),
-    );
-    fields.insert("name".into(), Value::String(name.to_string()));
-    fields.insert("slug".into(), Value::String(slug.clone()));
-    fields.insert("status".into(), Value::String(status));
-    fields.insert("owner".into(), Value::String(owner));
-    fields.insert(
-        "customers".into(),
-        Value::Sequence(
-            customers
-                .iter()
-                .map(|c| Value::String(frontmatter::wrap_wikilink(c)))
-                .collect(),
-        ),
-    );
-    fields.insert(
-        "tags".into(),
-        Value::Sequence(tags.iter().map(|t| Value::String(t.clone())).collect()),
-    );
-    fields.insert("start_date".into(), Value::String(today.clone()));
-    fields.insert("target_date".into(), Value::String(String::new()));
-    fields.insert("created".into(), Value::String(today.clone()));
-    fields.insert("updated".into(), Value::String(today));
-
-    let mut placeholders = HashMap::new();
-    placeholders.insert("name".into(), name.to_string());
-
-    let (fm, body) = template::render_template(tmpl_fm, &tmpl_body, &fields, &placeholders);
-    let doc = frontmatter::serialize_document(&fm, &body);
-
-    let dir_name = format!("{}-{}", id, slug);
-    let dir_path = cfg.projects_dir.join(&dir_name);
-    fs::create_dir_all(&dir_path)?;
-    util::atomic_write(&dir_path.join(format!("{}.md", id)), doc.as_bytes())?;
-    fs::write(
-        dir_path.join("roadmap.md"),
-        format!("# {} -- Roadmap\n", name),
-    )?;
-    fs::write(
-        dir_path.join("backlog.md"),
-        format!("# {} -- Backlog\n", name),
-    )?;
-    mkdir_with_gitkeep(&dir_path.join("specs"))?;
-    mkdir_with_gitkeep(&dir_path.join("releases"))?;
-    mkdir_with_gitkeep(&dir_path.join("infra"))?;
-
-    println!(
-        "{} Created project {} ({}) at {}",
-        "✓".green().bold(),
-        id.to_string().cyan().bold(),
-        name.bold(),
-        dir_path.display().to_string().dimmed()
-    );
-
-    Ok(())
+fn list(items: &[String]) -> Value {
+    Value::Sequence(items.iter().map(|i| s(i.as_str())).collect())
 }
 
-#[allow(clippy::too_many_arguments)]
-fn new_meeting(
+fn links(items: &[String]) -> Value {
+    Value::Sequence(
+        items
+            .iter()
+            .map(|i| s(frontmatter::wrap_wikilink(i)))
+            .collect(),
+    )
+}
+
+/// Frontmatter fields set on every entity: `id` and `aliases: [id]`.
+fn id_fields(id: &str) -> Vec<(String, Value)> {
+    vec![
+        ("id".into(), s(id)),
+        ("aliases".into(), Value::Sequence(vec![s(id)])),
+    ]
+}
+
+/// Load `templates/<name>.md`, overlay `fields`, fill `{{ key }}` placeholders.
+fn render(
     cfg: &ResolvedConfig,
-    title: &str,
-    date: Option<&str>,
-    time: Option<&str>,
-    duration: Option<&str>,
-    status: Option<&str>,
-    tags: Option<&str>,
-    customers: Option<&str>,
-    projects: Option<&str>,
-    attendees: Option<&str>,
-    yes: bool,
-) -> McResult<()> {
-    validate_name_not_empty(title, EntityKind::Meeting)?;
-    let id = entity::next_id(EntityKind::Meeting, cfg)?;
-    let date = date.unwrap_or(&util::today_str()).to_string();
-    let slug = util::slugify(title);
+    template_name: &str,
+    fields: &[(String, Value)],
+    placeholders: &[(&str, &str)],
+) -> McResult<String> {
+    let (tmpl_fm, tmpl_body) = template::load_template(&cfg.templates_dir, template_name)?;
+    let (fm, body) = template::render_template_ordered(tmpl_fm, &tmpl_body, fields, placeholders);
+    Ok(frontmatter::serialize_document(&fm, &body))
+}
 
-    let time = match time {
-        Some(t) => t.to_string(),
-        None => prompt_input("Time (HH:MM)", "10:00", yes),
-    };
-    let duration = match duration {
-        Some(d) => d.to_string(),
-        None => prompt_input("Duration", "30m", yes),
-    };
-    let status = match status {
-        Some(s) => s.to_string(),
-        None => prompt_select("Status", &cfg.statuses.meeting, 0, yes),
-    };
-    validate_status(&status, EntityKind::Meeting, cfg)?;
-    let tags: Vec<String> = match tags {
-        Some(t) => util::parse_comma_list(t),
-        None => {
-            let input = prompt_input_optional("Tags (comma-separated)", yes);
-            if input.is_empty() {
-                vec![]
-            } else {
-                util::parse_comma_list(&input)
-            }
-        }
-    };
-    let customers: Vec<String> = match customers {
-        Some(c) => util::parse_comma_list(c),
-        None => {
-            let input = prompt_input_optional("Link customers (comma-separated IDs)", yes);
-            if input.is_empty() {
-                vec![]
-            } else {
-                util::parse_comma_list(&input)
-            }
-        }
-    };
-    let projects: Vec<String> = match projects {
-        Some(p) => util::parse_comma_list(p),
-        None => {
-            let input = prompt_input_optional("Link projects (comma-separated IDs)", yes);
-            if input.is_empty() {
-                vec![]
-            } else {
-                util::parse_comma_list(&input)
-            }
-        }
-    };
+/// Write `<dir>/<id>.md` inside a fresh `<base>/<id>-<slug>/` directory.
+fn write_entity_dir(base: &Path, id: &str, slug: &str, doc: &str) -> McResult<PathBuf> {
+    let dir = base.join(format!("{id}-{slug}"));
+    fs::create_dir_all(&dir)?;
+    util::atomic_write(&dir.join(format!("{id}.md")), doc.as_bytes())?;
+    Ok(dir)
+}
 
-    let attendees: Vec<String> = attendees.map(util::parse_comma_list).unwrap_or_default();
+// ---------------------------------------------------------------------------
+// Creation (no prompts, no printing)
+// ---------------------------------------------------------------------------
 
-    let tags_display = tags.join(", ");
-    let customers_display = customers.join(", ");
-    let projects_display = projects.join(", ");
-    let attendees_display = attendees.join(", ");
-    print_summary(
-        "meeting",
-        &[
-            ("ID", &id.to_string()),
-            ("Title", title),
-            ("Date", &date),
-            ("Time", &time),
-            ("Duration", &duration),
-            ("Status", &status),
-            ("Tags", &tags_display),
-            ("Customers", &customers_display),
-            ("Projects", &projects_display),
-            ("Attendees", &attendees_display),
-        ],
-    );
+pub fn create_customer(cfg: &ResolvedConfig, input: &CustomerInput) -> McResult<Created> {
+    let kind = EntityKind::Customer;
+    check_mode(kind, cfg)?;
+    validate_name_not_empty(&input.name, kind)?;
+    let name = input.name.trim();
+    let status = resolve_status(&input.status, kind, cfg)?;
+    let id = entity::next_id(kind, cfg)?.to_string();
+    let slug = slug_for(name);
+    let today = util::today_str();
 
-    if !confirm_creation(yes) {
-        println!("{}", "Cancelled.".dimmed());
-        return Ok(());
+    let mut fields = id_fields(&id);
+    fields.extend([
+        ("name".into(), s(name)),
+        ("slug".into(), s(slug.as_str())),
+        ("status".into(), s(status)),
+        ("owner".into(), s(present(&input.owner).unwrap_or(""))),
+        ("tags".into(), list(&input.tags)),
+        ("projects".into(), Value::Sequence(vec![])),
+        ("contracts".into(), Value::Sequence(vec![])),
+        ("notes".into(), s("")),
+        ("created".into(), s(today.as_str())),
+        ("updated".into(), s(today)),
+    ]);
+    let doc = render(cfg, "customer", &fields, &[("name", name), ("id", &id)])?;
+
+    let dir = write_entity_dir(&cfg.customers_dir, &id, &slug, &doc)?;
+    for sub in ["contacts", "contracts", "meetings", "projects", "assets"] {
+        mkdir_with_gitkeep(&dir.join(sub))?;
     }
+    Ok(Created {
+        kind,
+        id,
+        name: name.to_string(),
+        path: dir,
+    })
+}
 
-    let (tmpl_fm, tmpl_body) = template::load_template(&cfg.templates_dir, "meeting")?;
+pub fn create_project(cfg: &ResolvedConfig, input: &ProjectInput) -> McResult<Created> {
+    let kind = EntityKind::Project;
+    check_mode(kind, cfg)?;
+    validate_name_not_empty(&input.name, kind)?;
+    let name = input.name.trim();
+    let status = resolve_status(&input.status, kind, cfg)?;
+    let id = entity::next_id(kind, cfg)?.to_string();
+    let slug = slug_for(name);
+    let today = util::today_str();
 
-    let mut fields = HashMap::new();
-    fields.insert("id".into(), Value::String(id.to_string()));
-    fields.insert(
-        "aliases".into(),
-        Value::Sequence(vec![Value::String(id.to_string())]),
-    );
-    fields.insert("title".into(), Value::String(title.to_string()));
-    fields.insert("date".into(), Value::String(date.clone()));
-    fields.insert("time".into(), Value::String(time));
-    fields.insert("duration".into(), Value::String(duration));
-    fields.insert(
-        "tags".into(),
-        Value::Sequence(tags.iter().map(|t| Value::String(t.clone())).collect()),
-    );
-    fields.insert(
-        "customers".into(),
-        Value::Sequence(
-            customers
-                .iter()
-                .map(|c| Value::String(frontmatter::wrap_wikilink(c)))
-                .collect(),
+    let mut fields = id_fields(&id);
+    fields.extend([
+        ("name".into(), s(name)),
+        ("slug".into(), s(slug.as_str())),
+        ("status".into(), s(status)),
+        ("owner".into(), s(present(&input.owner).unwrap_or(""))),
+        ("customers".into(), links(&clean_refs(&input.customers))),
+        ("tags".into(), list(&input.tags)),
+        ("start_date".into(), s(today.as_str())),
+        ("target_date".into(), s("")),
+        ("created".into(), s(today.as_str())),
+        ("updated".into(), s(today)),
+    ]);
+    let doc = render(cfg, "project", &fields, &[("name", name), ("id", &id)])?;
+
+    let dir = write_entity_dir(&cfg.projects_dir, &id, &slug, &doc)?;
+    fs::write(dir.join("roadmap.md"), format!("# {} -- Roadmap\n", name))?;
+    fs::write(dir.join("backlog.md"), format!("# {} -- Backlog\n", name))?;
+    for sub in ["specs", "releases", "infra"] {
+        mkdir_with_gitkeep(&dir.join(sub))?;
+    }
+    Ok(Created {
+        kind,
+        id,
+        name: name.to_string(),
+        path: dir,
+    })
+}
+
+pub fn create_meeting(cfg: &ResolvedConfig, input: &MeetingInput) -> McResult<Created> {
+    let kind = EntityKind::Meeting;
+    validate_name_not_empty(&input.title, kind)?;
+    let title = input.title.trim();
+    let date = match present(&input.date) {
+        Some(d) => {
+            // The date becomes part of the file name -- never trust it unchecked.
+            validate_date(d, "meeting date")?;
+            d.to_string()
+        }
+        None => util::today_str(),
+    };
+    let status = resolve_status(&input.status, kind, cfg)?;
+    let id = entity::next_id(kind, cfg)?.to_string();
+
+    let mut fields = id_fields(&id);
+    fields.extend([
+        ("title".into(), s(title)),
+        ("date".into(), s(date.as_str())),
+        ("time".into(), s(present(&input.time).unwrap_or("10:00"))),
+        (
+            "duration".into(),
+            s(present(&input.duration).unwrap_or("30m")),
         ),
-    );
-    fields.insert(
-        "projects".into(),
-        Value::Sequence(
-            projects
-                .iter()
-                .map(|p| Value::String(frontmatter::wrap_wikilink(p)))
-                .collect(),
-        ),
-    );
-    fields.insert(
-        "attendees".into(),
-        Value::Sequence(attendees.iter().map(|a| Value::String(a.clone())).collect()),
-    );
-    fields.insert("status".into(), Value::String(status));
+        ("tags".into(), list(&input.tags)),
+        ("customers".into(), links(&clean_refs(&input.customers))),
+        ("projects".into(), links(&clean_refs(&input.projects))),
+        ("attendees".into(), list(&input.attendees)),
+        ("status".into(), s(status)),
+    ]);
+    let doc = render(cfg, "meeting", &fields, &[("title", title), ("id", &id)])?;
 
-    let mut placeholders = HashMap::new();
-    placeholders.insert("title".into(), title.to_string());
-
-    let (fm, body) = template::render_template(tmpl_fm, &tmpl_body, &fields, &placeholders);
-    let doc = frontmatter::serialize_document(&fm, &body);
-
-    let filename = format!("{}-{}.md", date, slug);
-    let file_path = cfg.meetings_dir.join(&filename);
     fs::create_dir_all(&cfg.meetings_dir)?;
-    util::atomic_write(&file_path, doc.as_bytes())?;
-
-    println!(
-        "{} Created meeting {} ({}) at {}",
-        "✓".green().bold(),
-        id.to_string().cyan().bold(),
-        title.bold(),
-        file_path.display().to_string().dimmed()
-    );
-
-    Ok(())
+    // Two meetings with the same date and title must not overwrite each other.
+    let path = unique_md_path(&cfg.meetings_dir, &format!("{}-{}", date, slug_for(title)));
+    util::atomic_write(&path, doc.as_bytes())?;
+    Ok(Created {
+        kind,
+        id,
+        name: title.to_string(),
+        path,
+    })
 }
 
-fn new_research(
-    cfg: &ResolvedConfig,
-    title: &str,
-    owner: Option<&str>,
-    agents: Option<&str>,
-    tags: Option<&str>,
-    yes: bool,
-) -> McResult<()> {
-    validate_name_not_empty(title, EntityKind::Research)?;
-    let id = entity::next_id(EntityKind::Research, cfg)?;
-    let slug = util::slugify(title);
+pub fn create_research(cfg: &ResolvedConfig, input: &ResearchInput) -> McResult<Created> {
+    let kind = EntityKind::Research;
+    validate_name_not_empty(&input.title, kind)?;
+    let title = input.title.trim();
+    let agents: Vec<String> = match &input.agents {
+        Some(a) => a
+            .iter()
+            .map(|a| a.trim().to_string())
+            .filter(|a| !a.is_empty())
+            .collect(),
+        None => DEFAULT_RESEARCH_AGENTS
+            .iter()
+            .map(|a| a.to_string())
+            .collect(),
+    };
+    let id = entity::next_id(kind, cfg)?.to_string();
+    let slug = slug_for(title);
     let today = util::today_str();
-
-    let owner = match owner {
-        Some(o) => o.to_string(),
-        None => prompt_input("Owner", "", yes),
-    };
-    let agents: Vec<String> = agents.map(util::parse_comma_list).unwrap_or_else(|| {
-        vec![
-            "claude".into(),
-            "gemini".into(),
-            "chatgpt".into(),
-            "perplexity".into(),
-        ]
-    });
-    let tags: Vec<String> = match tags {
-        Some(t) => util::parse_comma_list(t),
-        None => {
-            let input = prompt_input_optional("Tags (comma-separated)", yes);
-            if input.is_empty() {
-                vec![]
-            } else {
-                util::parse_comma_list(&input)
-            }
-        }
+    let status = if kind.statuses(cfg).iter().any(|s| s == "draft") {
+        "draft".to_string()
+    } else {
+        resolve_status(&None, kind, cfg)?
     };
 
-    let tags_display = tags.join(", ");
-    let agents_display = agents.join(", ");
-    print_summary(
-        "research",
-        &[
-            ("ID", &id.to_string()),
-            ("Title", title),
-            ("Owner", &owner),
-            ("Agents", &agents_display),
-            ("Tags", &tags_display),
-        ],
-    );
+    let mut fields = id_fields(&id);
+    fields.extend([
+        ("title".into(), s(title)),
+        ("slug".into(), s(slug.as_str())),
+        ("status".into(), s(status)),
+        ("owner".into(), s(present(&input.owner).unwrap_or(""))),
+        ("customers".into(), Value::Sequence(vec![])),
+        ("projects".into(), Value::Sequence(vec![])),
+        ("tags".into(), list(&input.tags)),
+        ("created".into(), s(today.as_str())),
+        ("updated".into(), s(today)),
+        ("agents".into(), list(&agents)),
+        ("summary".into(), s("")),
+    ]);
+    let doc = render(cfg, "research", &fields, &[("title", title), ("id", &id)])?;
 
-    if !confirm_creation(yes) {
-        println!("{}", "Cancelled.".dimmed());
-        return Ok(());
+    let dir = write_entity_dir(&cfg.research_dir, &id, &slug, &doc)?;
+    // Agent names come from user input: slugify them so they can't escape the
+    // research directory (e.g. "../../etc").
+    let mut agent_dirs: Vec<String> = agents.iter().map(|a| util::slugify(a)).collect();
+    agent_dirs.retain(|d| !d.is_empty() && d != "final");
+    agent_dirs.sort();
+    agent_dirs.dedup();
+    for agent_dir in &agent_dirs {
+        mkdir_with_gitkeep(&dir.join(agent_dir))?;
     }
-
-    let (tmpl_fm, tmpl_body) = template::load_template(&cfg.templates_dir, "research")?;
-
-    let mut fields = HashMap::new();
-    fields.insert("id".into(), Value::String(id.to_string()));
-    fields.insert(
-        "aliases".into(),
-        Value::Sequence(vec![Value::String(id.to_string())]),
-    );
-    fields.insert("title".into(), Value::String(title.to_string()));
-    fields.insert("slug".into(), Value::String(slug.clone()));
-    fields.insert("status".into(), Value::String("draft".into()));
-    fields.insert("owner".into(), Value::String(owner));
-    fields.insert("customers".into(), Value::Sequence(vec![]));
-    fields.insert("projects".into(), Value::Sequence(vec![]));
-    fields.insert(
-        "tags".into(),
-        Value::Sequence(tags.iter().map(|t| Value::String(t.clone())).collect()),
-    );
-    fields.insert("created".into(), Value::String(today.clone()));
-    fields.insert("updated".into(), Value::String(today));
-    fields.insert(
-        "agents".into(),
-        Value::Sequence(agents.iter().map(|a| Value::String(a.clone())).collect()),
-    );
-    fields.insert("summary".into(), Value::String(String::new()));
-
-    let mut placeholders = HashMap::new();
-    placeholders.insert("title".into(), title.to_string());
-
-    let (fm, body) = template::render_template(tmpl_fm, &tmpl_body, &fields, &placeholders);
-    let doc = frontmatter::serialize_document(&fm, &body);
-
-    let dir_name = format!("{}-{}", id, slug);
-    let dir_path = cfg.research_dir.join(&dir_name);
-    fs::create_dir_all(&dir_path)?;
-    util::atomic_write(&dir_path.join(format!("{}.md", id)), doc.as_bytes())?;
-
-    // Create agent subdirectories
-    for agent in &agents {
-        mkdir_with_gitkeep(&dir_path.join(agent))?;
-    }
-    mkdir_with_gitkeep(&dir_path.join("final"))?;
-
-    println!(
-        "{} Created research {} ({}) at {}",
-        "✓".green().bold(),
-        id.to_string().cyan().bold(),
-        title.bold(),
-        dir_path.display().to_string().dimmed()
-    );
-
-    Ok(())
+    mkdir_with_gitkeep(&dir.join("final"))?;
+    Ok(Created {
+        kind,
+        id,
+        name: title.to_string(),
+        path: dir,
+    })
 }
 
-#[allow(clippy::too_many_arguments)]
-fn new_task(
-    cfg: &ResolvedConfig,
-    title: &str,
-    project: Option<&str>,
-    customer: Option<&str>,
-    owner: Option<&str>,
-    status: Option<&str>,
-    priority: Option<u32>,
-    tags: Option<&str>,
-    sprint: Option<&str>,
-    depends_on: Option<&str>,
-    due_date: Option<&str>,
-    yes: bool,
-) -> McResult<()> {
-    validate_name_not_empty(title, EntityKind::Task)?;
-    let id = entity::next_id(EntityKind::Task, cfg)?;
-    let slug = util::slugify(title);
-    let today = util::today_str();
-
-    let owner = match owner {
-        Some(o) => o.to_string(),
-        None => prompt_input("Owner", "", yes),
-    };
-    let status = match status {
-        Some(s) => s.to_string(),
-        None => prompt_select("Status", &cfg.statuses.task, 0, yes),
-    };
-    validate_status(&status, EntityKind::Task, cfg)?;
-    let priority = priority.unwrap_or(3);
-    let tags: Vec<String> = match tags {
-        Some(t) => util::parse_comma_list(t),
-        None => {
-            let input = prompt_input_optional("Tags (comma-separated)", yes);
-            if input.is_empty() {
-                vec![]
-            } else {
-                util::parse_comma_list(&input)
-            }
-        }
-    };
-    let sprint = sprint.unwrap_or("").to_string();
-    let depends_on: Vec<String> = depends_on.map(util::parse_comma_list).unwrap_or_default();
-    let due_date = due_date.unwrap_or("").to_string();
-
-    // Determine project/customer lists
-    let projects: Vec<String> = project.map(|p| vec![p.to_string()]).unwrap_or_default();
-    let customers: Vec<String> = customer.map(|c| vec![c.to_string()]).unwrap_or_default();
-
-    let tags_display = tags.join(", ");
-    let projects_display = projects.join(", ");
-    let customers_display = customers.join(", ");
-    let depends_display = depends_on.join(", ");
-    let priority_label = match priority {
-        1 => "1 (critical)",
-        2 => "2 (high)",
-        3 => "3 (medium)",
-        4 => "4 (low)",
-        _ => "3 (medium)",
-    };
-    print_summary(
-        "task",
-        &[
-            ("ID", &id.to_string()),
-            ("Title", title),
-            ("Status", &status),
-            ("Priority", priority_label),
-            ("Owner", &owner),
-            ("Projects", &projects_display),
-            ("Customers", &customers_display),
-            ("Sprint", &sprint),
-            ("Tags", &tags_display),
-            ("Depends on", &depends_display),
-            ("Due date", &due_date),
-        ],
-    );
-
-    if !confirm_creation(yes) {
-        println!("{}", "Cancelled.".dimmed());
-        return Ok(());
+pub fn create_task(cfg: &ResolvedConfig, input: &TaskInput) -> McResult<Created> {
+    let kind = EntityKind::Task;
+    validate_name_not_empty(&input.title, kind)?;
+    let title = input.title.trim();
+    let status = resolve_status(&input.status, kind, cfg)?;
+    let priority = input.priority.unwrap_or(DEFAULT_PRIORITY);
+    validate_priority(priority)?;
+    let due_date = present(&input.due_date).unwrap_or("");
+    if !due_date.is_empty() {
+        validate_date(due_date, "due date")?;
     }
+    let project = clean_ref(&input.project);
+    let customer = clean_ref(&input.customer);
 
-    let (tmpl_fm, tmpl_body) = template::load_template(&cfg.templates_dir, "task")?;
-
-    let mut fields = HashMap::new();
-    fields.insert("id".into(), Value::String(id.to_string()));
-    fields.insert(
-        "aliases".into(),
-        Value::Sequence(vec![Value::String(id.to_string())]),
-    );
-    fields.insert("title".into(), Value::String(title.to_string()));
-    fields.insert("slug".into(), Value::String(slug.clone()));
-    fields.insert("status".into(), Value::String(status));
-    fields.insert(
-        "priority".into(),
-        Value::Number(serde_yaml::Number::from(priority as u64)),
-    );
-    fields.insert("owner".into(), Value::String(owner));
-    fields.insert(
-        "projects".into(),
-        Value::Sequence(
-            projects
-                .iter()
-                .map(|p| Value::String(frontmatter::wrap_wikilink(p)))
-                .collect(),
-        ),
-    );
-    fields.insert(
-        "customers".into(),
-        Value::Sequence(
-            customers
-                .iter()
-                .map(|c| Value::String(frontmatter::wrap_wikilink(c)))
-                .collect(),
-        ),
-    );
-    fields.insert(
-        "tags".into(),
-        Value::Sequence(tags.iter().map(|t| Value::String(t.clone())).collect()),
-    );
-    fields.insert(
-        "sprint".into(),
-        Value::String(frontmatter::wrap_wikilink(&sprint)),
-    );
-    fields.insert(
-        "depends_on".into(),
-        Value::Sequence(
-            depends_on
-                .iter()
-                .map(|d| Value::String(frontmatter::wrap_wikilink(d)))
-                .collect(),
-        ),
-    );
-    fields.insert("due_date".into(), Value::String(due_date));
-    fields.insert("created".into(), Value::String(today.clone()));
-    fields.insert("updated".into(), Value::String(today));
-
-    let mut placeholders = HashMap::new();
-    placeholders.insert("title".into(), title.to_string());
-
-    let (fm, body) = template::render_template(tmpl_fm, &tmpl_body, &fields, &placeholders);
-    let doc = frontmatter::serialize_document(&fm, &body);
-
-    // Determine location based on --project or --customer flag
-    let tasks_base = if let Some(proj_id) = project {
-        // Find the project directory
+    // Resolve the scope first so an unknown project/customer fails before an
+    // ID is allocated.
+    let tasks_base = if let Some(proj_id) = &project {
         find_project_dir(cfg, proj_id)?.join("tasks")
-    } else if let Some(cust_id) = customer {
+    } else if let Some(cust_id) = &customer {
         find_customer_dir(cfg, cust_id)?.join("tasks")
     } else {
         cfg.tasks_dir.clone()
     };
 
-    // Create todo/ and done/ subfolders
+    let id = entity::next_id(kind, cfg)?.to_string();
+    let slug = slug_for(title);
+    let today = util::today_str();
+    let projects: Vec<String> = project.into_iter().collect();
+    let customers: Vec<String> = customer.into_iter().collect();
+    let sprint = clean_ref(&input.sprint).unwrap_or_default();
+
+    let mut fields = id_fields(&id);
+    fields.extend([
+        ("title".into(), s(title)),
+        ("slug".into(), s(slug.as_str())),
+        ("status".into(), s(status.as_str())),
+        (
+            "priority".into(),
+            Value::Number(serde_yaml::Number::from(u64::from(priority))),
+        ),
+        ("owner".into(), s(present(&input.owner).unwrap_or(""))),
+        ("projects".into(), links(&projects)),
+        ("customers".into(), links(&customers)),
+        ("tags".into(), list(&input.tags)),
+        ("sprint".into(), s(frontmatter::wrap_wikilink(&sprint))),
+        ("depends_on".into(), links(&clean_refs(&input.depends_on))),
+        ("due_date".into(), s(due_date)),
+        ("created".into(), s(today.as_str())),
+        ("updated".into(), s(today)),
+    ]);
+    let doc = render(cfg, "task", &fields, &[("title", title), ("id", &id)])?;
+
+    // Same placement as `mc task move`: active statuses in todo/, others in done/.
     let todo_dir = tasks_base.join("todo");
     let done_dir = tasks_base.join("done");
     fs::create_dir_all(&todo_dir)?;
     if !done_dir.exists() {
         mkdir_with_gitkeep(&done_dir)?;
     }
-
-    let filename = format!("{}-{}.md", id, slug);
-    let file_path = todo_dir.join(&filename);
-    util::atomic_write(&file_path, doc.as_bytes())?;
-
-    println!(
-        "{} Created task {} ({}) at {}",
-        "✓".green().bold(),
-        id.to_string().cyan().bold(),
-        title.bold(),
-        file_path.display().to_string().dimmed()
-    );
-
-    Ok(())
+    let path = tasks_base
+        .join(entity::task_status_folder(&status))
+        .join(format!("{}-{}.md", id, slug));
+    util::atomic_write(&path, doc.as_bytes())?;
+    Ok(Created {
+        kind,
+        id,
+        name: title.to_string(),
+        path,
+    })
 }
 
-#[allow(clippy::too_many_arguments)]
-fn new_sprint(
-    cfg: &ResolvedConfig,
-    title: &str,
-    owner: Option<&str>,
-    status: Option<&str>,
-    goal: Option<&str>,
-    start_date: Option<&str>,
-    end_date: Option<&str>,
-    projects: Option<&str>,
-    tags: Option<&str>,
-    yes: bool,
-) -> McResult<()> {
-    validate_name_not_empty(title, EntityKind::Sprint)?;
-    let id = entity::next_id(EntityKind::Sprint, cfg)?;
-    let slug = util::slugify(title);
+pub fn create_sprint(cfg: &ResolvedConfig, input: &SprintInput) -> McResult<Created> {
+    let kind = EntityKind::Sprint;
+    validate_name_not_empty(&input.title, kind)?;
+    let title = input.title.trim();
+    let status = resolve_status(&input.status, kind, cfg)?;
     let today = util::today_str();
-
-    let owner = match owner {
-        Some(o) => o.to_string(),
-        None => prompt_input("Owner", "", yes),
-    };
-    let status = match status {
-        Some(s) => s.to_string(),
-        None => prompt_select("Status", &cfg.statuses.sprint, 0, yes),
-    };
-    validate_status(&status, EntityKind::Sprint, cfg)?;
-    let goal = match goal {
-        Some(g) => g.to_string(),
-        None => prompt_input_optional("Sprint goal", yes),
-    };
-    let start_date = start_date.unwrap_or(&today).to_string();
-    let end_date = end_date.unwrap_or("").to_string();
-    let tags: Vec<String> = match tags {
-        Some(t) => util::parse_comma_list(t),
-        None => {
-            let input = prompt_input_optional("Tags (comma-separated)", yes);
-            if input.is_empty() {
-                vec![]
-            } else {
-                util::parse_comma_list(&input)
-            }
+    let start_date = present(&input.start_date).unwrap_or(&today).to_string();
+    let start = validate_date(&start_date, "start date")?;
+    let end_date = present(&input.end_date).unwrap_or("");
+    if !end_date.is_empty() {
+        let end = validate_date(end_date, "end date")?;
+        if end < start {
+            return Err(McError::usage(
+                format!(
+                    "Invalid end date '{end_date}': it is before the start date '{start_date}'"
+                ),
+                None,
+            ));
         }
-    };
-    let projects: Vec<String> = match projects {
-        Some(p) => util::parse_comma_list(p),
-        None => {
-            let input = prompt_input_optional("Link projects (comma-separated IDs)", yes);
-            if input.is_empty() {
-                vec![]
-            } else {
-                util::parse_comma_list(&input)
-            }
-        }
-    };
-
-    let tags_display = tags.join(", ");
-    let projects_display = projects.join(", ");
-    print_summary(
-        "sprint",
-        &[
-            ("ID", &id.to_string()),
-            ("Title", title),
-            ("Status", &status),
-            ("Goal", &goal),
-            ("Start", &start_date),
-            ("End", &end_date),
-            ("Owner", &owner),
-            ("Projects", &projects_display),
-            ("Tags", &tags_display),
-        ],
-    );
-
-    if !confirm_creation(yes) {
-        println!("{}", "Cancelled.".dimmed());
-        return Ok(());
     }
+    let id = entity::next_id(kind, cfg)?.to_string();
+    let slug = slug_for(title);
 
-    let (tmpl_fm, tmpl_body) = template::load_template(&cfg.templates_dir, "sprint")?;
+    let mut fields = id_fields(&id);
+    fields.extend([
+        ("title".into(), s(title)),
+        ("status".into(), s(status)),
+        ("goal".into(), s(present(&input.goal).unwrap_or(""))),
+        ("start_date".into(), s(start_date)),
+        ("end_date".into(), s(end_date)),
+        ("owner".into(), s(present(&input.owner).unwrap_or(""))),
+        ("projects".into(), links(&clean_refs(&input.projects))),
+        ("tags".into(), list(&input.tags)),
+        ("created".into(), s(today.as_str())),
+        ("updated".into(), s(today)),
+    ]);
+    let doc = render(cfg, "sprint", &fields, &[("title", title), ("id", &id)])?;
 
-    let mut fields = HashMap::new();
-    fields.insert("id".into(), Value::String(id.to_string()));
-    fields.insert(
-        "aliases".into(),
-        Value::Sequence(vec![Value::String(id.to_string())]),
-    );
-    fields.insert("title".into(), Value::String(title.to_string()));
-    fields.insert("status".into(), Value::String(status));
-    fields.insert("goal".into(), Value::String(goal));
-    fields.insert("start_date".into(), Value::String(start_date));
-    fields.insert("end_date".into(), Value::String(end_date));
-    fields.insert("owner".into(), Value::String(owner));
-    fields.insert(
-        "projects".into(),
-        Value::Sequence(
-            projects
-                .iter()
-                .map(|p| Value::String(frontmatter::wrap_wikilink(p)))
-                .collect(),
+    let dir = write_entity_dir(&cfg.sprints_dir, &id, &slug, &doc)?;
+    let ceremonies = [
+        (
+            "planning.md",
+            "Sprint Planning",
+            "## Capacity\n\n## Selected Items\n\n## Notes\n",
         ),
-    );
-    fields.insert(
-        "tags".into(),
-        Value::Sequence(tags.iter().map(|t| Value::String(t.clone())).collect()),
-    );
-    fields.insert("created".into(), Value::String(today.clone()));
-    fields.insert("updated".into(), Value::String(today));
-
-    let mut placeholders = HashMap::new();
-    placeholders.insert("title".into(), title.to_string());
-
-    let (fm, body) = template::render_template(tmpl_fm, &tmpl_body, &fields, &placeholders);
-    let doc = frontmatter::serialize_document(&fm, &body);
-
-    let dir_name = format!("{}-{}", id, slug);
-    let dir_path = cfg.sprints_dir.join(&dir_name);
-    fs::create_dir_all(&dir_path)?;
-    util::atomic_write(&dir_path.join(format!("{}.md", id)), doc.as_bytes())?;
-
-    // Create ceremony stub files
-    fs::write(
-        dir_path.join("planning.md"),
-        format!(
-            "# {} -- Sprint Planning\n\n## Capacity\n\n## Selected Items\n\n## Notes\n",
-            title
+        (
+            "review.md",
+            "Sprint Review",
+            "## Demo Outcomes\n\n## Feedback\n\n## Notes\n",
         ),
-    )?;
-    fs::write(
-        dir_path.join("review.md"),
-        format!(
-            "# {} -- Sprint Review\n\n## Demo Outcomes\n\n## Feedback\n\n## Notes\n",
-            title
+        (
+            "retrospective.md",
+            "Retrospective",
+            "## What Went Well\n\n## What Could Improve\n\n## Action Items\n",
         ),
-    )?;
-    fs::write(
-        dir_path.join("retrospective.md"),
-        format!(
-            "# {} -- Retrospective\n\n## What Went Well\n\n## What Could Improve\n\n## Action Items\n",
-            title
-        ),
-    )?;
-
-    println!(
-        "{} Created sprint {} ({}) at {}",
-        "✓".green().bold(),
-        id.to_string().cyan().bold(),
-        title.bold(),
-        dir_path.display().to_string().dimmed()
-    );
-
-    Ok(())
+    ];
+    for (file, heading, sections) in ceremonies {
+        fs::write(
+            dir.join(file),
+            format!("# {} -- {}\n\n{}", title, heading, sections),
+        )?;
+    }
+    Ok(Created {
+        kind,
+        id,
+        name: title.to_string(),
+        path: dir,
+    })
 }
 
-#[allow(clippy::too_many_arguments)]
-fn new_proposal(
-    cfg: &ResolvedConfig,
-    title: &str,
-    author: Option<&str>,
-    status: Option<&str>,
-    proposal_type: Option<&str>,
-    tags: Option<&str>,
-    supersedes: Option<&str>,
-    yes: bool,
-) -> McResult<()> {
-    check_mode(EntityKind::Proposal, cfg)?;
-    validate_name_not_empty(title, EntityKind::Proposal)?;
-    let id = entity::next_id(EntityKind::Proposal, cfg)?;
-    let slug = util::slugify(title);
+pub fn create_proposal(cfg: &ResolvedConfig, input: &ProposalInput) -> McResult<Created> {
+    let kind = EntityKind::Proposal;
+    check_mode(kind, cfg)?;
+    validate_name_not_empty(&input.title, kind)?;
+    let title = input.title.trim();
+    let status = resolve_status(&input.status, kind, cfg)?;
+    let id = entity::next_id(kind, cfg)?.to_string();
+    let slug = slug_for(title);
     let today = util::today_str();
+    let supersedes = clean_ref(&input.supersedes).unwrap_or_default();
 
-    let author = match author {
-        Some(a) => a.to_string(),
-        None => prompt_input("Author", "", yes),
-    };
-    let status = match status {
-        Some(s) => s.to_string(),
-        None => prompt_select("Status", &cfg.statuses.proposal, 0, yes),
-    };
-    validate_status(&status, EntityKind::Proposal, cfg)?;
-    let proposal_type = match proposal_type {
-        Some(t) => t.to_string(),
-        None => {
-            let types = vec![
-                "architecture".to_string(),
-                "feature".to_string(),
-                "process".to_string(),
-            ];
-            prompt_select("Type", &types, 0, yes)
-        }
-    };
-    let tags: Vec<String> = match tags {
-        Some(t) => util::parse_comma_list(t),
-        None => {
-            let input = prompt_input_optional("Tags (comma-separated)", yes);
-            if input.is_empty() {
-                vec![]
-            } else {
-                util::parse_comma_list(&input)
-            }
-        }
-    };
-    let supersedes = supersedes.unwrap_or("").to_string();
+    let mut fields = id_fields(&id);
+    fields.extend([
+        ("title".into(), s(title)),
+        ("status".into(), s(status)),
+        (
+            "type".into(),
+            s(present(&input.proposal_type).unwrap_or(PROPOSAL_TYPES[0])),
+        ),
+        ("author".into(), s(present(&input.author).unwrap_or(""))),
+        (
+            "supersedes".into(),
+            s(frontmatter::wrap_wikilink(&supersedes)),
+        ),
+        ("superseded_by".into(), s("")),
+        ("tags".into(), list(&input.tags)),
+        ("created".into(), s(today.as_str())),
+        ("updated".into(), s(today)),
+    ]);
+    let doc = render(cfg, "proposal", &fields, &[("title", title), ("id", &id)])?;
 
-    let tags_display = tags.join(", ");
-    print_summary(
-        "proposal",
-        &[
-            ("ID", &id.to_string()),
-            ("Title", title),
-            ("Author", &author),
-            ("Status", &status),
-            ("Type", &proposal_type),
-            ("Tags", &tags_display),
-            ("Supersedes", &supersedes),
-        ],
-    );
-
-    if !confirm_creation(yes) {
-        println!("{}", "Cancelled.".dimmed());
-        return Ok(());
-    }
-
-    let (tmpl_fm, tmpl_body) = template::load_template(&cfg.templates_dir, "proposal")?;
-
-    let mut fields = HashMap::new();
-    fields.insert("id".into(), Value::String(id.to_string()));
-    fields.insert(
-        "aliases".into(),
-        Value::Sequence(vec![Value::String(id.to_string())]),
-    );
-    fields.insert("title".into(), Value::String(title.to_string()));
-    fields.insert("status".into(), Value::String(status));
-    fields.insert("type".into(), Value::String(proposal_type));
-    fields.insert("author".into(), Value::String(author));
-    fields.insert(
-        "supersedes".into(),
-        Value::String(frontmatter::wrap_wikilink(&supersedes)),
-    );
-    fields.insert("superseded_by".into(), Value::String(String::new()));
-    fields.insert(
-        "tags".into(),
-        Value::Sequence(tags.iter().map(|t| Value::String(t.clone())).collect()),
-    );
-    fields.insert("created".into(), Value::String(today.clone()));
-    fields.insert("updated".into(), Value::String(today));
-
-    let mut placeholders = HashMap::new();
-    placeholders.insert("title".into(), title.to_string());
-
-    let (fm, body) = template::render_template(tmpl_fm, &tmpl_body, &fields, &placeholders);
-    let doc = frontmatter::serialize_document(&fm, &body);
-
-    let filename = format!("{}-{}.md", id, slug);
-    let file_path = cfg.proposals_dir.join(&filename);
     fs::create_dir_all(&cfg.proposals_dir)?;
-    util::atomic_write(&file_path, doc.as_bytes())?;
-
-    println!(
-        "{} Created proposal {} ({}) at {}",
-        "✓".green().bold(),
-        id.to_string().cyan().bold(),
-        title.bold(),
-        file_path.display().to_string().dimmed()
-    );
-
-    Ok(())
+    let path = cfg.proposals_dir.join(format!("{}-{}.md", id, slug));
+    util::atomic_write(&path, doc.as_bytes())?;
+    Ok(Created {
+        kind,
+        id,
+        name: title.to_string(),
+        path,
+    })
 }
 
-#[allow(clippy::too_many_arguments)]
-fn new_contact(
-    cfg: &ResolvedConfig,
-    name: &str,
-    customer: &str,
-    role: Option<&str>,
-    email: Option<&str>,
-    phone: Option<&str>,
-    status: Option<&str>,
-    tags: Option<&str>,
-    yes: bool,
-) -> McResult<()> {
-    check_mode(EntityKind::Contact, cfg)?;
-    validate_name_not_empty(name, EntityKind::Contact)?;
-
-    // Validate customer exists
-    let cust_dir = find_customer_dir(cfg, customer)?;
-
-    let id = entity::next_id(EntityKind::Contact, cfg)?;
+pub fn create_contact(cfg: &ResolvedConfig, input: &ContactInput) -> McResult<Created> {
+    let kind = EntityKind::Contact;
+    check_mode(kind, cfg)?;
+    validate_name_not_empty(&input.name, kind)?;
+    let name = input.name.trim();
+    let customer = frontmatter::strip_wikilink(input.customer.trim()).to_string();
+    let cust_dir = find_customer_dir(cfg, &customer)?;
+    let status = resolve_status(&input.status, kind, cfg)?;
+    let id = entity::next_id(kind, cfg)?.to_string();
     let today = util::today_str();
 
-    let role = role.unwrap_or("").to_string();
-    let email = email.unwrap_or("").to_string();
-    let phone = phone.unwrap_or("").to_string();
-    let status = match status {
-        Some(s) => s.to_string(),
-        None => prompt_select("Status", &cfg.statuses.contact, 0, yes),
-    };
-    validate_status(&status, EntityKind::Contact, cfg)?;
-    let tags: Vec<String> = match tags {
-        Some(t) => util::parse_comma_list(t),
-        None => {
-            let input = prompt_input_optional("Tags (comma-separated)", yes);
-            if input.is_empty() {
-                vec![]
-            } else {
-                util::parse_comma_list(&input)
-            }
-        }
-    };
+    let mut fields = id_fields(&id);
+    fields.extend([
+        ("name".into(), s(name)),
+        ("role".into(), s(present(&input.role).unwrap_or(""))),
+        ("email".into(), s(present(&input.email).unwrap_or(""))),
+        ("phone".into(), s(present(&input.phone).unwrap_or(""))),
+        ("customer".into(), s(frontmatter::wrap_wikilink(&customer))),
+        ("status".into(), s(status)),
+        ("tags".into(), list(&input.tags)),
+        ("created".into(), s(today.as_str())),
+        ("updated".into(), s(today)),
+    ]);
+    let doc = render(cfg, "contact", &fields, &[("name", name), ("id", &id)])?;
 
-    let tags_display = tags.join(", ");
-    print_summary(
-        "contact",
-        &[
-            ("ID", &id.to_string()),
-            ("Name", name),
-            ("Customer", customer),
-            ("Role", &role),
-            ("Email", &email),
-            ("Phone", &phone),
-            ("Status", &status),
-            ("Tags", &tags_display),
-        ],
-    );
-
-    if !confirm_creation(yes) {
-        println!("{}", "Cancelled.".dimmed());
-        return Ok(());
-    }
-
-    let (tmpl_fm, tmpl_body) = template::load_template(&cfg.templates_dir, "contact")?;
-
-    let mut fields = HashMap::new();
-    fields.insert("id".into(), Value::String(id.to_string()));
-    fields.insert(
-        "aliases".into(),
-        Value::Sequence(vec![Value::String(id.to_string())]),
-    );
-    fields.insert("name".into(), Value::String(name.to_string()));
-    fields.insert("role".into(), Value::String(role));
-    fields.insert("email".into(), Value::String(email));
-    fields.insert("phone".into(), Value::String(phone));
-    fields.insert(
-        "customer".into(),
-        Value::String(frontmatter::wrap_wikilink(customer)),
-    );
-    fields.insert("status".into(), Value::String(status));
-    fields.insert(
-        "tags".into(),
-        Value::Sequence(tags.iter().map(|t| Value::String(t.clone())).collect()),
-    );
-    fields.insert("created".into(), Value::String(today.clone()));
-    fields.insert("updated".into(), Value::String(today));
-
-    let mut placeholders = HashMap::new();
-    placeholders.insert("name".into(), name.to_string());
-
-    let (fm, body) = template::render_template(tmpl_fm, &tmpl_body, &fields, &placeholders);
-    let doc = frontmatter::serialize_document(&fm, &body);
-
-    let slug = util::slugify(name);
-    let filename = format!("{}-{}.md", id, slug);
     let contacts_dir = cust_dir.join("contacts");
     fs::create_dir_all(&contacts_dir)?;
-    let file_path = contacts_dir.join(&filename);
-    util::atomic_write(&file_path, doc.as_bytes())?;
-
-    println!(
-        "{} Created contact {} ({}) at {}",
-        "✓".green().bold(),
-        id.to_string().cyan().bold(),
-        name.bold(),
-        file_path.display().to_string().dimmed()
-    );
-
-    Ok(())
-}
-
-/// Find a project directory by its ID prefix (e.g. "PROJ-001").
-fn find_project_dir(cfg: &ResolvedConfig, proj_id: &str) -> McResult<std::path::PathBuf> {
-    if cfg.projects_dir.is_dir() {
-        for entry in std::fs::read_dir(&cfg.projects_dir)? {
-            let entry = entry?;
-            if entry.file_type()?.is_dir() {
-                let name = entry.file_name().to_string_lossy().to_string();
-                if name.starts_with(&format!("{}-", proj_id)) {
-                    return Ok(entry.path());
-                }
-            }
-        }
-    }
-    Err(McError::EntityNotFound(proj_id.to_string()))
-}
-
-/// Find a customer directory by its ID prefix (e.g. "CUST-001").
-pub fn find_customer_dir(cfg: &ResolvedConfig, cust_id: &str) -> McResult<std::path::PathBuf> {
-    if cfg.customers_dir.is_dir() {
-        for entry in std::fs::read_dir(&cfg.customers_dir)? {
-            let entry = entry?;
-            if entry.file_type()?.is_dir() {
-                let name = entry.file_name().to_string_lossy().to_string();
-                if name.starts_with(&format!("{}-", cust_id)) {
-                    return Ok(entry.path());
-                }
-            }
-        }
-    }
-    Err(McError::EntityNotFound(cust_id.to_string()))
+    let path = contacts_dir.join(format!("{}-{}.md", id, slug_for(name)));
+    util::atomic_write(&path, doc.as_bytes())?;
+    Ok(Created {
+        kind,
+        id,
+        name: name.to_string(),
+        path,
+    })
 }
 
 // ---------------------------------------------------------------------------
-// Programmatic creation functions (no prompts, no printing, return JSON)
+// Programmatic wrappers (string arguments, JSON result) -- used by MCP and API
 // ---------------------------------------------------------------------------
+
+fn opt(v: Option<&str>) -> Option<String> {
+    v.map(str::to_string)
+}
+
+fn csv(v: Option<&str>) -> Vec<String> {
+    v.map(util::parse_comma_list).unwrap_or_default()
+}
 
 pub fn create_customer_programmatic(
     cfg: &ResolvedConfig,
@@ -1365,62 +811,13 @@ pub fn create_customer_programmatic(
     status: Option<&str>,
     tags: Option<&str>,
 ) -> McResult<JsonValue> {
-    check_mode(EntityKind::Customer, cfg)?;
-    validate_name_not_empty(name, EntityKind::Customer)?;
-    let id = entity::next_id(EntityKind::Customer, cfg)?;
-    let slug = util::slugify(name);
-    let today = util::today_str();
-
-    let owner = owner.unwrap_or("").to_string();
-    let status = status
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| cfg.statuses.customer.first().cloned().unwrap_or_default());
-    validate_status(&status, EntityKind::Customer, cfg)?;
-    let tags: Vec<String> = tags.map(util::parse_comma_list).unwrap_or_default();
-
-    let (tmpl_fm, tmpl_body) = template::load_template(&cfg.templates_dir, "customer")?;
-
-    let mut fields = HashMap::new();
-    fields.insert("id".into(), Value::String(id.to_string()));
-    fields.insert(
-        "aliases".into(),
-        Value::Sequence(vec![Value::String(id.to_string())]),
-    );
-    fields.insert("name".into(), Value::String(name.to_string()));
-    fields.insert("slug".into(), Value::String(slug.clone()));
-    fields.insert("status".into(), Value::String(status));
-    fields.insert("owner".into(), Value::String(owner));
-    fields.insert(
-        "tags".into(),
-        Value::Sequence(tags.iter().map(|t| Value::String(t.clone())).collect()),
-    );
-    fields.insert("projects".into(), Value::Sequence(vec![]));
-    fields.insert("contracts".into(), Value::Sequence(vec![]));
-    fields.insert("notes".into(), Value::String(String::new()));
-    fields.insert("created".into(), Value::String(today.clone()));
-    fields.insert("updated".into(), Value::String(today));
-
-    let mut placeholders = HashMap::new();
-    placeholders.insert("name".into(), name.to_string());
-
-    let (fm, body) = template::render_template(tmpl_fm, &tmpl_body, &fields, &placeholders);
-    let doc = frontmatter::serialize_document(&fm, &body);
-
-    let dir_name = format!("{}-{}", id, slug);
-    let dir_path = cfg.customers_dir.join(&dir_name);
-    fs::create_dir_all(&dir_path)?;
-    util::atomic_write(&dir_path.join(format!("{}.md", id)), doc.as_bytes())?;
-    mkdir_with_gitkeep(&dir_path.join("contacts"))?;
-    mkdir_with_gitkeep(&dir_path.join("contracts"))?;
-    mkdir_with_gitkeep(&dir_path.join("meetings"))?;
-    mkdir_with_gitkeep(&dir_path.join("projects"))?;
-    mkdir_with_gitkeep(&dir_path.join("assets"))?;
-
-    Ok(serde_json::json!({
-        "id": id.to_string(),
-        "name": name,
-        "path": dir_path.display().to_string(),
-    }))
+    let input = CustomerInput {
+        name: name.to_string(),
+        owner: opt(owner),
+        status: opt(status),
+        tags: csv(tags),
+    };
+    Ok(create_customer(cfg, &input)?.to_json())
 }
 
 pub fn create_project_programmatic(
@@ -1431,77 +828,14 @@ pub fn create_project_programmatic(
     customers: Option<&str>,
     tags: Option<&str>,
 ) -> McResult<JsonValue> {
-    check_mode(EntityKind::Project, cfg)?;
-    validate_name_not_empty(name, EntityKind::Project)?;
-    let id = entity::next_id(EntityKind::Project, cfg)?;
-    let slug = util::slugify(name);
-    let today = util::today_str();
-
-    let owner = owner.unwrap_or("").to_string();
-    let status = status
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| cfg.statuses.project.first().cloned().unwrap_or_default());
-    validate_status(&status, EntityKind::Project, cfg)?;
-    let tags: Vec<String> = tags.map(util::parse_comma_list).unwrap_or_default();
-    let customers: Vec<String> = customers.map(util::parse_comma_list).unwrap_or_default();
-
-    let (tmpl_fm, tmpl_body) = template::load_template(&cfg.templates_dir, "project")?;
-
-    let mut fields = HashMap::new();
-    fields.insert("id".into(), Value::String(id.to_string()));
-    fields.insert(
-        "aliases".into(),
-        Value::Sequence(vec![Value::String(id.to_string())]),
-    );
-    fields.insert("name".into(), Value::String(name.to_string()));
-    fields.insert("slug".into(), Value::String(slug.clone()));
-    fields.insert("status".into(), Value::String(status));
-    fields.insert("owner".into(), Value::String(owner));
-    fields.insert(
-        "customers".into(),
-        Value::Sequence(
-            customers
-                .iter()
-                .map(|c| Value::String(frontmatter::wrap_wikilink(c)))
-                .collect(),
-        ),
-    );
-    fields.insert(
-        "tags".into(),
-        Value::Sequence(tags.iter().map(|t| Value::String(t.clone())).collect()),
-    );
-    fields.insert("start_date".into(), Value::String(today.clone()));
-    fields.insert("target_date".into(), Value::String(String::new()));
-    fields.insert("created".into(), Value::String(today.clone()));
-    fields.insert("updated".into(), Value::String(today));
-
-    let mut placeholders = HashMap::new();
-    placeholders.insert("name".into(), name.to_string());
-
-    let (fm, body) = template::render_template(tmpl_fm, &tmpl_body, &fields, &placeholders);
-    let doc = frontmatter::serialize_document(&fm, &body);
-
-    let dir_name = format!("{}-{}", id, slug);
-    let dir_path = cfg.projects_dir.join(&dir_name);
-    fs::create_dir_all(&dir_path)?;
-    util::atomic_write(&dir_path.join(format!("{}.md", id)), doc.as_bytes())?;
-    fs::write(
-        dir_path.join("roadmap.md"),
-        format!("# {} -- Roadmap\n", name),
-    )?;
-    fs::write(
-        dir_path.join("backlog.md"),
-        format!("# {} -- Backlog\n", name),
-    )?;
-    mkdir_with_gitkeep(&dir_path.join("specs"))?;
-    mkdir_with_gitkeep(&dir_path.join("releases"))?;
-    mkdir_with_gitkeep(&dir_path.join("infra"))?;
-
-    Ok(serde_json::json!({
-        "id": id.to_string(),
-        "name": name,
-        "path": dir_path.display().to_string(),
-    }))
+    let input = ProjectInput {
+        name: name.to_string(),
+        owner: opt(owner),
+        status: opt(status),
+        customers: csv(customers),
+        tags: csv(tags),
+    };
+    Ok(create_project(cfg, &input)?.to_json())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1517,79 +851,18 @@ pub fn create_meeting_programmatic(
     projects: Option<&str>,
     attendees: Option<&str>,
 ) -> McResult<JsonValue> {
-    validate_name_not_empty(title, EntityKind::Meeting)?;
-    let id = entity::next_id(EntityKind::Meeting, cfg)?;
-    let today = util::today_str();
-    let date = date.unwrap_or(&today).to_string();
-    let slug = util::slugify(title);
-
-    let time = time.unwrap_or("10:00").to_string();
-    let duration = duration.unwrap_or("30m").to_string();
-    let status = status
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| cfg.statuses.meeting.first().cloned().unwrap_or_default());
-    validate_status(&status, EntityKind::Meeting, cfg)?;
-    let tags: Vec<String> = tags.map(util::parse_comma_list).unwrap_or_default();
-    let customers: Vec<String> = customers.map(util::parse_comma_list).unwrap_or_default();
-    let projects: Vec<String> = projects.map(util::parse_comma_list).unwrap_or_default();
-    let attendees: Vec<String> = attendees.map(util::parse_comma_list).unwrap_or_default();
-
-    let (tmpl_fm, tmpl_body) = template::load_template(&cfg.templates_dir, "meeting")?;
-
-    let mut fields = HashMap::new();
-    fields.insert("id".into(), Value::String(id.to_string()));
-    fields.insert(
-        "aliases".into(),
-        Value::Sequence(vec![Value::String(id.to_string())]),
-    );
-    fields.insert("title".into(), Value::String(title.to_string()));
-    fields.insert("date".into(), Value::String(date.clone()));
-    fields.insert("time".into(), Value::String(time));
-    fields.insert("duration".into(), Value::String(duration));
-    fields.insert(
-        "tags".into(),
-        Value::Sequence(tags.iter().map(|t| Value::String(t.clone())).collect()),
-    );
-    fields.insert(
-        "customers".into(),
-        Value::Sequence(
-            customers
-                .iter()
-                .map(|c| Value::String(frontmatter::wrap_wikilink(c)))
-                .collect(),
-        ),
-    );
-    fields.insert(
-        "projects".into(),
-        Value::Sequence(
-            projects
-                .iter()
-                .map(|p| Value::String(frontmatter::wrap_wikilink(p)))
-                .collect(),
-        ),
-    );
-    fields.insert(
-        "attendees".into(),
-        Value::Sequence(attendees.iter().map(|a| Value::String(a.clone())).collect()),
-    );
-    fields.insert("status".into(), Value::String(status));
-
-    let mut placeholders = HashMap::new();
-    placeholders.insert("title".into(), title.to_string());
-
-    let (fm, body) = template::render_template(tmpl_fm, &tmpl_body, &fields, &placeholders);
-    let doc = frontmatter::serialize_document(&fm, &body);
-
-    let filename = format!("{}-{}.md", date, slug);
-    let file_path = cfg.meetings_dir.join(&filename);
-    fs::create_dir_all(&cfg.meetings_dir)?;
-    util::atomic_write(&file_path, doc.as_bytes())?;
-
-    Ok(serde_json::json!({
-        "id": id.to_string(),
-        "title": title,
-        "path": file_path.display().to_string(),
-    }))
+    let input = MeetingInput {
+        title: title.to_string(),
+        date: opt(date),
+        time: opt(time),
+        duration: opt(duration),
+        status: opt(status),
+        tags: csv(tags),
+        customers: csv(customers),
+        projects: csv(projects),
+        attendees: csv(attendees),
+    };
+    Ok(create_meeting(cfg, &input)?.to_json())
 }
 
 pub fn create_research_programmatic(
@@ -1599,69 +872,13 @@ pub fn create_research_programmatic(
     agents: Option<&str>,
     tags: Option<&str>,
 ) -> McResult<JsonValue> {
-    validate_name_not_empty(title, EntityKind::Research)?;
-    let id = entity::next_id(EntityKind::Research, cfg)?;
-    let slug = util::slugify(title);
-    let today = util::today_str();
-
-    let owner = owner.unwrap_or("").to_string();
-    let agents: Vec<String> = agents.map(util::parse_comma_list).unwrap_or_else(|| {
-        vec![
-            "claude".into(),
-            "gemini".into(),
-            "chatgpt".into(),
-            "perplexity".into(),
-        ]
-    });
-    let tags: Vec<String> = tags.map(util::parse_comma_list).unwrap_or_default();
-
-    let (tmpl_fm, tmpl_body) = template::load_template(&cfg.templates_dir, "research")?;
-
-    let mut fields = HashMap::new();
-    fields.insert("id".into(), Value::String(id.to_string()));
-    fields.insert(
-        "aliases".into(),
-        Value::Sequence(vec![Value::String(id.to_string())]),
-    );
-    fields.insert("title".into(), Value::String(title.to_string()));
-    fields.insert("slug".into(), Value::String(slug.clone()));
-    fields.insert("status".into(), Value::String("draft".into()));
-    fields.insert("owner".into(), Value::String(owner));
-    fields.insert("customers".into(), Value::Sequence(vec![]));
-    fields.insert("projects".into(), Value::Sequence(vec![]));
-    fields.insert(
-        "tags".into(),
-        Value::Sequence(tags.iter().map(|t| Value::String(t.clone())).collect()),
-    );
-    fields.insert("created".into(), Value::String(today.clone()));
-    fields.insert("updated".into(), Value::String(today));
-    fields.insert(
-        "agents".into(),
-        Value::Sequence(agents.iter().map(|a| Value::String(a.clone())).collect()),
-    );
-    fields.insert("summary".into(), Value::String(String::new()));
-
-    let mut placeholders = HashMap::new();
-    placeholders.insert("title".into(), title.to_string());
-
-    let (fm, body) = template::render_template(tmpl_fm, &tmpl_body, &fields, &placeholders);
-    let doc = frontmatter::serialize_document(&fm, &body);
-
-    let dir_name = format!("{}-{}", id, slug);
-    let dir_path = cfg.research_dir.join(&dir_name);
-    fs::create_dir_all(&dir_path)?;
-    util::atomic_write(&dir_path.join(format!("{}.md", id)), doc.as_bytes())?;
-
-    for agent in &agents {
-        mkdir_with_gitkeep(&dir_path.join(agent))?;
-    }
-    mkdir_with_gitkeep(&dir_path.join("final"))?;
-
-    Ok(serde_json::json!({
-        "id": id.to_string(),
-        "title": title,
-        "path": dir_path.display().to_string(),
-    }))
+    let input = ResearchInput {
+        title: title.to_string(),
+        owner: opt(owner),
+        agents: agents.map(util::parse_comma_list),
+        tags: csv(tags),
+    };
+    Ok(create_research(cfg, &input)?.to_json())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1678,112 +895,19 @@ pub fn create_task_programmatic(
     depends_on: Option<&str>,
     due_date: Option<&str>,
 ) -> McResult<JsonValue> {
-    validate_name_not_empty(title, EntityKind::Task)?;
-    let id = entity::next_id(EntityKind::Task, cfg)?;
-    let slug = util::slugify(title);
-    let today = util::today_str();
-
-    let owner = owner.unwrap_or("").to_string();
-    let status = status
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| cfg.statuses.task.first().cloned().unwrap_or_default());
-    validate_status(&status, EntityKind::Task, cfg)?;
-    let priority = priority.unwrap_or(3);
-    let tags: Vec<String> = tags.map(util::parse_comma_list).unwrap_or_default();
-    let sprint = sprint.unwrap_or("").to_string();
-    let depends_on: Vec<String> = depends_on.map(util::parse_comma_list).unwrap_or_default();
-    let due_date = due_date.unwrap_or("").to_string();
-
-    let projects: Vec<String> = project.map(|p| vec![p.to_string()]).unwrap_or_default();
-    let customers: Vec<String> = customer.map(|c| vec![c.to_string()]).unwrap_or_default();
-
-    let (tmpl_fm, tmpl_body) = template::load_template(&cfg.templates_dir, "task")?;
-
-    let mut fields = HashMap::new();
-    fields.insert("id".into(), Value::String(id.to_string()));
-    fields.insert(
-        "aliases".into(),
-        Value::Sequence(vec![Value::String(id.to_string())]),
-    );
-    fields.insert("title".into(), Value::String(title.to_string()));
-    fields.insert("slug".into(), Value::String(slug.clone()));
-    fields.insert("status".into(), Value::String(status));
-    fields.insert(
-        "priority".into(),
-        Value::Number(serde_yaml::Number::from(priority as u64)),
-    );
-    fields.insert("owner".into(), Value::String(owner));
-    fields.insert(
-        "projects".into(),
-        Value::Sequence(
-            projects
-                .iter()
-                .map(|p| Value::String(frontmatter::wrap_wikilink(p)))
-                .collect(),
-        ),
-    );
-    fields.insert(
-        "customers".into(),
-        Value::Sequence(
-            customers
-                .iter()
-                .map(|c| Value::String(frontmatter::wrap_wikilink(c)))
-                .collect(),
-        ),
-    );
-    fields.insert(
-        "tags".into(),
-        Value::Sequence(tags.iter().map(|t| Value::String(t.clone())).collect()),
-    );
-    fields.insert(
-        "sprint".into(),
-        Value::String(frontmatter::wrap_wikilink(&sprint)),
-    );
-    fields.insert(
-        "depends_on".into(),
-        Value::Sequence(
-            depends_on
-                .iter()
-                .map(|d| Value::String(frontmatter::wrap_wikilink(d)))
-                .collect(),
-        ),
-    );
-    fields.insert("due_date".into(), Value::String(due_date));
-    fields.insert("created".into(), Value::String(today.clone()));
-    fields.insert("updated".into(), Value::String(today));
-
-    let mut placeholders = HashMap::new();
-    placeholders.insert("title".into(), title.to_string());
-
-    let (fm, body) = template::render_template(tmpl_fm, &tmpl_body, &fields, &placeholders);
-    let doc = frontmatter::serialize_document(&fm, &body);
-
-    // Determine location based on project or customer scope
-    let tasks_base = if let Some(proj_id) = project {
-        find_project_dir(cfg, proj_id)?.join("tasks")
-    } else if let Some(cust_id) = customer {
-        find_customer_dir(cfg, cust_id)?.join("tasks")
-    } else {
-        cfg.tasks_dir.clone()
+    let input = TaskInput {
+        title: title.to_string(),
+        project: opt(project),
+        customer: opt(customer),
+        owner: opt(owner),
+        status: opt(status),
+        priority,
+        tags: csv(tags),
+        sprint: opt(sprint),
+        depends_on: csv(depends_on),
+        due_date: opt(due_date),
     };
-
-    // Create todo/ and done/ subfolders
-    let todo_dir = tasks_base.join("todo");
-    let done_dir = tasks_base.join("done");
-    fs::create_dir_all(&todo_dir)?;
-    if !done_dir.exists() {
-        mkdir_with_gitkeep(&done_dir)?;
-    }
-
-    let filename = format!("{}-{}.md", id, slug);
-    let file_path = todo_dir.join(&filename);
-    util::atomic_write(&file_path, doc.as_bytes())?;
-
-    Ok(serde_json::json!({
-        "id": id.to_string(),
-        "title": title,
-        "path": file_path.display().to_string(),
-    }))
+    Ok(create_task(cfg, &input)?.to_json())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1798,91 +922,17 @@ pub fn create_sprint_programmatic(
     projects: Option<&str>,
     tags: Option<&str>,
 ) -> McResult<JsonValue> {
-    validate_name_not_empty(title, EntityKind::Sprint)?;
-    let id = entity::next_id(EntityKind::Sprint, cfg)?;
-    let slug = util::slugify(title);
-    let today = util::today_str();
-
-    let owner = owner.unwrap_or("").to_string();
-    let status = status
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| cfg.statuses.sprint.first().cloned().unwrap_or_default());
-    validate_status(&status, EntityKind::Sprint, cfg)?;
-    let goal = goal.unwrap_or("").to_string();
-    let start_date = start_date.unwrap_or(&today).to_string();
-    let end_date = end_date.unwrap_or("").to_string();
-    let tags: Vec<String> = tags.map(util::parse_comma_list).unwrap_or_default();
-    let projects: Vec<String> = projects.map(util::parse_comma_list).unwrap_or_default();
-
-    let (tmpl_fm, tmpl_body) = template::load_template(&cfg.templates_dir, "sprint")?;
-
-    let mut fields = HashMap::new();
-    fields.insert("id".into(), Value::String(id.to_string()));
-    fields.insert(
-        "aliases".into(),
-        Value::Sequence(vec![Value::String(id.to_string())]),
-    );
-    fields.insert("title".into(), Value::String(title.to_string()));
-    fields.insert("status".into(), Value::String(status));
-    fields.insert("goal".into(), Value::String(goal));
-    fields.insert("start_date".into(), Value::String(start_date));
-    fields.insert("end_date".into(), Value::String(end_date));
-    fields.insert("owner".into(), Value::String(owner));
-    fields.insert(
-        "projects".into(),
-        Value::Sequence(
-            projects
-                .iter()
-                .map(|p| Value::String(frontmatter::wrap_wikilink(p)))
-                .collect(),
-        ),
-    );
-    fields.insert(
-        "tags".into(),
-        Value::Sequence(tags.iter().map(|t| Value::String(t.clone())).collect()),
-    );
-    fields.insert("created".into(), Value::String(today.clone()));
-    fields.insert("updated".into(), Value::String(today));
-
-    let mut placeholders = HashMap::new();
-    placeholders.insert("title".into(), title.to_string());
-
-    let (fm, body) = template::render_template(tmpl_fm, &tmpl_body, &fields, &placeholders);
-    let doc = frontmatter::serialize_document(&fm, &body);
-
-    let dir_name = format!("{}-{}", id, slug);
-    let dir_path = cfg.sprints_dir.join(&dir_name);
-    fs::create_dir_all(&dir_path)?;
-    util::atomic_write(&dir_path.join(format!("{}.md", id)), doc.as_bytes())?;
-
-    // Create ceremony stub files
-    fs::write(
-        dir_path.join("planning.md"),
-        format!(
-            "# {} -- Sprint Planning\n\n## Capacity\n\n## Selected Items\n\n## Notes\n",
-            title
-        ),
-    )?;
-    fs::write(
-        dir_path.join("review.md"),
-        format!(
-            "# {} -- Sprint Review\n\n## Demo Outcomes\n\n## Feedback\n\n## Notes\n",
-            title
-        ),
-    )?;
-    fs::write(
-        dir_path.join("retrospective.md"),
-        format!(
-            "# {} -- Retrospective\n\n## What Went Well\n\n## What Could Improve\n\n## Action Items\n",
-            title
-        ),
-    )?;
-
-    Ok(serde_json::json!({
-        "id": id.to_string(),
-        "title": title,
-        "path": dir_path.display().to_string(),
-    }))
+    let input = SprintInput {
+        title: title.to_string(),
+        owner: opt(owner),
+        status: opt(status),
+        goal: opt(goal),
+        start_date: opt(start_date),
+        end_date: opt(end_date),
+        projects: csv(projects),
+        tags: csv(tags),
+    };
+    Ok(create_sprint(cfg, &input)?.to_json())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1895,61 +945,15 @@ pub fn create_proposal_programmatic(
     tags: Option<&str>,
     supersedes: Option<&str>,
 ) -> McResult<JsonValue> {
-    check_mode(EntityKind::Proposal, cfg)?;
-    validate_name_not_empty(title, EntityKind::Proposal)?;
-    let id = entity::next_id(EntityKind::Proposal, cfg)?;
-    let slug = util::slugify(title);
-    let today = util::today_str();
-
-    let author = author.unwrap_or("").to_string();
-    let status = status
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| cfg.statuses.proposal.first().cloned().unwrap_or_default());
-    validate_status(&status, EntityKind::Proposal, cfg)?;
-    let proposal_type = proposal_type.unwrap_or("architecture").to_string();
-    let tags: Vec<String> = tags.map(util::parse_comma_list).unwrap_or_default();
-    let supersedes = supersedes.unwrap_or("").to_string();
-
-    let (tmpl_fm, tmpl_body) = template::load_template(&cfg.templates_dir, "proposal")?;
-
-    let mut fields = HashMap::new();
-    fields.insert("id".into(), Value::String(id.to_string()));
-    fields.insert(
-        "aliases".into(),
-        Value::Sequence(vec![Value::String(id.to_string())]),
-    );
-    fields.insert("title".into(), Value::String(title.to_string()));
-    fields.insert("status".into(), Value::String(status));
-    fields.insert("type".into(), Value::String(proposal_type));
-    fields.insert("author".into(), Value::String(author));
-    fields.insert(
-        "supersedes".into(),
-        Value::String(frontmatter::wrap_wikilink(&supersedes)),
-    );
-    fields.insert("superseded_by".into(), Value::String(String::new()));
-    fields.insert(
-        "tags".into(),
-        Value::Sequence(tags.iter().map(|t| Value::String(t.clone())).collect()),
-    );
-    fields.insert("created".into(), Value::String(today.clone()));
-    fields.insert("updated".into(), Value::String(today));
-
-    let mut placeholders = HashMap::new();
-    placeholders.insert("title".into(), title.to_string());
-
-    let (fm, body) = template::render_template(tmpl_fm, &tmpl_body, &fields, &placeholders);
-    let doc = frontmatter::serialize_document(&fm, &body);
-
-    let filename = format!("{}-{}.md", id, slug);
-    let file_path = cfg.proposals_dir.join(&filename);
-    fs::create_dir_all(&cfg.proposals_dir)?;
-    util::atomic_write(&file_path, doc.as_bytes())?;
-
-    Ok(serde_json::json!({
-        "id": id.to_string(),
-        "title": title,
-        "path": file_path.display().to_string(),
-    }))
+    let input = ProposalInput {
+        title: title.to_string(),
+        author: opt(author),
+        status: opt(status),
+        proposal_type: opt(proposal_type),
+        tags: csv(tags),
+        supersedes: opt(supersedes),
+    };
+    Ok(create_proposal(cfg, &input)?.to_json())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1963,66 +967,417 @@ pub fn create_contact_programmatic(
     status: Option<&str>,
     tags: Option<&str>,
 ) -> McResult<JsonValue> {
-    check_mode(EntityKind::Contact, cfg)?;
-    validate_name_not_empty(name, EntityKind::Contact)?;
+    let input = ContactInput {
+        name: name.to_string(),
+        customer: customer.to_string(),
+        role: opt(role),
+        email: opt(email),
+        phone: opt(phone),
+        status: opt(status),
+        tags: csv(tags),
+    };
+    Ok(create_contact(cfg, &input)?.to_json())
+}
 
-    // Validate customer exists
-    let cust_dir = find_customer_dir(cfg, customer)?;
+// ---------------------------------------------------------------------------
+// Interactive CLI
+// ---------------------------------------------------------------------------
 
-    let id = entity::next_id(EntityKind::Contact, cfg)?;
-    let today = util::today_str();
+/// Prompts for values the user did not pass as flags. With `yes` (or without
+/// a terminal) every prompt silently takes its default.
+struct Prompter {
+    interactive: bool,
+}
 
-    let role = role.unwrap_or("").to_string();
-    let email_val = email.unwrap_or("").to_string();
-    let phone = phone.unwrap_or("").to_string();
-    let status = status
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| cfg.statuses.contact.first().cloned().unwrap_or_default());
-    validate_status(&status, EntityKind::Contact, cfg)?;
-    let tags: Vec<String> = tags.map(util::parse_comma_list).unwrap_or_default();
+impl Prompter {
+    fn new(yes: bool) -> Self {
+        Self {
+            interactive: !yes && std::io::IsTerminal::is_terminal(&std::io::stdin()),
+        }
+    }
 
-    let (tmpl_fm, tmpl_body) = template::load_template(&cfg.templates_dir, "contact")?;
+    fn text(&self, given: Option<&str>, label: &str, default: &str) -> String {
+        if let Some(v) = given {
+            return v.to_string();
+        }
+        if !self.interactive {
+            return default.to_string();
+        }
+        dialoguer::Input::<String>::new()
+            .with_prompt(label)
+            .default(default.to_string())
+            .interact_text()
+            .unwrap_or_else(|_| default.to_string())
+    }
 
-    let mut fields = HashMap::new();
-    fields.insert("id".into(), Value::String(id.to_string()));
-    fields.insert(
-        "aliases".into(),
-        Value::Sequence(vec![Value::String(id.to_string())]),
+    fn optional(&self, given: Option<&str>, label: &str) -> String {
+        if let Some(v) = given {
+            return v.to_string();
+        }
+        if !self.interactive {
+            return String::new();
+        }
+        dialoguer::Input::<String>::new()
+            .with_prompt(format!("{} (blank to skip)", label))
+            .allow_empty(true)
+            .interact_text()
+            .unwrap_or_default()
+    }
+
+    fn list(&self, given: Option<&str>, label: &str) -> Vec<String> {
+        util::parse_comma_list(&self.optional(given, label))
+    }
+
+    fn select(&self, given: Option<&str>, label: &str, options: &[String]) -> String {
+        if let Some(v) = given {
+            return v.to_string();
+        }
+        let default = options.first().cloned().unwrap_or_default();
+        if !self.interactive || options.is_empty() {
+            return default;
+        }
+        match dialoguer::Select::new()
+            .with_prompt(label)
+            .items(options)
+            .default(0)
+            .interact_opt()
+        {
+            Ok(Some(idx)) => options[idx].clone(),
+            _ => default,
+        }
+    }
+
+    fn confirm(&self) -> bool {
+        if !self.interactive {
+            return true;
+        }
+        dialoguer::Confirm::new()
+            .with_prompt("Create this entity?")
+            .default(true)
+            .interact()
+            .unwrap_or_default()
+    }
+}
+
+fn print_summary(kind: EntityKind, id: &str, fields: &[(&str, String)]) {
+    println!();
+    println!("  {} {}", "New".bold(), kind.label().bold());
+    println!("  {}", ui::rule(36));
+    println!("  {:<14} {}", "ID:".dimmed(), id);
+    for (key, value) in fields {
+        let display = if value.is_empty() {
+            "(none)".dimmed().to_string()
+        } else {
+            value.to_string()
+        };
+        println!("  {:<14} {}", format!("{}:", key).dimmed(), display);
+    }
+    println!("  {}", ui::rule(36));
+}
+
+/// Show the summary, ask for confirmation, create, and report the result.
+fn confirm_and_create(
+    p: &Prompter,
+    cfg: &ResolvedConfig,
+    kind: EntityKind,
+    fields: &[(&str, String)],
+    create: impl FnOnce() -> McResult<Created>,
+) -> McResult<()> {
+    let preview_id = entity::next_id(kind, cfg)?;
+    print_summary(kind, &preview_id.to_string(), fields);
+    if !p.confirm() {
+        println!("{}", "Cancelled.".dimmed());
+        return Ok(());
+    }
+    let created = create()?;
+    println!(
+        "{} Created {} {} ({}) at {}",
+        ui::glyphs().ok.green().bold(),
+        kind.label(),
+        created.id.cyan().bold(),
+        created.name.bold(),
+        created.path.display().to_string().dimmed()
     );
-    fields.insert("name".into(), Value::String(name.to_string()));
-    fields.insert("role".into(), Value::String(role));
-    fields.insert("email".into(), Value::String(email_val));
-    fields.insert("phone".into(), Value::String(phone));
-    fields.insert(
-        "customer".into(),
-        Value::String(frontmatter::wrap_wikilink(customer)),
-    );
-    fields.insert("status".into(), Value::String(status));
-    fields.insert(
-        "tags".into(),
-        Value::Sequence(tags.iter().map(|t| Value::String(t.clone())).collect()),
-    );
-    fields.insert("created".into(), Value::String(today.clone()));
-    fields.insert("updated".into(), Value::String(today));
+    Ok(())
+}
 
-    let mut placeholders = HashMap::new();
-    placeholders.insert("name".into(), name.to_string());
+fn priority_label(priority: u32) -> String {
+    let name = match priority {
+        1 => "critical",
+        2 => "high",
+        3 => "medium",
+        4 => "low",
+        _ => "invalid",
+    };
+    format!("{priority} ({name})")
+}
 
-    let (fm, body) = template::render_template(tmpl_fm, &tmpl_body, &fields, &placeholders);
-    let doc = frontmatter::serialize_document(&fm, &body);
-
-    let slug = util::slugify(name);
-    let filename = format!("{}-{}.md", id, slug);
-    let contacts_dir = cust_dir.join("contacts");
-    fs::create_dir_all(&contacts_dir)?;
-    let file_path = contacts_dir.join(&filename);
-    util::atomic_write(&file_path, doc.as_bytes())?;
-
-    Ok(serde_json::json!({
-        "id": id.to_string(),
-        "name": name,
-        "path": file_path.display().to_string(),
-    }))
+pub fn run(entity: &NewEntity, cfg: &ResolvedConfig, yes: bool) -> McResult<()> {
+    let p = Prompter::new(yes);
+    match entity {
+        NewEntity::Customer {
+            name,
+            owner,
+            status,
+            tags,
+        } => {
+            let kind = EntityKind::Customer;
+            check_mode(kind, cfg)?;
+            validate_name_not_empty(name, kind)?;
+            let input = CustomerInput {
+                name: name.clone(),
+                owner: Some(p.text(owner.as_deref(), "Owner", "")),
+                status: Some(p.select(status.as_deref(), "Status", kind.statuses(cfg))),
+                tags: p.list(tags.as_deref(), "Tags (comma-separated)"),
+            };
+            resolve_status(&input.status, kind, cfg)?;
+            let fields = [
+                ("Name", input.name.clone()),
+                ("Owner", input.owner.clone().unwrap_or_default()),
+                ("Status", input.status.clone().unwrap_or_default()),
+                ("Tags", input.tags.join(", ")),
+            ];
+            confirm_and_create(&p, cfg, kind, &fields, || create_customer(cfg, &input))
+        }
+        NewEntity::Project {
+            name,
+            owner,
+            status,
+            customers,
+            tags,
+        } => {
+            let kind = EntityKind::Project;
+            check_mode(kind, cfg)?;
+            validate_name_not_empty(name, kind)?;
+            let input = ProjectInput {
+                name: name.clone(),
+                owner: Some(p.text(owner.as_deref(), "Owner", "")),
+                status: Some(p.select(status.as_deref(), "Status", kind.statuses(cfg))),
+                tags: p.list(tags.as_deref(), "Tags (comma-separated)"),
+                customers: p.list(customers.as_deref(), "Link customers (comma-separated IDs)"),
+            };
+            resolve_status(&input.status, kind, cfg)?;
+            let fields = [
+                ("Name", input.name.clone()),
+                ("Owner", input.owner.clone().unwrap_or_default()),
+                ("Status", input.status.clone().unwrap_or_default()),
+                ("Tags", input.tags.join(", ")),
+                ("Customers", input.customers.join(", ")),
+            ];
+            confirm_and_create(&p, cfg, kind, &fields, || create_project(cfg, &input))
+        }
+        NewEntity::Meeting {
+            title,
+            date,
+            time,
+            duration,
+            status,
+            tags,
+            customers,
+            projects,
+            attendees,
+        } => {
+            let kind = EntityKind::Meeting;
+            validate_name_not_empty(title, kind)?;
+            let input = MeetingInput {
+                title: title.clone(),
+                date: Some(date.clone().unwrap_or_else(util::today_str)),
+                time: Some(p.text(time.as_deref(), "Time (HH:MM)", "10:00")),
+                duration: Some(p.text(duration.as_deref(), "Duration", "30m")),
+                status: Some(p.select(status.as_deref(), "Status", kind.statuses(cfg))),
+                tags: p.list(tags.as_deref(), "Tags (comma-separated)"),
+                customers: p.list(customers.as_deref(), "Link customers (comma-separated IDs)"),
+                projects: p.list(projects.as_deref(), "Link projects (comma-separated IDs)"),
+                attendees: csv(attendees.as_deref()),
+            };
+            resolve_status(&input.status, kind, cfg)?;
+            if let Some(d) = present(&input.date) {
+                validate_date(d, "meeting date")?;
+            }
+            let fields = [
+                ("Title", input.title.clone()),
+                ("Date", input.date.clone().unwrap_or_default()),
+                ("Time", input.time.clone().unwrap_or_default()),
+                ("Duration", input.duration.clone().unwrap_or_default()),
+                ("Status", input.status.clone().unwrap_or_default()),
+                ("Tags", input.tags.join(", ")),
+                ("Customers", input.customers.join(", ")),
+                ("Projects", input.projects.join(", ")),
+                ("Attendees", input.attendees.join(", ")),
+            ];
+            confirm_and_create(&p, cfg, kind, &fields, || create_meeting(cfg, &input))
+        }
+        NewEntity::Research {
+            title,
+            owner,
+            agents,
+            tags,
+        } => {
+            let kind = EntityKind::Research;
+            validate_name_not_empty(title, kind)?;
+            let input = ResearchInput {
+                title: title.clone(),
+                owner: Some(p.text(owner.as_deref(), "Owner", "")),
+                agents: agents.as_deref().map(util::parse_comma_list),
+                tags: p.list(tags.as_deref(), "Tags (comma-separated)"),
+            };
+            let agents_display = match &input.agents {
+                Some(a) => a.join(", "),
+                None => DEFAULT_RESEARCH_AGENTS.join(", "),
+            };
+            let fields = [
+                ("Title", input.title.clone()),
+                ("Owner", input.owner.clone().unwrap_or_default()),
+                ("Agents", agents_display),
+                ("Tags", input.tags.join(", ")),
+            ];
+            confirm_and_create(&p, cfg, kind, &fields, || create_research(cfg, &input))
+        }
+        NewEntity::Task {
+            title,
+            project,
+            customer,
+            owner,
+            status,
+            priority,
+            tags,
+            sprint,
+            depends_on,
+            due_date,
+        } => {
+            let kind = EntityKind::Task;
+            validate_name_not_empty(title, kind)?;
+            let input = TaskInput {
+                title: title.clone(),
+                project: project.clone(),
+                customer: customer.clone(),
+                owner: Some(p.text(owner.as_deref(), "Owner", "")),
+                status: Some(p.select(status.as_deref(), "Status", kind.statuses(cfg))),
+                priority: *priority,
+                tags: p.list(tags.as_deref(), "Tags (comma-separated)"),
+                sprint: sprint.clone(),
+                depends_on: csv(depends_on.as_deref()),
+                due_date: due_date.clone(),
+            };
+            resolve_status(&input.status, kind, cfg)?;
+            let priority = input.priority.unwrap_or(DEFAULT_PRIORITY);
+            validate_priority(priority)?;
+            let fields = [
+                ("Title", input.title.clone()),
+                ("Status", input.status.clone().unwrap_or_default()),
+                ("Priority", priority_label(priority)),
+                ("Owner", input.owner.clone().unwrap_or_default()),
+                ("Projects", input.project.clone().unwrap_or_default()),
+                ("Customers", input.customer.clone().unwrap_or_default()),
+                ("Sprint", input.sprint.clone().unwrap_or_default()),
+                ("Tags", input.tags.join(", ")),
+                ("Depends on", input.depends_on.join(", ")),
+                ("Due date", input.due_date.clone().unwrap_or_default()),
+            ];
+            confirm_and_create(&p, cfg, kind, &fields, || create_task(cfg, &input))
+        }
+        NewEntity::Sprint {
+            title,
+            owner,
+            status,
+            goal,
+            start_date,
+            end_date,
+            projects,
+            tags,
+        } => {
+            let kind = EntityKind::Sprint;
+            validate_name_not_empty(title, kind)?;
+            let input = SprintInput {
+                title: title.clone(),
+                owner: Some(p.text(owner.as_deref(), "Owner", "")),
+                status: Some(p.select(status.as_deref(), "Status", kind.statuses(cfg))),
+                goal: Some(p.optional(goal.as_deref(), "Sprint goal")),
+                start_date: Some(start_date.clone().unwrap_or_else(util::today_str)),
+                end_date: end_date.clone(),
+                tags: p.list(tags.as_deref(), "Tags (comma-separated)"),
+                projects: p.list(projects.as_deref(), "Link projects (comma-separated IDs)"),
+            };
+            resolve_status(&input.status, kind, cfg)?;
+            let fields = [
+                ("Title", input.title.clone()),
+                ("Status", input.status.clone().unwrap_or_default()),
+                ("Goal", input.goal.clone().unwrap_or_default()),
+                ("Start", input.start_date.clone().unwrap_or_default()),
+                ("End", input.end_date.clone().unwrap_or_default()),
+                ("Owner", input.owner.clone().unwrap_or_default()),
+                ("Projects", input.projects.join(", ")),
+                ("Tags", input.tags.join(", ")),
+            ];
+            confirm_and_create(&p, cfg, kind, &fields, || create_sprint(cfg, &input))
+        }
+        NewEntity::Proposal {
+            title,
+            author,
+            status,
+            proposal_type,
+            tags,
+            supersedes,
+        } => {
+            let kind = EntityKind::Proposal;
+            check_mode(kind, cfg)?;
+            validate_name_not_empty(title, kind)?;
+            let types: Vec<String> = PROPOSAL_TYPES.iter().map(|t| t.to_string()).collect();
+            let input = ProposalInput {
+                title: title.clone(),
+                author: Some(p.text(author.as_deref(), "Author", "")),
+                status: Some(p.select(status.as_deref(), "Status", kind.statuses(cfg))),
+                proposal_type: Some(p.select(proposal_type.as_deref(), "Type", &types)),
+                tags: p.list(tags.as_deref(), "Tags (comma-separated)"),
+                supersedes: supersedes.clone(),
+            };
+            resolve_status(&input.status, kind, cfg)?;
+            let fields = [
+                ("Title", input.title.clone()),
+                ("Author", input.author.clone().unwrap_or_default()),
+                ("Status", input.status.clone().unwrap_or_default()),
+                ("Type", input.proposal_type.clone().unwrap_or_default()),
+                ("Tags", input.tags.join(", ")),
+                ("Supersedes", input.supersedes.clone().unwrap_or_default()),
+            ];
+            confirm_and_create(&p, cfg, kind, &fields, || create_proposal(cfg, &input))
+        }
+        NewEntity::Contact {
+            name,
+            customer,
+            role,
+            email,
+            phone,
+            status,
+            tags,
+        } => {
+            let kind = EntityKind::Contact;
+            check_mode(kind, cfg)?;
+            validate_name_not_empty(name, kind)?;
+            // Fail fast on an unknown customer, before any prompting.
+            find_customer_dir(cfg, customer)?;
+            let input = ContactInput {
+                name: name.clone(),
+                customer: customer.clone(),
+                role: role.clone(),
+                email: email.clone(),
+                phone: phone.clone(),
+                status: Some(p.select(status.as_deref(), "Status", kind.statuses(cfg))),
+                tags: p.list(tags.as_deref(), "Tags (comma-separated)"),
+            };
+            resolve_status(&input.status, kind, cfg)?;
+            let fields = [
+                ("Name", input.name.clone()),
+                ("Customer", input.customer.clone()),
+                ("Role", input.role.clone().unwrap_or_default()),
+                ("Email", input.email.clone().unwrap_or_default()),
+                ("Phone", input.phone.clone().unwrap_or_default()),
+                ("Status", input.status.clone().unwrap_or_default()),
+                ("Tags", input.tags.join(", ")),
+            ];
+            confirm_and_create(&p, cfg, kind, &fields, || create_contact(cfg, &input))
+        }
+    }
 }
 
 #[cfg(test)]
@@ -2337,5 +1692,212 @@ mod tests {
         assert!(dir.join("planning.md").is_file());
         assert!(dir.join("review.md").is_file());
         assert!(dir.join("retrospective.md").is_file());
+    }
+
+    fn read_fm(path: &Path) -> Value {
+        frontmatter::parse_file(path).unwrap().0
+    }
+
+    #[test]
+    fn test_meetings_same_day_same_title_do_not_overwrite() {
+        let (_tmp, cfg) = setup_repo();
+        let mut input = MeetingInput::new("Standup");
+        input.date = Some("2026-03-02".into());
+        let a = create_meeting(&cfg, &input).unwrap();
+        let b = create_meeting(&cfg, &input).unwrap();
+        assert_ne!(a.path, b.path);
+        assert!(b.path.ends_with("2026-03-02-standup-2.md"));
+        assert_eq!(
+            frontmatter::get_str(&read_fm(&a.path), "id"),
+            Some("MTG-001")
+        );
+        assert_eq!(
+            frontmatter::get_str(&read_fm(&b.path), "id"),
+            Some("MTG-002")
+        );
+    }
+
+    #[test]
+    fn test_meeting_date_is_validated() {
+        let (_tmp, cfg) = setup_repo();
+        for bad in [
+            "../../escape",
+            "2026-13-01",
+            "tomorrow",
+            "2026-3-2",
+            " 2026-03-02x",
+        ] {
+            let mut input = MeetingInput::new("X");
+            input.date = Some(bad.into());
+            let err = create_meeting(&cfg, &input).unwrap_err();
+            assert!(err.to_string().starts_with("Invalid meeting date"), "{err}");
+        }
+        assert!(!cfg.root.join("escape.md").exists());
+    }
+
+    #[test]
+    fn test_research_agent_names_cannot_escape_directory() {
+        let (_tmp, cfg) = setup_repo();
+        let mut input = ResearchInput::new("Topic");
+        input.agents = Some(vec!["../../evil".into(), "Claude Opus".into(), "  ".into()]);
+        let created = create_research(&cfg, &input).unwrap();
+        assert!(created.path.join("evil").is_dir());
+        assert!(created.path.join("claude-opus").is_dir());
+        assert!(!cfg.root.join("evil").exists());
+        let fm = read_fm(&created.path.join("RES-001.md"));
+        assert_eq!(
+            frontmatter::get_string_list(&fm, "agents"),
+            vec!["../../evil", "Claude Opus"]
+        );
+    }
+
+    #[test]
+    fn test_wikilinked_refs_are_not_double_wrapped() {
+        let (_tmp, cfg) = setup_repo();
+        create_customer_programmatic(&cfg, "Acme", None, None, None).unwrap();
+        let created = create_project_programmatic(
+            &cfg,
+            "P",
+            None,
+            None,
+            Some("[[CUST-001]], CUST-002"),
+            None,
+        )
+        .unwrap();
+        let path = PathBuf::from(created["path"].as_str().unwrap()).join("PROJ-001.md");
+        let fm = read_fm(&path);
+        assert_eq!(
+            frontmatter::get_string_list(&fm, "customers"),
+            vec!["[[CUST-001]]", "[[CUST-002]]"]
+        );
+
+        let contact = create_contact(&cfg, &ContactInput::new("Ann", "[[CUST-001]]")).unwrap();
+        assert_eq!(
+            frontmatter::get_str(&read_fm(&contact.path), "customer"),
+            Some("[[CUST-001]]")
+        );
+    }
+
+    #[test]
+    fn test_task_priority_and_due_date_validated() {
+        let (_tmp, cfg) = setup_repo();
+        let mut input = TaskInput::new("T");
+        input.priority = Some(7);
+        assert!(create_task(&cfg, &input)
+            .unwrap_err()
+            .to_string()
+            .starts_with("Invalid priority"));
+        input.priority = Some(1);
+        input.due_date = Some("31.12.2026".into());
+        assert!(create_task(&cfg, &input)
+            .unwrap_err()
+            .to_string()
+            .starts_with("Invalid due date"));
+        // Nothing was written by the failed attempts.
+        assert_eq!(entity::next_id(EntityKind::Task, &cfg).unwrap().number, 1);
+    }
+
+    #[test]
+    fn test_task_with_unknown_project_allocates_nothing() {
+        let (_tmp, cfg) = setup_repo();
+        let mut input = TaskInput::new("Scoped");
+        input.project = Some("PROJ-404".into());
+        assert!(matches!(
+            create_task(&cfg, &input),
+            Err(McError::EntityNotFound(_))
+        ));
+        assert!(crate::data::collect_tasks(&cfg).unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_blank_status_uses_default_and_name_is_trimmed() {
+        let (_tmp, cfg) = setup_repo();
+        let created = create_customer_programmatic(&cfg, "  Acme  ", None, Some(""), None).unwrap();
+        assert_eq!(created["name"], "Acme");
+        let path = PathBuf::from(created["path"].as_str().unwrap()).join("CUST-001.md");
+        assert_eq!(
+            frontmatter::get_str(&read_fm(&path), "status"),
+            Some("active")
+        );
+    }
+
+    #[test]
+    fn test_new_task_lands_in_status_folder() {
+        let (_tmp, cfg) = setup_repo();
+        for (n, (status, folder)) in [
+            ("done", "done"),
+            ("cancelled", "done"),
+            ("in-progress", "todo"),
+            ("backlog", "todo"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut input = TaskInput::new(format!("Beta {n}"));
+            input.status = Some(status.into());
+            let created = create_task(&cfg, &input).unwrap();
+            assert_eq!(
+                created.path.parent().unwrap(),
+                cfg.tasks_dir.join(folder),
+                "status {status}"
+            );
+            assert_eq!(
+                created.path.parent().unwrap().file_name().unwrap(),
+                entity::task_status_folder(status)
+            );
+        }
+        // Finding and moving the task still works from its initial folder.
+        let found = crate::data::find_entity_by_id("TASK-001", &cfg).unwrap();
+        assert!(found.source_path.starts_with(cfg.tasks_dir.join("done")));
+    }
+
+    #[test]
+    fn test_unsluggable_names_get_fallback_slug() {
+        let (_tmp, cfg) = setup_repo();
+        let created = create_task(&cfg, &TaskInput::new("!!!")).unwrap();
+        assert!(created.path.ends_with("TASK-001-untitled.md"));
+    }
+
+    #[test]
+    fn test_sprint_end_before_start_rejected() {
+        let (_tmp, cfg) = setup_repo();
+        let mut input = SprintInput::new("S");
+        input.start_date = Some("2026-02-10".into());
+        input.end_date = Some("2026-02-01".into());
+        assert!(create_sprint(&cfg, &input)
+            .unwrap_err()
+            .to_string()
+            .starts_with("Invalid end date"));
+    }
+
+    #[test]
+    fn test_created_json_shape() {
+        let (_tmp, cfg) = setup_repo();
+        let c = create_customer_programmatic(&cfg, "Acme", None, None, None).unwrap();
+        assert!(c.get("name").is_some() && c.get("title").is_none());
+        let t = create_task_programmatic(
+            &cfg, "T", None, None, None, None, None, None, None, None, None,
+        )
+        .unwrap();
+        assert_eq!(t["id"], "TASK-001");
+        assert_eq!(t["title"], "T");
+        assert!(t.get("name").is_none());
+    }
+
+    #[test]
+    fn test_proposal_and_research_defaults() {
+        let (_tmp, cfg) = setup_repo();
+        let p = create_proposal(&cfg, &ProposalInput::new("Use Rust")).unwrap();
+        let fm = read_fm(&p.path);
+        assert_eq!(frontmatter::get_str(&fm, "type"), Some("architecture"));
+        assert_eq!(frontmatter::get_str(&fm, "status"), Some("draft"));
+        assert_eq!(frontmatter::get_str(&fm, "supersedes"), Some(""));
+
+        let r = create_research(&cfg, &ResearchInput::new("R")).unwrap();
+        let fm = read_fm(&r.path.join("RES-001.md"));
+        assert_eq!(frontmatter::get_string_list(&fm, "agents").len(), 4);
+        for agent in DEFAULT_RESEARCH_AGENTS {
+            assert!(r.path.join(agent).is_dir());
+        }
     }
 }

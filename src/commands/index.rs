@@ -1,5 +1,6 @@
+use crate::cli::ui;
 use crate::config::ResolvedConfig;
-use crate::data;
+use crate::data::{self, EntityRecord};
 use crate::entity::EntityKind;
 use crate::error::McResult;
 use crate::frontmatter;
@@ -42,24 +43,69 @@ fn strip_wikilinks_in_json(val: &mut JsonValue) {
 }
 
 pub fn run(cfg: &ResolvedConfig) -> McResult<()> {
-    println!("{} Building indexes...", "⟳".blue());
-
     let result = run_quiet(cfg)?;
+    let counts = [
+        (EntityKind::Customer, result.customers),
+        (EntityKind::Contact, result.contacts),
+        (EntityKind::Project, result.projects),
+        (EntityKind::Meeting, result.meetings),
+        (EntityKind::Research, result.research),
+        (EntityKind::Task, result.tasks),
+        (EntityKind::Sprint, result.sprints),
+        (EntityKind::Proposal, result.proposals),
+    ];
+    let available: Vec<(EntityKind, usize)> = counts
+        .into_iter()
+        .filter(|(k, _)| cfg.entity_available(k))
+        .collect();
 
-    println!(
-        "{} Index built: {} customers, {} projects, {} meetings, {} research, {} tasks, {} sprints, {} proposals, {} contacts",
-        "✓".green().bold(),
-        result.customers.to_string().cyan(),
-        result.projects.to_string().cyan(),
-        result.meetings.to_string().cyan(),
-        result.research.to_string().cyan(),
-        result.tasks.to_string().cyan(),
-        result.sprints.to_string().cyan(),
-        result.proposals.to_string().cyan(),
-        result.contacts.to_string().cyan(),
-    );
+    if ui::get().json {
+        let mut obj = serde_json::Map::new();
+        for (k, n) in &available {
+            obj.insert(k.label_plural().to_string(), JsonValue::from(*n));
+        }
+        let out = serde_json::json!({
+            "path": rel_path(&cfg.data_dir, cfg),
+            "counts": obj,
+        });
+        println!("{}", serde_json::to_string_pretty(&out)?);
+        return Ok(());
+    }
 
+    let total: usize = available.iter().map(|(_, n)| n).sum();
+    ui::success(format!(
+        "Indexed {} into {}",
+        ui::count(total, "entity", "entities").bold(),
+        rel_path(&cfg.data_dir, cfg).cyan()
+    ));
+    let sep = format!(" {} ", ui::glyphs().sep);
+    let parts: Vec<String> = available
+        .iter()
+        .map(|(k, n)| format!("{} {}", n.to_string().bold(), k.label_plural()))
+        .collect();
+    println!("  {}", parts.join(&sep.dimmed().to_string()));
     Ok(())
+}
+
+fn rel_path(path: &std::path::Path, cfg: &ResolvedConfig) -> String {
+    path.strip_prefix(&cfg.root)
+        .unwrap_or(path)
+        .display()
+        .to_string()
+}
+
+/// JSON form of an entity: frontmatter with wiki-links stripped plus `_source`
+/// (path relative to the repo root). Shared by `mc index` and `--json` output.
+pub fn entity_json(entity: &EntityRecord, cfg: &ResolvedConfig) -> JsonValue {
+    let mut json_val = data::yaml_to_json(&entity.frontmatter);
+    strip_wikilinks_in_json(&mut json_val);
+    if let Some(obj) = json_val.as_object_mut() {
+        obj.insert(
+            "_source".into(),
+            JsonValue::String(rel_path(&entity.source_path, cfg)),
+        );
+    }
+    json_val
 }
 
 pub struct IndexResult {
@@ -153,22 +199,7 @@ pub fn run_quiet(cfg: &ResolvedConfig) -> McResult<IndexResult> {
 
 fn collect_json(kind: EntityKind, cfg: &ResolvedConfig) -> McResult<Vec<JsonValue>> {
     let entities = data::collect_entities(kind, cfg)?;
-    let mut json_entries: Vec<JsonValue> = Vec::new();
-
-    for entity in &entities {
-        let mut json_val = data::yaml_to_json(&entity.frontmatter);
-        strip_wikilinks_in_json(&mut json_val);
-        if let Some(obj) = json_val.as_object_mut() {
-            let rel = entity
-                .source_path
-                .strip_prefix(&cfg.root)
-                .unwrap_or(&entity.source_path)
-                .to_string_lossy()
-                .to_string();
-            obj.insert("_source".into(), JsonValue::String(rel));
-        }
-        json_entries.push(json_val);
-    }
+    let mut json_entries: Vec<JsonValue> = entities.iter().map(|e| entity_json(e, cfg)).collect();
 
     // Sort by ID
     json_entries.sort_by(|a, b| {

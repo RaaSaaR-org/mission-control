@@ -115,10 +115,11 @@ impl IntoResponse for ApiError {
 }
 
 /// Map an `McError` to a `ProblemJson`. Status codes:
-/// - 400: invalid id format, status not in config, name empty, frontmatter parse
-/// - 403: kind not available in current repo mode
-/// - 404: entity not found, repo root not found, template missing
-/// - 409: already initialized
+/// - 400: invalid input (`Usage`: bad status/priority/date, empty name),
+///   invalid id format, frontmatter parse
+/// - 403: kind not enabled in this repo (embedded mode or missing from `paths:`)
+/// - 404: entity or other requested thing not found (`EntityNotFound`, `NotFound`)
+/// - 409: already initialized, or the file changed under a checklist edit
 /// - 422: validation failed (set of issues)
 /// - 500: io / yaml / json / zip / pdf / other
 fn problem_from_mc_error(e: &McError) -> ProblemJson {
@@ -135,6 +136,18 @@ fn problem_from_mc_error(e: &McError) -> ProblemJson {
             StatusCode::NOT_FOUND,
             e.to_string(),
         ),
+        McError::NotFound { .. } => ProblemJson::new(
+            "not-found",
+            "Not found",
+            StatusCode::NOT_FOUND,
+            e.to_string(),
+        ),
+        McError::Usage { .. } => ProblemJson::new(
+            "bad-request",
+            "Bad request",
+            StatusCode::BAD_REQUEST,
+            e.to_string(),
+        ),
         McError::Frontmatter { .. } => ProblemJson::new(
             "frontmatter",
             "Invalid frontmatter",
@@ -149,7 +162,7 @@ fn problem_from_mc_error(e: &McError) -> ProblemJson {
         ),
         McError::NotAvailableInMode { .. } => ProblemJson::new(
             "not-available",
-            "Entity kind not available in this repo mode",
+            "Entity kind not enabled in this repo",
             StatusCode::FORBIDDEN,
             e.to_string(),
         ),
@@ -165,17 +178,23 @@ fn problem_from_mc_error(e: &McError) -> ProblemJson {
             StatusCode::INTERNAL_SERVER_ERROR,
             e.to_string(),
         ),
+        McError::Conflict { .. } => ProblemJson::new(
+            "conflict",
+            "Conflict",
+            StatusCode::CONFLICT,
+            match e.hint() {
+                Some(hint) => format!("{e} {hint}"),
+                None => e.to_string(),
+            },
+        ),
         McError::AlreadyInitialized(_) => ProblemJson::new(
             "already-initialized",
             "Already initialized",
             StatusCode::CONFLICT,
             e.to_string(),
         ),
-        // Some create_*_programmatic helpers signal user errors via McError::Other
-        // (e.g. "name cannot be empty", "Invalid task status 'frob'"). Without a
-        // dedicated variant we can't tell those apart from internal errors, so we
-        // map by message prefix — short and pragmatic, and a future PR can split
-        // out a typed `BadRequest` variant.
+        // Fallback for user errors still signalled via McError::Other; the core
+        // validation paths use the typed `Usage`/`NotFound` variants above.
         McError::Other(msg) if is_user_facing_other(msg) => {
             ProblemJson::new("bad-request", "Bad request", StatusCode::BAD_REQUEST, msg)
         }
@@ -198,4 +217,31 @@ fn is_user_facing_other(msg: &str) -> bool {
         || lower.contains("must be ")
         || lower.contains("does not exist")
         || lower.contains("not found")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::entity::EntityKind;
+
+    fn status_of(e: McError) -> u16 {
+        problem_from_mc_error(&e).status
+    }
+
+    #[test]
+    fn typed_errors_map_to_client_statuses() {
+        assert_eq!(status_of(McError::usage("Invalid priority 9", None)), 400);
+        assert_eq!(status_of(McError::not_found("no such file", None)), 404);
+        assert_eq!(status_of(McError::EntityNotFound("TASK-9".into())), 404);
+        let not_enabled = McError::NotAvailableInMode {
+            kind: EntityKind::Customer,
+            embedded: false,
+        };
+        assert_eq!(status_of(not_enabled), 403);
+        assert_eq!(status_of(McError::conflict("item changed", None)), 409);
+        assert_eq!(status_of(McError::Io(std::io::Error::other("disk"))), 500);
+        let p = problem_from_mc_error(&McError::not_found("gone", None));
+        assert!(p.kind.ends_with("/not-found"));
+        assert_eq!(p.detail, "gone");
+    }
 }

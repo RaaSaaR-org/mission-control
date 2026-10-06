@@ -94,27 +94,41 @@ mc task board
 ```
 
 ```
-┌─────────────────────────────────────────────────────────────────────┐
-│ backlog          todo             in-progress      done             │
-├─────────────────────────────────────────────────────────────────────┤
-│ TASK-003 [P3]    TASK-002 [P2]    TASK-001 [P1]                     │
-│ Write tests      Update docs      Fix auth bug                      │
-└─────────────────────────────────────────────────────────────────────┘
+  ◆ TASK BOARD  project=PROJ-001
+
+  BACKLOG 2                TODO 1                   IN-PROGRESS 1            DONE 4
+  ━━━━━━━━━━━━━━━━━━━━━━   ━━━━━━━━━━━━━━━━━━━━━━   ━━━━━━━━━━━━━━━━━━━━━━   ━━━━━━━━━━━━━━━━━━━━━━
+  P2 TASK-003              P2 TASK-002              P1 TASK-001              P3 TASK-007
+  Write tests              Update docs              Fix auth bug             Set up CI
+  @alice                   due Oct 30 · @bob        due Oct 09 · @alice
 ```
+
+Columns follow your configured task statuses. Cards are sorted by priority (done: most recently updated first); each column shows up to `--limit` cards (done: 5), `--all` shows everything including cancelled. Filter with `--project`, `--customer`, `--sprint` or `--owner`. Narrow terminals get a stacked layout.
 
 ### Move Tasks
 
 ```bash
 mc task move TASK-001 in-progress
-mc task move TASK-001 done
+mc task move 1 done          # bare numbers and task-1 work too
+mc task move 7 wip           # case-insensitive, common aliases (wip, doing, open, finished)
 ```
+
+Typos get a suggestion instead of a silent failure:
+
+```
+error: 'doen' is not a valid task status
+  hint: did you mean 'done'? Valid: backlog, todo, in-progress, review, done, cancelled
+```
+
+Moving between active and finished statuses moves the file between `todo/` and `done/`. After finishing a task, mc tells you what is next.
 
 ### Next Task
 
-Get the highest-priority unblocked task:
+Get the highest-priority unblocked task (`todo` before `backlog`, then priority, then due date):
 
 ```bash
 mc task next
+mc task next -n 5 --owner alice   # the top of the queue
 ```
 
 ### Filtering
@@ -125,6 +139,8 @@ mc list tasks --sprint 2026-W06 --owner alice
 mc task board --project PROJ-001
 ```
 
+Status filters are validated against your config, so `--status in-prog` suggests `in-progress` rather than returning an empty list.
+
 ### Dependencies
 
 Tasks can depend on other tasks:
@@ -134,6 +150,23 @@ mc new task "Deploy to prod" --depends-on TASK-001,TASK-002
 ```
 
 Blocked tasks are hidden from `mc task next` until their dependencies are done.
+
+### Checklists and Comments
+
+Markdown task lists in any entity (`- [ ] Book room`) are a checklist you can tick from the terminal, the dashboard or an agent. Only the box character changes; nothing else in the file is touched.
+
+```bash
+mc check TASK-069              # numbered list with progress
+mc check TASK-069 2            # tick item 2
+mc check TASK-069 2 --uncheck  # untick it
+```
+
+Tasks and meetings take comments. They are appended to a `## Comments` section at the end of the file, one `### 2026-10-06 14:32 · Author` heading each, so they diff cleanly and read fine in any editor. The author defaults to `git config user.name` (else `$USER`). Control characters are dropped and an unclosed code fence or HTML block is closed at the end of the comment, so one comment can't swallow the ones after it.
+
+```bash
+mc comment TASK-069 "Shipped, see TASK-070"
+git log -1 --format=%B | mc comment TASK-069 -   # text from stdin
+```
 
 ## AI Agent Integration (MCP)
 
@@ -191,6 +224,9 @@ All tools return JSON with documented fields. Parameter descriptions include val
 | `create_contact` | Create a contact under a customer (standalone only) |
 | `create_proposal` | Create a proposal / decision record (standalone only) |
 | `move_task` | Move a task to a new status, optionally assign a sprint |
+| `list_checklist` | List an entity's `- [ ]` checklist items with progress |
+| `check_item` | Tick or untick a checklist item (only that character changes) |
+| `add_comment` | Comment on a task or meeting |
 | `print_meeting` | Export meeting to PDF |
 | `print_research` | Export research to PDF |
 | `print_file` | Generate branded PDF from any markdown file |
@@ -215,12 +251,33 @@ Resources provide read-only data snapshots. Start with `mc://config` to discover
 
 ## Web Dashboard
 
-Browse all your data in a local web UI:
+Browse and update your data in a local web UI:
 
 ```bash
-mc serve
-# Open http://localhost:5000
+mc serve                                  # http://localhost:5000, editing on
+mc serve --read-only                      # browse only
+mc serve --base-path /hq                  # behind a reverse proxy at /hq (read-only)
+mc serve --base-path /hq --allow-edits    # behind a proxy, with editing
 ```
+
+- **Overview**: a six-week flight plan (open task deadlines as ticks coloured by urgency, meetings as diamonds, a magenta line for today, older overdue work in a separate bin), overdue and soon-due tasks, upcoming meetings, active sprint progress against plan, a status breakdown per entity type, and recently changed files.
+- **Tasks**: a kanban board (lanes follow your configured task statuses, late counts per lane, finished work collapsed) and a sortable, filterable list with a compact-rows toggle.
+- **Meeting calendar** (`/meetings/calendar?month=2026-10`, or **Calendar** on the meetings list): a month grid with weeks starting on Monday, ISO week numbers and today in magenta. Meetings sit on their `date` with their `time` and status; busy days fold into "+n more". A switch overlays sprints as bands and open task deadlines as ticks. On phones the grid becomes an agenda grouped by day. Meetings without a valid `date` are listed under **Undated**.
+- **Editing**: drag cards between lanes, or use a card's ⋮ menu (or focus it and press `m`) to move it; every move can be undone from its toast. On a task's page, **Edit** (`e`) changes status, priority, owner, sprint and due date. **New task** (`c`, anywhere) creates a task with the same logic as `mc new task`, prefilled from the page you're on. Changes are written straight to the Markdown files.
+- **Checklists and comments**: `- [ ]` items in any page's notes can be ticked in place, with a progress bar above the notes; if the file changed on disk meanwhile, the tick is refused instead of hitting the wrong line. Tasks and meetings show their comments below the notes and a composer (`⌘↵` posts) that writes to the file's `## Comments` section.
+- **Command palette**: `⌘K` / `Ctrl K` or `/` jumps to any entity by ID, number, name or tag, to any page, or runs an action (new task, switch theme). The last row searches all notes.
+- **Previews**: rest the mouse on any link to an entity (a `[[TASK-069]]` in notes, a related task, a board card, a table row), or tab to it, and a small card shows its status, priority, owner, due date, sprint/project/customer, meeting time and attendees, the first lines of its notes, checklist progress and how many comments it has. `esc` closes it; on touch screens a tap just opens the link.
+- **Live refresh**: when the files change on disk (the CLI, an editor, `git pull`), the open page updates itself, or offers a reload if you're in the middle of something.
+- **Lists and detail pages**: filter by status or tag, sort by column, narrow rows with the filter box; detail pages show a title block, named `[[ID|alias]]` links and everything that references the entity, upcoming meetings first.
+- **Linked files**: relative links and images in notes (`notes/deep-dive.md`, `../RES-002-x/RES-002.md`, `assets/photo.jpg`) work. Links to another entity's file open its page; other Markdown files in the repo open as a page of their own, and images and PDFs are shown as they are. Hidden paths (`.git`, `.env`) and other file types are never served. Wide tables become stacked rows on phones.
+
+**Keyboard shortcuts** (press `?` in the dashboard for the full list): `⌘K` or `/` palette, `c` new task, `g d` overview, `g t` task board, `g l` task list, `g m` / `g c` / `g p` / `g r` / `g s` meetings, customers, projects, research, sprints, `b` / `l` board or list, `←` / `→` (or `[` / `]`) previous or next month and `.` this month in the calendar, `j` / `k` move through rows or cards, `m` move the focused card, `e` edit the task, `t` switch light and dark, `esc` close.
+
+**Editing and security.** The server only listens on 127.0.0.1. Write requests must carry an `X-MC-Request: 1` header and come from the dashboard's own origin; locally they must also address `localhost`, which stops other websites (including DNS-rebinding tricks) from changing your files. Every value is checked against your configured statuses, priorities and existing sprints, projects and customers. With `--base-path` the dashboard is read-only unless you pass `--allow-edits`; put authentication in front of it before you do. Read-only mode hides all edit controls and answers writes with 403. Every page still works without JavaScript; editing needs it.
+
+The dashboard follows the system light/dark setting; a switch in the sidebar (or `t`) overrides it per browser. It works on phones and in print.
+
+To theme it, set `brand.custom_css` in `config.yml` and override the `--mc-*` CSS custom properties: `--mc-blue` is the primary colour, `--mc-amber` the caution/accent colour, `--mc-route` the "today" marker, and `--mc-surface*`, `--mc-text-*` and `--mc-border-light` the neutrals. Fonts come from `--font-sans`, `--font-display`, `--font-readout` and `--font-mono`. The built-in tokens sit in a cascade layer, so any rule in your stylesheet wins; a stylesheet that pins a single `color-scheme` locks the theme and hides the switch. Relative `url(...)` references in that stylesheet (fonts, images) resolve against the stylesheet's own directory.
 
 ## REST API
 
@@ -292,22 +349,38 @@ The defaults work out of the box. Edit the config when you want to customize sta
 |---------|-------------|
 | `mc init` | Initialize a new repo (use `--embedded` for existing projects) |
 | `mc new <type> "name"` | Create a new entity |
-| `mc list <type>` | List entities with optional filters |
-| `mc show <ID>` | Display entity details |
+| `mc list <type>` (`mc ls`) | List entities with optional filters; tables adapt to the terminal width |
+| `mc show <ID> [--raw] [--open]` | Entity details with the notes rendered for the terminal, clickable links and a pager |
 | `mc task board` | Kanban board view |
 | `mc task move <ID> <status>` | Change task status |
-| `mc task next` | Show next actionable task |
-| `mc validate` | Check repo structure and frontmatter |
-| `mc status` | Dashboard with counts and recent activity |
+| `mc task next [-n N]` | Show next actionable task(s) |
+| `mc check <ID> [N] [--uncheck]` | List an entity's checklist, or tick/untick item N |
+| `mc comment <ID> "text"` | Comment on a task or meeting (`-` reads stdin, `--author` overrides) |
+| `mc validate` | Check repo structure and frontmatter, grouped by file |
+| `mc status` | Dashboard: counts per status, focus (overdue, in progress, next up), recent activity |
 | `mc print meeting <ID>` | Export meeting to PDF |
 | `mc print research <ID>` | Export research to PDF |
 | `mc print file <path>` | Generate branded PDF from any markdown file |
 | `mc index` | Rebuild JSON index files (`data/*.json`) |
-| `mc export <type> <ID>` | Export entity to a zip archive |
+| `mc export customer <ID or slug>` | Export a customer folder to a zip archive |
 | `mc serve` | Start web dashboard |
 | `mc mcp` | Start MCP server |
 
 Use `mc <command> --help` for detailed options.
+
+IDs are forgiving: `TASK-007`, `task-7` and `task7` are the same, and unknown IDs come with a "did you mean" hint.
+
+`mc show` renders the notes on a terminal: headings, lists and checklists (`☐`/`☑`), quotes, boxed code blocks and tables with borders that wrap to fit the width. Checklist progress sits above the notes, and the comments of tasks and meetings get their own section below them. Entity references (`TASK-069`, `[[TASK-069|alias]]`) and relative file links are clickable OSC 8 hyperlinks to the file on disk (cmd/ctrl-click in iTerm2, WezTerm, kitty, Ghostty, VS Code). A footer lists the linked entities with status, title and path, plus what references this one. Output taller than the terminal goes through `$MC_PAGER`, `$PAGER` or `less` (`--no-pager` or `MC_PAGER=cat` to turn it off). `--raw` prints the markdown source, `--open` opens the file in `$VISUAL` / `$EDITOR` (or the system opener). Piped output keeps the plain layout (fields plus the Markdown body as written). Control characters in a note never reach the terminal, and file links only open files inside the repo.
+
+### Output, colors and scripting
+
+- **`--json`** prints machine-readable output for `list`, `show`, `status`, `validate`, `index`, `export`, `task board|move|next`, `check` and `comment`. Entities have the same shape as `data/*.json` (wiki-links stripped, `_source` path). In JSON mode errors are written to stderr as `{"error": {"message", "hint", "exit_code"}}`.
+- **Pipes stay plain.** When stdout is not a terminal, every command prints plain ASCII without colors: `mc list` tables have no status glyphs, rules or truncation (empty cells print as `-`), symbols in `status`, `show`, `task board|next|move` and the rest use their ASCII forms, hints are skipped, and empty results print nothing to stdout, so `mc list tasks | tail -n +2 | wc -l` and `awk` work as expected. For anything you parse, prefer `--json`.
+- **Colors:** `--color auto|always|never`; `NO_COLOR` and `CLICOLOR_FORCE` are respected.
+- **Glyphs:** on a terminal, unicode glyphs (`✓ ● ◐ ○ ◌ ✗ →`); ASCII (`ok x -> |`) when stdout is piped or when `MC_ASCII=1`, `TERM=dumb` or a non-UTF-8 locale is set.
+- **Width:** tables hide optional columns and truncate long titles to fit; set `MC_WIDTH=<n>` to force a width (`0` = unlimited).
+- **Hyperlinks:** on a colour terminal (not `TERM=dumb`) `mc show` emits OSC 8 links; `MC_HYPERLINKS=0` turns them off, `MC_HYPERLINKS=1` forces them on.
+- **Exit codes:** `0` success, `1` failure (not found, validation issues, I/O), `2` invalid usage (bad option, status, priority, date or ID, or an entity kind this repo does not enable).
 
 ## Contributing
 

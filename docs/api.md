@@ -104,7 +104,7 @@ Default `127.0.0.1`. Only set `--bind 0.0.0.0` behind a trusted reverse proxy th
 | GET | `/healthz` | none | Liveness — process is alive. |
 | GET | `/readyz` | none | Readiness — repo root is accessible. |
 | GET | `/v1/openapi.json` | none | OpenAPI 3.1 spec, generated from the typed handlers. |
-| GET | `/v1/config` | read | Mode, prefixes, valid statuses, configured kinds. |
+| GET | `/v1/config` | read | Repo `name` (`brand.name`, else `site.name`), mode, prefixes, valid statuses, configured path keys, `available_kinds`. |
 | GET | `/v1/status` | read | Counts by status per kind + recent activity. |
 | GET | `/v1/entities/{kind}` | read | List with optional `?status=&tag=`. |
 | GET | `/v1/entities/{kind}/{id}` | read | Parsed entity (frontmatter as JSON + body preview). |
@@ -119,10 +119,23 @@ Default `127.0.0.1`. Only set `--bind 0.0.0.0` behind a trusted reverse proxy th
 | POST | `/v1/proposals` | write | `{title, author?, status?, type?, tags?, supersedes?}` |
 | POST | `/v1/contacts` | write | `{name, customer, role?, email?, phone?, status?, tags?}` |
 | POST | `/v1/tasks/{id}/move` | write | `{status, sprint?}` — also moves the file between `todo/` and `done/` if the status crosses the active boundary. |
+| GET | `/v1/entities/{kind}/{id}/checklist` | read | `- [ ]` checklist items `{id, items: [{index, line, checked, text}], done, total}` (code blocks and task/meeting comments excluded). |
+| POST | `/v1/entities/{kind}/{id}/checklist/{item}` | write | `{checked?, expect_text?}` — tick (default) or untick item `item` (1-based). Only the box character changes. A stale `expect_text` is `409 conflict`. |
+| POST | `/v1/entities/{kind}/{id}/comments` | write | `{text, author?}` — comment on a task or meeting; appended under `## Comments` as `### YYYY-MM-DD HH:MM · Author`. `201` with `{id, comment, count, path}`. |
 | POST | `/v1/index` | write | Rebuild the JSON index files under `data/`. |
 | POST | `/v1/validate` | read | Run `mc validate`; returns issues as JSON. |
 
-`kind` accepts singular or plural forms (`customer`/`customers`, `task`/`tasks`, etc.). Comma-separated list fields (`tags`, `customers`, `agents`, etc.) follow the same convention as the CLI.
+`kind` accepts singular or plural forms (`customer`/`customers`, `task`/`tasks`, etc.). List fields (`tags`, `customers`, `projects`, `attendees`, `agents`, `depends_on`) accept either a comma-separated string (`"a,b"`, the CLI convention) or a JSON array of strings (`["a", "b"]`). Both forms are split on commas, so items cannot contain a comma.
+
+Create bodies are validated before anything is written:
+
+- Omitted or blank `status` falls back to the kind's first configured status; any other value must be one of the configured statuses.
+- Dates (`date`, `start_date`, `end_date`, `due_date`) must be `YYYY-MM-DD`; a sprint's `end_date` may not be before its `start_date`.
+- `priority` must be 1-4.
+- Referenced scopes (`project`/`customer` on tasks, `customer` on contacts) must exist. IDs may be given plain (`CUST-001`) or wiki-linked (`[[CUST-001]]`).
+- Two meetings with the same date and title get distinct files (`…-standup.md`, `…-standup-2.md`) instead of overwriting each other.
+
+Violations return `400 bad-request` with a message starting with `Invalid …` (or `404` for a missing scope).
 
 A successful create returns `201 Created` and `{id, name, path}`. For kinds whose primary field is `title` (meetings, research, tasks, sprints, proposals), the `name` field of the response carries the title — the server normalizes the payload so consumers always see `name`.
 
@@ -147,14 +160,16 @@ Stable `type` URIs:
 |---|---|---|
 | `unauthenticated` | 401 | Missing or invalid bearer token. |
 | `forbidden` | 403 | Read-only mode, missing write capability, kind unavailable in repo mode. |
-| `bad-request` | 400 | Invalid status, invalid JSON body, unknown entity kind, empty name. |
+| `bad-request` | 400 | Invalid status, priority or date, invalid JSON body, unknown entity kind, empty name. |
 | `invalid-id` | 400 | ID prefix doesn't match any configured kind. |
 | `entity-not-found` | 404 | No entity with that ID. |
+| `not-found` | 404 | Another requested thing does not exist (e.g. a research report file). |
 | `frontmatter` | 400 | Frontmatter parse error during read-modify-write. |
 | `validation` | 422 | `mc validate` found issues (used by CLI; the `/v1/validate` endpoint returns 200 with `ok: false` instead). |
-| `not-available` | 403 | Kind not available in this repo mode (e.g. customer in embedded mode). |
+| `not-available` | 403 | Kind not enabled in this repo (customer in embedded mode, or a kind missing from `paths:` in a standalone config). |
 | `template-not-found` | 500 | A required template is missing. |
 | `already-initialized` | 409 | `mc init` re-init without `--force`. |
+| `conflict` | 409 | A checklist item's text no longer matches `expect_text` (the file changed). |
 | `repo-not-found` | 500 | Repo path no longer exists. |
 | `internal` | 500 | Unexpected error — see server logs. |
 
@@ -171,7 +186,7 @@ At the rate this API will see (humans + a small fleet of agents), a single mutex
 
 ### Cross-process safety
 
-At startup, `mc api serve` acquires an exclusive `flock` on `<repo>/.mc-api.lock`. A second instance against the same repo fails fast with a clear error. Without this, two processes would each have an independent mutex and hand out duplicate IDs.
+At startup, `mc api serve` acquires an exclusive `flock` on `<repo>/.mc-api.lock` (`<repo>/.mc/.mc-api.lock` in embedded repos; `mc init` git-ignores it). A second instance against the same repo fails fast with a clear error. Without this, two processes would each have an independent mutex and hand out duplicate IDs.
 
 ### Bearer-token verification cost
 

@@ -29,7 +29,10 @@ pub async fn get_config(State(state): State<AppState>) -> Json<ConfigResponse> {
         RepoMode::Standalone => "standalone".to_string(),
         RepoMode::Embedded => "embedded".to_string(),
     };
+    let mut configured_entities: Vec<String> = cfg.configured_entities.iter().cloned().collect();
+    configured_entities.sort();
     Json(ConfigResponse {
+        name: cfg.brand.name.clone(),
         mode,
         prefixes: PrefixView {
             customer: cfg.id_prefixes.customer.clone(),
@@ -51,7 +54,12 @@ pub async fn get_config(State(state): State<AppState>) -> Json<ConfigResponse> {
             proposal: cfg.statuses.proposal.clone(),
             contact: cfg.statuses.contact.clone(),
         },
-        configured_entities: cfg.configured_entities.iter().cloned().collect(),
+        configured_entities,
+        available_kinds: EntityKind::ALL
+            .iter()
+            .filter(|k| cfg.entity_available(k))
+            .map(|k| k.label_plural().to_string())
+            .collect(),
     })
 }
 
@@ -67,19 +75,8 @@ pub async fn get_config(State(state): State<AppState>) -> Json<ConfigResponse> {
 )]
 pub async fn get_status(State(state): State<AppState>) -> Result<Json<StatusResponse>, ApiError> {
     let cfg = &state.cfg;
-    let kinds = [
-        EntityKind::Customer,
-        EntityKind::Project,
-        EntityKind::Meeting,
-        EntityKind::Research,
-        EntityKind::Task,
-        EntityKind::Sprint,
-        EntityKind::Proposal,
-        EntityKind::Contact,
-    ];
-
     let mut counts: Vec<KindStatusCounts> = Vec::new();
-    for k in kinds {
+    for k in EntityKind::ALL {
         if !cfg.entity_available(&k) {
             continue;
         }

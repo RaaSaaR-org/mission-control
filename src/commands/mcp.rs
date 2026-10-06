@@ -11,7 +11,8 @@ pub fn run(cfg: &ResolvedConfig) -> McResult<()> {
                 .add_directive(tracing_subscriber::filter::LevelFilter::INFO.into()),
         )
         .with_writer(std::io::stderr)
-        .init();
+        .try_init()
+        .ok();
 
     let rt = tokio::runtime::Runtime::new()?;
     rt.block_on(async {

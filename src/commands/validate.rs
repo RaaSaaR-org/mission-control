@@ -1,3 +1,4 @@
+use crate::cli::ui;
 use crate::config::{RepoMode, ResolvedConfig};
 use crate::data;
 use crate::entity::{self, EntityKind};
@@ -17,26 +18,78 @@ pub struct ValidationIssue {
 }
 
 pub fn run(cfg: &ResolvedConfig) -> McResult<()> {
-    println!("{} Validating repo...\n", "⟳".blue());
-
     let issues = validate_programmatic(cfg)?;
 
+    if ui::get().json {
+        let out = serde_json::json!({
+            "ok": issues.is_empty(),
+            "count": issues.len(),
+            "issues": issues,
+        });
+        println!("{}", serde_json::to_string_pretty(&out)?);
+        return if issues.is_empty() {
+            Ok(())
+        } else {
+            Err(McError::ValidationFailed(issues.len()))
+        };
+    }
+
     if issues.is_empty() {
-        println!("{} All checks passed!", "✓".green().bold());
-        Ok(())
-    } else {
-        println!("{} {} issue(s) found:\n", "✗".red().bold(), issues.len());
-        for (i, issue) in issues.iter().enumerate() {
+        ui::success("All checks passed".bold());
+        return Ok(());
+    }
+
+    // Group by file (relative to the repo root), preserving discovery order.
+    let mut groups: Vec<(String, Vec<&ValidationIssue>)> = Vec::new();
+    for issue in &issues {
+        let path = display_path(&issue.path, cfg);
+        match groups.iter_mut().find(|(p, _)| *p == path) {
+            Some((_, list)) => list.push(issue),
+            None => groups.push((path, vec![issue])),
+        }
+    }
+
+    let g = ui::glyphs();
+    let check_w = issues.iter().map(|i| i.check.len()).max().unwrap_or(0);
+    println!(
+        "{} {} in {}\n",
+        g.err.red().bold(),
+        ui::count(issues.len(), "issue", "issues").bold(),
+        ui::count(groups.len(), "file", "files")
+    );
+    for (path, list) in &groups {
+        println!("  {}", path.bold());
+        for issue in list {
             println!(
-                "  {}. [{}] {}\n     {}",
-                (i + 1).to_string().red(),
-                issue.check.yellow(),
-                issue.path.dimmed(),
+                "    {}  {}",
+                ui::pad(&issue.check.yellow().to_string(), check_w),
                 issue.message
             );
         }
-        Err(McError::ValidationFailed(issues.len()))
+        println!();
     }
+
+    // Per-check summary helps spot systemic problems (e.g. a renamed status).
+    let mut by_check: Vec<(&str, usize)> = Vec::new();
+    for issue in &issues {
+        match by_check.iter_mut().find(|(c, _)| *c == issue.check) {
+            Some((_, n)) => *n += 1,
+            None => by_check.push((&issue.check, 1)),
+        }
+    }
+    if by_check.len() > 1 {
+        let parts: Vec<String> = by_check.iter().map(|(c, n)| format!("{c} {n}")).collect();
+        println!("  {}\n", parts.join(&format!(" {} ", g.sep)).dimmed());
+    }
+    Err(McError::ValidationFailed(issues.len()))
+}
+
+/// Issue paths are a mix of absolute paths and bare names; show them relative.
+fn display_path(path: &str, cfg: &ResolvedConfig) -> String {
+    Path::new(path)
+        .strip_prefix(&cfg.root)
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|_| path.to_string())
 }
 
 /// Run validation and return structured issues without printing.

@@ -222,13 +222,98 @@ fn accent_color(cfg: &ResolvedConfig) -> style::Color {
 // ---------------------------------------------------------------------------
 
 fn print_meeting(id: &str, output: Option<&str>, cfg: &ResolvedConfig) -> McResult<()> {
-    let result = print_meeting_programmatic(cfg, id, output)?;
+    report_written(&print_meeting_programmatic(cfg, id, output)?);
+    Ok(())
+}
+
+fn report_written(result: &JsonValue) {
     println!(
         "{} PDF written to {}",
         "success:".green().bold(),
         result["path"].as_str().unwrap_or("?")
     );
-    Ok(())
+}
+
+/// Render the document to `output` (or `default_name`) and return the
+/// absolute path when it can be resolved.
+fn write_pdf(
+    doc: genpdf::Document,
+    output: Option<&str>,
+    default_name: String,
+) -> McResult<String> {
+    let out_path = PathBuf::from(output.unwrap_or(&default_name));
+    doc.render_to_file(&out_path)
+        .map_err(|e| McError::Pdf(format!("Failed to write PDF: {e}")))?;
+    let display_path = out_path.canonicalize().unwrap_or(out_path);
+    Ok(display_path.display().to_string())
+}
+
+/// Cover-page metadata for a print template, from frontmatter. Empty values
+/// are skipped when the cover page is rendered.
+fn meta_pairs(template: &PrintTemplate, fm: &serde_yaml::Value) -> Vec<(&'static str, String)> {
+    let get = |key: &str| frontmatter::get_str(fm, key).unwrap_or("").to_string();
+    let joined = |key: &str| frontmatter::get_string_list(fm, key).join(", ");
+    let links = |key: &str| frontmatter::get_link_list(fm, key).join(", ");
+
+    match template {
+        PrintTemplate::Standard => {
+            let author = frontmatter::get_str(fm, "author")
+                .or_else(|| frontmatter::get_str(fm, "owner"))
+                .unwrap_or("")
+                .to_string();
+            vec![
+                ("Date", get("date")),
+                ("Author", author),
+                ("Status", get("status")),
+                ("Tags", joined("tags")),
+            ]
+        }
+        PrintTemplate::Meeting => {
+            let participants: Vec<String> = get_attendees(fm).into_iter().map(|a| a.name).collect();
+            vec![
+                ("Date", get("date")),
+                ("Time", get("time")),
+                ("Duration", get("duration")),
+                ("Status", get("status")),
+                ("Participants", participants.join(", ")),
+                ("Customers", links("customers")),
+                ("Projects", links("projects")),
+            ]
+        }
+        PrintTemplate::Research => vec![
+            ("Owner", get("owner")),
+            ("Status", get("status")),
+            ("Tags", joined("tags")),
+            ("Agents", joined("agents")),
+        ],
+        PrintTemplate::Sprint => vec![
+            ("Owner", get("owner")),
+            ("Status", get("status")),
+            ("Goal", get("goal")),
+            ("Start Date", get("start_date")),
+            ("End Date", get("end_date")),
+            ("Projects", links("projects")),
+            ("Tags", joined("tags")),
+        ],
+    }
+}
+
+/// "Summary" section from the frontmatter `summary` field, if present.
+fn push_summary(doc: &mut genpdf::Document, fm: &serde_yaml::Value, pc: style::Color) {
+    let summary = frontmatter::get_str(fm, "summary").unwrap_or("").trim();
+    if summary.is_empty() {
+        return;
+    }
+    doc.push(elements::Paragraph::new(style::StyledString::new(
+        "Summary",
+        style::Style::new()
+            .bold()
+            .with_font_size(H2_SIZE)
+            .with_color(pc),
+    )));
+    doc.push(elements::Break::new(0.3));
+    doc.push(elements::Paragraph::new(summary));
+    push_section_separator(doc);
 }
 
 /// Programmatic variant of `print_meeting` -- returns JSON instead of printing.
@@ -239,50 +324,23 @@ pub fn print_meeting_programmatic(
 ) -> McResult<JsonValue> {
     let entity = data::find_entity_by_id(id, cfg)?;
     if entity.kind != EntityKind::Meeting {
-        return Err(McError::Other(format!(
-            "{} is a {}, not a meeting",
-            id,
-            entity.kind.label()
-        )));
+        return Err(McError::usage(
+            format!("{} is a {}, not a meeting", id, entity.kind.label()),
+            None,
+        ));
     }
 
     let fm = &entity.frontmatter;
     let title = frontmatter::get_str(fm, "title")
         .or_else(|| frontmatter::get_str(fm, "name"))
         .unwrap_or("Untitled Meeting");
-    let date = frontmatter::get_str(fm, "date").unwrap_or("");
-    let time = frontmatter::get_str(fm, "time").unwrap_or("");
-    let duration = frontmatter::get_str(fm, "duration").unwrap_or("");
-    let status = frontmatter::get_str(fm, "status").unwrap_or("");
-    let customers = frontmatter::get_string_list(fm, "customers");
-    let projects = frontmatter::get_string_list(fm, "projects");
 
     let font_family = load_fonts(cfg)?;
     let pc = primary_color(cfg);
     let ac = accent_color(cfg);
     let mut doc = create_document(font_family, title, &cfg.brand.name, pc, ac);
-
-    // Build cover page metadata pairs
     let attendees = get_attendees(fm);
-    let participant_names: Vec<&str> = attendees.iter().map(|a| a.name.as_str()).collect();
-    let mut meta_pairs: Vec<(&str, String)> = Vec::new();
-    meta_pairs.push(("Date", date.to_string()));
-    if !time.is_empty() {
-        meta_pairs.push(("Time", time.to_string()));
-    }
-    if !duration.is_empty() {
-        meta_pairs.push(("Duration", duration.to_string()));
-    }
-    meta_pairs.push(("Status", status.to_string()));
-    if !participant_names.is_empty() {
-        meta_pairs.push(("Participants", participant_names.join(", ")));
-    }
-    if !customers.is_empty() {
-        meta_pairs.push(("Customers", customers.join(", ")));
-    }
-    if !projects.is_empty() {
-        meta_pairs.push(("Projects", projects.join(", ")));
-    }
+    let meta_pairs = meta_pairs(&PrintTemplate::Meeting, fm);
 
     // Cover page
     push_cover_page(
@@ -363,19 +421,11 @@ pub fn print_meeting_programmatic(
     // Footer
     push_document_footer(&mut doc);
 
-    // Write PDF
-    let out_path = match output {
-        Some(p) => PathBuf::from(p),
-        None => PathBuf::from(format!("{}.pdf", id)),
-    };
-    doc.render_to_file(&out_path)
-        .map_err(|e| McError::Pdf(format!("Failed to write PDF: {e}")))?;
-
-    let display_path = out_path.canonicalize().unwrap_or(out_path);
+    let path = write_pdf(doc, output, format!("{}.pdf", id))?;
     Ok(serde_json::json!({
         "id": id,
         "title": title,
-        "path": display_path.display().to_string(),
+        "path": path,
     }))
 }
 
@@ -389,12 +439,12 @@ fn print_research(
     specific_file: Option<&str>,
     cfg: &ResolvedConfig,
 ) -> McResult<()> {
-    let result = print_research_programmatic(cfg, id, output, specific_file)?;
-    println!(
-        "{} PDF written to {}",
-        "success:".green().bold(),
-        result["path"].as_str().unwrap_or("?")
-    );
+    report_written(&print_research_programmatic(
+        cfg,
+        id,
+        output,
+        specific_file,
+    )?);
     Ok(())
 }
 
@@ -407,40 +457,21 @@ pub fn print_research_programmatic(
 ) -> McResult<JsonValue> {
     let entity = data::find_entity_by_id(id, cfg)?;
     if entity.kind != EntityKind::Research {
-        return Err(McError::Other(format!(
-            "{} is a {}, not a research topic",
-            id,
-            entity.kind.label()
-        )));
+        return Err(McError::usage(
+            format!("{} is a {}, not a research topic", id, entity.kind.label()),
+            None,
+        ));
     }
 
     let fm = &entity.frontmatter;
     let title = frontmatter::get_str(fm, "title")
         .or_else(|| frontmatter::get_str(fm, "name"))
         .unwrap_or("Untitled Research");
-    let owner = frontmatter::get_str(fm, "owner").unwrap_or("");
-    let status = frontmatter::get_str(fm, "status").unwrap_or("");
-    let summary = frontmatter::get_str(fm, "summary").unwrap_or("");
-    let tags = frontmatter::get_string_list(fm, "tags");
-    let agents = frontmatter::get_string_list(fm, "agents");
-
     let font_family = load_fonts(cfg)?;
     let pc = primary_color(cfg);
     let ac = accent_color(cfg);
     let mut doc = create_document(font_family, title, &cfg.brand.name, pc, ac);
-
-    // Build cover page metadata pairs
-    let mut meta_pairs: Vec<(&str, String)> = Vec::new();
-    if !owner.is_empty() {
-        meta_pairs.push(("Owner", owner.to_string()));
-    }
-    meta_pairs.push(("Status", status.to_string()));
-    if !tags.is_empty() {
-        meta_pairs.push(("Tags", tags.join(", ")));
-    }
-    if !agents.is_empty() {
-        meta_pairs.push(("Agents", agents.join(", ")));
-    }
+    let meta_pairs = meta_pairs(&PrintTemplate::Research, fm);
 
     // Cover page
     push_cover_page(
@@ -455,18 +486,7 @@ pub fn print_research_programmatic(
     );
 
     // Summary (page 2+)
-    if !summary.is_empty() {
-        doc.push(elements::Paragraph::new(style::StyledString::new(
-            "Summary",
-            style::Style::new()
-                .bold()
-                .with_font_size(H2_SIZE)
-                .with_color(pc),
-        )));
-        doc.push(elements::Break::new(0.3));
-        doc.push(elements::Paragraph::new(summary));
-        push_section_separator(&mut doc);
-    }
+    push_summary(&mut doc, fm, pc);
 
     // Find final/ directory
     let source_dir = entity
@@ -479,10 +499,10 @@ pub fn print_research_programmatic(
 
     if report_files.is_empty() {
         if let Some(f) = file {
-            return Err(McError::Other(format!(
-                "File '{}' not found in {}/final/",
-                f, id
-            )));
+            return Err(McError::not_found(
+                format!("File '{}' not found in {}/final/", f, id),
+                None,
+            ));
         }
     }
 
@@ -532,19 +552,11 @@ pub fn print_research_programmatic(
     // Footer
     push_document_footer(&mut doc);
 
-    // Write PDF
-    let out_path = match output {
-        Some(p) => PathBuf::from(p),
-        None => PathBuf::from(format!("{}-final-report.pdf", id)),
-    };
-    doc.render_to_file(&out_path)
-        .map_err(|e| McError::Pdf(format!("Failed to write PDF: {e}")))?;
-
-    let display_path = out_path.canonicalize().unwrap_or(out_path);
+    let path = write_pdf(doc, output, format!("{}-final-report.pdf", id))?;
     Ok(serde_json::json!({
         "id": id,
         "title": title,
-        "path": display_path.display().to_string(),
+        "path": path,
     }))
 }
 
@@ -559,12 +571,9 @@ fn print_file(
     title: Option<&str>,
     cfg: &ResolvedConfig,
 ) -> McResult<()> {
-    let result = print_file_programmatic(cfg, path, output, template, title)?;
-    println!(
-        "{} PDF written to {}",
-        "success:".green().bold(),
-        result["path"].as_str().unwrap_or("?")
-    );
+    report_written(&print_file_programmatic(
+        cfg, path, output, template, title,
+    )?);
     Ok(())
 }
 
@@ -576,10 +585,8 @@ pub fn print_file_programmatic(
     template: &PrintTemplate,
     title_override: Option<&str>,
 ) -> McResult<JsonValue> {
-    let file_path = PathBuf::from(path);
-    if !file_path.exists() {
-        return Err(McError::Other(format!("File not found: {}", path)));
-    }
+    let file_path = resolve_input_path(cfg, path)
+        .ok_or_else(|| McError::not_found(format!("File not found: {}", path), None))?;
 
     let content = std::fs::read_to_string(&file_path)?;
 
@@ -615,97 +622,10 @@ pub fn print_file_programmatic(
         PrintTemplate::Sprint => "Sprint Report",
     };
 
-    let mut meta_pairs: Vec<(&str, String)> = Vec::new();
-
-    if let Some(ref fm) = fm {
-        match template {
-            PrintTemplate::Standard => {
-                if let Some(v) = frontmatter::get_str(fm, "date") {
-                    meta_pairs.push(("Date", v.to_string()));
-                }
-                if let Some(v) =
-                    frontmatter::get_str(fm, "author").or_else(|| frontmatter::get_str(fm, "owner"))
-                {
-                    meta_pairs.push(("Author", v.to_string()));
-                }
-                if let Some(v) = frontmatter::get_str(fm, "status") {
-                    meta_pairs.push(("Status", v.to_string()));
-                }
-                let tags = frontmatter::get_string_list(fm, "tags");
-                if !tags.is_empty() {
-                    meta_pairs.push(("Tags", tags.join(", ")));
-                }
-            }
-            PrintTemplate::Meeting => {
-                if let Some(v) = frontmatter::get_str(fm, "date") {
-                    meta_pairs.push(("Date", v.to_string()));
-                }
-                if let Some(v) = frontmatter::get_str(fm, "time") {
-                    meta_pairs.push(("Time", v.to_string()));
-                }
-                if let Some(v) = frontmatter::get_str(fm, "duration") {
-                    meta_pairs.push(("Duration", v.to_string()));
-                }
-                if let Some(v) = frontmatter::get_str(fm, "status") {
-                    meta_pairs.push(("Status", v.to_string()));
-                }
-                let attendees = get_attendees(fm);
-                if !attendees.is_empty() {
-                    let names: Vec<&str> = attendees.iter().map(|a| a.name.as_str()).collect();
-                    meta_pairs.push(("Participants", names.join(", ")));
-                }
-                let customers = frontmatter::get_string_list(fm, "customers");
-                if !customers.is_empty() {
-                    meta_pairs.push(("Customers", customers.join(", ")));
-                }
-                let projects = frontmatter::get_string_list(fm, "projects");
-                if !projects.is_empty() {
-                    meta_pairs.push(("Projects", projects.join(", ")));
-                }
-            }
-            PrintTemplate::Research => {
-                if let Some(v) = frontmatter::get_str(fm, "owner") {
-                    meta_pairs.push(("Owner", v.to_string()));
-                }
-                if let Some(v) = frontmatter::get_str(fm, "status") {
-                    meta_pairs.push(("Status", v.to_string()));
-                }
-                let tags = frontmatter::get_string_list(fm, "tags");
-                if !tags.is_empty() {
-                    meta_pairs.push(("Tags", tags.join(", ")));
-                }
-                let agents = frontmatter::get_string_list(fm, "agents");
-                if !agents.is_empty() {
-                    meta_pairs.push(("Agents", agents.join(", ")));
-                }
-            }
-            PrintTemplate::Sprint => {
-                if let Some(v) = frontmatter::get_str(fm, "owner") {
-                    meta_pairs.push(("Owner", v.to_string()));
-                }
-                if let Some(v) = frontmatter::get_str(fm, "status") {
-                    meta_pairs.push(("Status", v.to_string()));
-                }
-                if let Some(v) = frontmatter::get_str(fm, "goal") {
-                    meta_pairs.push(("Goal", v.to_string()));
-                }
-                if let Some(v) = frontmatter::get_str(fm, "start_date") {
-                    meta_pairs.push(("Start Date", v.to_string()));
-                }
-                if let Some(v) = frontmatter::get_str(fm, "end_date") {
-                    meta_pairs.push(("End Date", v.to_string()));
-                }
-                let projects = frontmatter::get_string_list(fm, "projects");
-                if !projects.is_empty() {
-                    meta_pairs.push(("Projects", projects.join(", ")));
-                }
-                let tags = frontmatter::get_string_list(fm, "tags");
-                if !tags.is_empty() {
-                    meta_pairs.push(("Tags", tags.join(", ")));
-                }
-            }
-        }
-    }
+    let meta_pairs = fm
+        .as_ref()
+        .map(|fm| meta_pairs(template, fm))
+        .unwrap_or_default();
 
     let font_family = load_fonts(cfg)?;
     let pc = primary_color(cfg);
@@ -725,22 +645,8 @@ pub fn print_file_programmatic(
     );
 
     // For research template: render summary before body if present
-    if matches!(template, PrintTemplate::Research) {
-        if let Some(ref fm) = fm {
-            let summary = frontmatter::get_str(fm, "summary").unwrap_or("");
-            if !summary.is_empty() {
-                doc.push(elements::Paragraph::new(style::StyledString::new(
-                    "Summary",
-                    style::Style::new()
-                        .bold()
-                        .with_font_size(H2_SIZE)
-                        .with_color(pc),
-                )));
-                doc.push(elements::Break::new(0.3));
-                doc.push(elements::Paragraph::new(summary));
-                push_section_separator(&mut doc);
-            }
-        }
+    if let (PrintTemplate::Research, Some(fm)) = (template, &fm) {
+        push_summary(&mut doc, fm, pc);
     }
 
     // Body content
@@ -749,26 +655,27 @@ pub fn print_file_programmatic(
     // Footer
     push_document_footer(&mut doc);
 
-    // Write PDF
-    let out_path = match output {
-        Some(p) => PathBuf::from(p),
-        None => {
-            let stem = file_path
-                .file_stem()
-                .unwrap_or_default()
-                .to_string_lossy()
-                .to_string();
-            PathBuf::from(format!("{}.pdf", stem))
-        }
-    };
-    doc.render_to_file(&out_path)
-        .map_err(|e| McError::Pdf(format!("Failed to write PDF: {e}")))?;
-
-    let display_path = out_path.canonicalize().unwrap_or(out_path);
+    let stem = file_path
+        .file_stem()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_string();
+    let path = write_pdf(doc, output, format!("{}.pdf", stem))?;
     Ok(serde_json::json!({
         "title": title,
-        "path": display_path.display().to_string(),
+        "path": path,
     }))
+}
+
+/// Resolve a user-supplied markdown path: as given (absolute or relative to
+/// the working directory), else relative to the repo root.
+fn resolve_input_path(cfg: &ResolvedConfig, path: &str) -> Option<PathBuf> {
+    let given = PathBuf::from(path);
+    if given.is_file() {
+        return Some(given);
+    }
+    let in_repo = cfg.root.join(path);
+    (given.is_relative() && in_repo.is_file()).then_some(in_repo)
 }
 
 /// Extract title from the first H1 heading in the markdown body, or fall back to filename.
@@ -1043,6 +950,73 @@ fn collect_report_files(final_dir: &Path, specific_file: Option<&str>) -> Vec<Pa
 // Markdown → genpdf rendering
 // ---------------------------------------------------------------------------
 
+/// A list being built; nested lists are pushed into their parent item.
+enum ListBuilder {
+    Ordered(elements::OrderedList),
+    Unordered(elements::UnorderedList),
+}
+
+impl ListBuilder {
+    fn new(ordered: bool) -> Self {
+        if ordered {
+            ListBuilder::Ordered(elements::OrderedList::new())
+        } else {
+            ListBuilder::Unordered(elements::UnorderedList::new())
+        }
+    }
+
+    fn push_item(&mut self, item: elements::LinearLayout) {
+        match self {
+            ListBuilder::Ordered(l) => l.push(item),
+            ListBuilder::Unordered(l) => l.push(item),
+        }
+    }
+
+    fn push_into_layout(self, layout: &mut elements::LinearLayout) {
+        match self {
+            ListBuilder::Ordered(l) => layout.push(l),
+            ListBuilder::Unordered(l) => layout.push(l),
+        }
+    }
+
+    fn push_into_doc(self, doc: &mut genpdf::Document) {
+        match self {
+            ListBuilder::Ordered(l) => doc.push(l),
+            ListBuilder::Unordered(l) => doc.push(l),
+        }
+    }
+}
+
+/// A list item being built: its text so far plus any nested lists.
+struct ItemBuilder {
+    layout: elements::LinearLayout,
+    text: elements::Paragraph,
+    has_text: bool,
+}
+
+impl ItemBuilder {
+    fn new() -> Self {
+        Self {
+            layout: elements::LinearLayout::vertical(),
+            text: elements::Paragraph::default(),
+            has_text: false,
+        }
+    }
+
+    /// Move the pending text into the layout (before a nested list or at the end).
+    fn flush_text(&mut self) {
+        if self.has_text {
+            self.layout.push(std::mem::take(&mut self.text));
+            self.has_text = false;
+        }
+    }
+
+    fn finish(mut self) -> elements::LinearLayout {
+        self.flush_text();
+        self.layout
+    }
+}
+
 fn render_markdown(doc: &mut genpdf::Document, markdown: &str, heading_color: style::Color) {
     let opts = Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS;
     let parser = Parser::new_ext(markdown, opts);
@@ -1054,12 +1028,11 @@ fn render_markdown(doc: &mut genpdf::Document, markdown: &str, heading_color: st
     let mut in_strong = false;
     let mut in_emphasis = false;
     let mut in_code = false;
-    let mut list_ordered = false;
-    let mut list_items: Vec<elements::Paragraph> = Vec::new();
-    let mut current_list_item = elements::Paragraph::default();
-    let mut in_list_item = false;
+    let mut lists: Vec<ListBuilder> = Vec::new();
+    let mut items: Vec<ItemBuilder> = Vec::new();
     let mut in_table = false;
     let mut table_cols: usize = 0;
+    let mut table_cell = String::new();
     let mut table_row_cells: Vec<String> = Vec::new();
     let mut table_rows: Vec<(Vec<String>, bool)> = Vec::new();
 
@@ -1081,31 +1054,23 @@ fn render_markdown(doc: &mut genpdf::Document, markdown: &str, heading_color: st
                 doc.push(elements::Break::new(0.5));
             }
             Event::Start(Tag::Paragraph) => {
-                if !in_list_item {
+                if items.is_empty() {
                     current_paragraph = elements::Paragraph::default();
                     has_text = false;
                 }
             }
-            Event::End(TagEnd::Paragraph) => {
-                if in_list_item {
-                    // Don't flush; collect into list item
-                } else {
+            Event::End(TagEnd::Paragraph) => match items.last_mut() {
+                // Loose lists: each paragraph of an item on its own line.
+                Some(item) => item.flush_text(),
+                None => {
                     flush_paragraph(doc, &mut current_paragraph, &mut has_text);
                     doc.push(elements::Break::new(0.6));
                 }
-            }
-            Event::Start(Tag::Strong) => {
-                in_strong = true;
-            }
-            Event::End(TagEnd::Strong) => {
-                in_strong = false;
-            }
-            Event::Start(Tag::Emphasis) => {
-                in_emphasis = true;
-            }
-            Event::End(TagEnd::Emphasis) => {
-                in_emphasis = false;
-            }
+            },
+            Event::Start(Tag::Strong) => in_strong = true,
+            Event::End(TagEnd::Strong) => in_strong = false,
+            Event::Start(Tag::Emphasis) => in_emphasis = true,
+            Event::End(TagEnd::Emphasis) => in_emphasis = false,
             Event::Start(Tag::CodeBlock(_)) => {
                 flush_paragraph(doc, &mut current_paragraph, &mut has_text);
                 in_code = true;
@@ -1126,7 +1091,9 @@ fn render_markdown(doc: &mut genpdf::Document, markdown: &str, heading_color: st
             }
             Event::Code(text) => {
                 let s = text.to_string();
-                if in_heading {
+                if in_table {
+                    table_cell.push_str(&s);
+                } else if in_heading {
                     let size = heading_font_size(heading_level);
                     current_paragraph.push_styled(
                         s,
@@ -1134,44 +1101,40 @@ fn render_markdown(doc: &mut genpdf::Document, markdown: &str, heading_color: st
                             .with_font_size(size)
                             .with_color(heading_color),
                     );
-                } else if in_list_item {
-                    current_list_item.push_styled(s, style::Style::new().italic());
+                    has_text = true;
+                } else if let Some(item) = items.last_mut() {
+                    item.text.push_styled(s, style::Style::new().italic());
+                    item.has_text = true;
                 } else {
                     current_paragraph.push_styled(s, style::Style::new().italic());
-                }
-                if !in_list_item {
                     has_text = true;
                 }
             }
             Event::Start(Tag::List(first_number)) => {
-                flush_paragraph(doc, &mut current_paragraph, &mut has_text);
-                list_ordered = first_number.is_some();
-                list_items.clear();
+                if let Some(item) = items.last_mut() {
+                    item.flush_text();
+                } else {
+                    flush_paragraph(doc, &mut current_paragraph, &mut has_text);
+                }
+                lists.push(ListBuilder::new(first_number.is_some()));
             }
             Event::End(TagEnd::List(_)) => {
-                // Push collected list items
-                if list_ordered {
-                    let mut ol = elements::OrderedList::new();
-                    for item in list_items.drain(..) {
-                        ol.push(item);
+                if let Some(list) = lists.pop() {
+                    match items.last_mut() {
+                        // Nested list: becomes part of the enclosing item.
+                        Some(parent) => list.push_into_layout(&mut parent.layout),
+                        None => {
+                            list.push_into_doc(doc);
+                            doc.push(elements::Break::new(0.2));
+                        }
                     }
-                    doc.push(ol);
-                } else {
-                    let mut ul = elements::UnorderedList::new();
-                    for item in list_items.drain(..) {
-                        ul.push(item);
-                    }
-                    doc.push(ul);
                 }
-                doc.push(elements::Break::new(0.2));
             }
-            Event::Start(Tag::Item) => {
-                in_list_item = true;
-                current_list_item = elements::Paragraph::default();
-            }
+            Event::Start(Tag::Item) => items.push(ItemBuilder::new()),
             Event::End(TagEnd::Item) => {
-                in_list_item = false;
-                list_items.push(std::mem::take(&mut current_list_item));
+                if let (Some(item), Some(list)) = (items.pop(), lists.last_mut()) {
+                    list.push_item(item.finish());
+                }
             }
             Event::Start(Tag::Table(alignments)) => {
                 flush_paragraph(doc, &mut current_paragraph, &mut has_text);
@@ -1185,26 +1148,25 @@ fn render_markdown(doc: &mut genpdf::Document, markdown: &str, heading_color: st
                 in_table = false;
                 doc.push(elements::Break::new(0.3));
             }
-            Event::Start(Tag::TableHead) => {
+            Event::Start(Tag::TableHead) | Event::Start(Tag::TableRow) => {
                 table_row_cells.clear();
             }
             Event::End(TagEnd::TableHead) => {
-                table_rows.push((table_row_cells.clone(), true));
-                table_row_cells.clear();
-            }
-            Event::Start(Tag::TableRow) => {
-                table_row_cells.clear();
+                table_rows.push((std::mem::take(&mut table_row_cells), true));
             }
             Event::End(TagEnd::TableRow) => {
-                table_rows.push((table_row_cells.clone(), false));
-                table_row_cells.clear();
+                table_rows.push((std::mem::take(&mut table_row_cells), false));
             }
-            Event::Start(Tag::TableCell) => {}
-            Event::End(TagEnd::TableCell) => {}
+            // A cell may contain several text/code events (e.g. `**bold** rest`);
+            // collect them so every cell stays in its column.
+            Event::Start(Tag::TableCell) => table_cell.clear(),
+            Event::End(TagEnd::TableCell) => {
+                table_row_cells.push(std::mem::take(&mut table_cell));
+            }
             Event::Text(text) => {
                 let s = text.to_string();
                 if in_table {
-                    table_row_cells.push(s);
+                    table_cell.push_str(&s);
                 } else if in_heading {
                     let size = heading_font_size(heading_level);
                     let st = style::Style::new()
@@ -1222,18 +1184,19 @@ fn render_markdown(doc: &mut genpdf::Document, markdown: &str, heading_color: st
                             .with_color(style::Color::Rgb(60, 60, 60)),
                     );
                     has_text = true;
-                } else if in_list_item {
-                    let st = text_style(in_strong, in_emphasis);
-                    current_list_item.push_styled(s, st);
+                } else if let Some(item) = items.last_mut() {
+                    item.text.push_styled(s, text_style(in_strong, in_emphasis));
+                    item.has_text = true;
                 } else {
-                    let st = text_style(in_strong, in_emphasis);
-                    current_paragraph.push_styled(s, st);
+                    current_paragraph.push_styled(s, text_style(in_strong, in_emphasis));
                     has_text = true;
                 }
             }
             Event::SoftBreak | Event::HardBreak => {
-                if in_list_item {
-                    current_list_item.push(" ");
+                if in_table {
+                    table_cell.push(' ');
+                } else if let Some(item) = items.last_mut() {
+                    item.text.push(" ");
                 } else {
                     current_paragraph.push(" ");
                 }
@@ -1245,23 +1208,32 @@ fn render_markdown(doc: &mut genpdf::Document, markdown: &str, heading_color: st
                 doc.push(elements::Break::new(0.3));
             }
             Event::TaskListMarker(checked) => {
-                let marker = if checked { "✓ " } else { "○ " };
-                if in_list_item {
-                    current_list_item.push_styled(
-                        marker,
-                        style::Style::new().bold().with_color(if checked {
-                            style::Color::Rgb(0, 128, 0)
-                        } else {
-                            style::Color::Rgb(160, 160, 160)
-                        }),
-                    );
+                if let Some(item) = items.last_mut() {
+                    let marker = if checked { "✓ " } else { "○ " };
+                    let color = if checked {
+                        style::Color::Rgb(0, 128, 0)
+                    } else {
+                        style::Color::Rgb(160, 160, 160)
+                    };
+                    item.text
+                        .push_styled(marker, style::Style::new().bold().with_color(color));
+                    item.has_text = true;
                 }
             }
             _ => {}
         }
     }
 
-    // Flush anything remaining
+    // Close anything left open by malformed input, innermost first.
+    while let Some(list) = lists.pop() {
+        if let Some(item) = items.pop() {
+            let mut list = list;
+            list.push_item(item.finish());
+            list.push_into_doc(doc);
+        } else {
+            list.push_into_doc(doc);
+        }
+    }
     flush_paragraph(doc, &mut current_paragraph, &mut has_text);
 }
 
@@ -1328,4 +1300,95 @@ fn render_table(doc: &mut genpdf::Document, rows: &[(Vec<String>, bool)], num_co
     }
 
     doc.push(table);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::commands::{init, new};
+    use crate::config;
+    use tempfile::TempDir;
+
+    const RICH_MARKDOWN: &str = "# Title\n\nIntro with **bold** and `code`.\n\n\
+        - Topic A\n  - detail 1\n  - detail 2\n    1. deep\n- Topic B\n\n\
+        - [x] done item\n- [ ] open item\n\n\
+        | Field | Value |\n|---|---|\n| **Owner** | Alice `ops` |\n| Plain | x |\n\n\
+        ```\nfn main() {}\n```\n\n---\n\nEnd.\n";
+
+    fn setup() -> (TempDir, config::ResolvedConfig) {
+        let tmp = TempDir::new().unwrap();
+        init::run(tmp.path(), false, false, Some("PrintCo"), false, true).unwrap();
+        let cfg = config::load_config(tmp.path(), config::RepoMode::Standalone).unwrap();
+        (tmp, cfg)
+    }
+
+    #[test]
+    fn test_meta_pairs_strip_wikilinks() {
+        let fm = frontmatter::parse_raw(
+            "date: 2026-01-05\nstatus: scheduled\ncustomers: ['[[CUST-001]]']\nprojects: ['[[PROJ-002]]', PROJ-003]\nattendees: [Alice, {name: Bob, role: CTO}]",
+            Path::new("m.md"),
+        )
+        .unwrap();
+        let pairs = meta_pairs(&PrintTemplate::Meeting, &fm);
+        let get = |k: &str| pairs.iter().find(|(l, _)| *l == k).map(|(_, v)| v.as_str());
+        assert_eq!(get("Customers"), Some("CUST-001"));
+        assert_eq!(get("Projects"), Some("PROJ-002, PROJ-003"));
+        assert_eq!(get("Participants"), Some("Alice, Bob"));
+        assert_eq!(get("Time"), Some(""));
+    }
+
+    #[test]
+    fn test_resolve_input_path_falls_back_to_repo_root() {
+        let (_tmp, cfg) = setup();
+        std::fs::write(cfg.root.join("notes.md"), "# Notes\n").unwrap();
+        let resolved = resolve_input_path(&cfg, "notes.md").unwrap();
+        assert!(resolved.is_file());
+        assert!(resolve_input_path(&cfg, "missing.md").is_none());
+    }
+
+    #[test]
+    fn test_render_rich_markdown_to_pdf() {
+        // Rendering needs real fonts; skip quietly on machines without them.
+        if discover_system_fonts().is_none() {
+            return;
+        }
+        let (tmp, cfg) = setup();
+        let src = tmp.path().join("doc.md");
+        std::fs::write(
+            &src,
+            format!("---\ntitle: Rich\nsummary: Short\n---\n{RICH_MARKDOWN}"),
+        )
+        .unwrap();
+        let out = tmp.path().join("doc.pdf");
+        let result = print_file_programmatic(
+            &cfg,
+            src.to_str().unwrap(),
+            Some(out.to_str().unwrap()),
+            &PrintTemplate::Research,
+            None,
+        )
+        .unwrap();
+        assert_eq!(result["title"], "Rich");
+        assert!(std::fs::metadata(&out).unwrap().len() > 1000);
+    }
+
+    #[test]
+    fn test_print_meeting_to_pdf() {
+        if discover_system_fonts().is_none() {
+            return;
+        }
+        let (tmp, cfg) = setup();
+        let mut input = new::MeetingInput::new("Kickoff");
+        input.attendees = vec!["Alice".into(), "Bob".into()];
+        input.customers = vec!["CUST-001".into()];
+        new::create_meeting(&cfg, &input).unwrap();
+        let out = tmp.path().join("m.pdf");
+        let result =
+            print_meeting_programmatic(&cfg, "MTG-001", Some(out.to_str().unwrap())).unwrap();
+        assert_eq!(result["title"], "Kickoff");
+        assert!(out.is_file());
+
+        let err = print_meeting_programmatic(&cfg, "TASK-001", None).unwrap_err();
+        assert!(matches!(err, McError::EntityNotFound(_)));
+    }
 }

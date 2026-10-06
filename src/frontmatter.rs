@@ -1,25 +1,43 @@
 use crate::error::{McError, McResult};
+use regex::Regex;
 use serde_yaml::Value;
 use std::path::Path;
+use std::sync::LazyLock;
+
+static SINGLE_QUOTED_LINK_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"'(\[\[.+?\]\])'").expect("static regex is valid"));
+static LINK_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\[\[(.+?)\]\]").expect("static regex is valid"));
+static MC_LINKS_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\n?%% mc-links:.*%%\n?").expect("static regex is valid"));
 
 /// Split a markdown string into optional frontmatter (without delimiters) and body.
+///
+/// The opening and closing `---` must each be on a line of their own (trailing
+/// whitespace and CRLF line endings are tolerated). The returned body starts
+/// on the line after the closing `---` (its line ending is consumed), which is
+/// exactly what [`serialize_document`] writes back, so parse -> serialize is
+/// byte-stable for an unchanged body and frontmatter.
 pub fn split_frontmatter(content: &str) -> Option<(String, String)> {
-    let trimmed = content.trim_start();
-    if !trimmed.starts_with("---") {
+    let trimmed = content.trim_start_matches('\u{feff}').trim_start();
+    let rest = trimmed.strip_prefix("---")?;
+    let open_end = rest.find('\n')?;
+    if !rest[..open_end].trim().is_empty() {
         return None;
     }
+    let after_open = &rest[open_end + 1..];
 
-    // Skip the opening ---
-    let after_open = &trimmed[3..];
-    let after_open = after_open.strip_prefix('\n').unwrap_or(after_open);
-
-    if let Some(end_idx) = after_open.find("\n---") {
-        let fm = after_open[..end_idx].to_string();
-        let body = after_open[end_idx + 4..].to_string();
-        Some((fm, body))
-    } else {
-        None
+    let mut pos = 0;
+    for line in after_open.split_inclusive('\n') {
+        if line.trim_end() == "---" {
+            let fm = &after_open[..pos];
+            let fm = fm.strip_suffix('\n').unwrap_or(fm);
+            let body = &after_open[pos + line.len()..];
+            return Some((fm.to_string(), body.to_string()));
+        }
+        pos += line.len();
     }
+    None
 }
 
 /// Parse raw YAML frontmatter string into a serde_yaml::Value (should be a Mapping).
@@ -35,13 +53,7 @@ pub fn parse_raw(fm_str: &str, source: &Path) -> McResult<Value> {
 pub fn parse_file(path: &Path) -> McResult<(Value, String)> {
     let content = std::fs::read_to_string(path)?;
     match split_frontmatter(&content) {
-        Some((fm_str, body)) => {
-            let val: Value = serde_yaml::from_str(&fm_str).map_err(|e| McError::Frontmatter {
-                path: path.to_path_buf(),
-                message: e.to_string(),
-            })?;
-            Ok((val, body))
-        }
+        Some((fm_str, body)) => Ok((parse_raw(&fm_str, path)?, body)),
         None => Err(McError::Frontmatter {
             path: path.to_path_buf(),
             message: "No YAML frontmatter found".into(),
@@ -49,30 +61,36 @@ pub fn parse_file(path: &Path) -> McResult<(Value, String)> {
     }
 }
 
+/// Read `path`, let `edit` change its frontmatter, and write the file back
+/// atomically. The body is kept byte for byte.
+pub fn update_file(path: &Path, edit: impl FnOnce(&mut Value)) -> McResult<()> {
+    let (mut fm, body) = parse_file(path)?;
+    edit(&mut fm);
+    crate::util::atomic_write(path, serialize_document(&fm, &body).as_bytes())
+}
+
 /// Serialize a YAML Value back into a complete markdown file with frontmatter.
 pub fn serialize_document(frontmatter: &Value, body: &str) -> String {
-    let yaml = serde_yaml::to_string(frontmatter)
-        .expect("serializing a serde_yaml::Value to YAML should never fail");
+    // Serializing an in-memory `Value` cannot fail in practice (no I/O, all keys
+    // are YAML values); fall back to an empty mapping rather than panicking.
+    let yaml = serde_yaml::to_string(frontmatter).unwrap_or_else(|_| "{}".to_string());
     let yaml = yaml.trim_end();
 
     // Replace single-quoted wiki-links with double-quoted for Obsidian compatibility.
     // serde_yaml uses single quotes for strings containing `[`/`]`, but Obsidian
     // only recognises wiki-links inside double quotes in frontmatter.
-    let re_quote = regex::Regex::new(r"'(\[\[.+?\]\])'").unwrap();
-    let yaml = re_quote.replace_all(yaml, "\"$1\"");
+    let yaml = SINGLE_QUOTED_LINK_RE.replace_all(yaml, "\"$1\"");
 
     // Extract all [[...]] links from the frontmatter so we can mirror them in the
     // document body.  Obsidian's graph view reliably picks up links from body text
     // but not always from frontmatter properties.
-    let re_links = regex::Regex::new(r"\[\[(.+?)\]\]").unwrap();
-    let links: Vec<String> = re_links
+    let links: Vec<String> = LINK_RE
         .captures_iter(&yaml)
         .map(|c| format!("[[{}]]", &c[1]))
         .collect();
 
     // Strip any existing mc-links comment so repeated serialisation is idempotent.
-    let re_mc = regex::Regex::new(r"\n?%% mc-links:.*%%\n?").unwrap();
-    let body = re_mc.replace_all(body, "");
+    let body = MC_LINKS_RE.replace_all(body, "");
 
     // Append an Obsidian comment listing all frontmatter links.
     let body = if links.is_empty() {
@@ -98,16 +116,31 @@ pub fn get_str_or<'a>(val: &'a Value, key: &str, default: &'a str) -> &'a str {
 }
 
 /// Get a sequence of strings from a YAML value.
+///
+/// Hand-edited files often contain `tags: urgent` instead of a list, or
+/// numeric items like `tags: [2026]`; both are accepted. Other non-scalar
+/// items are skipped.
 pub fn get_string_list(val: &Value, key: &str) -> Vec<String> {
-    val.as_mapping()
+    let Some(v) = val
+        .as_mapping()
         .and_then(|m| m.get(Value::String(key.to_string())))
-        .and_then(|v| v.as_sequence())
-        .map(|seq| {
-            seq.iter()
-                .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                .collect()
-        })
-        .unwrap_or_default()
+    else {
+        return Vec::new();
+    };
+    match v {
+        Value::Sequence(seq) => seq.iter().filter_map(scalar_to_string).collect(),
+        Value::String(s) if !s.trim().is_empty() => vec![s.clone()],
+        _ => Vec::new(),
+    }
+}
+
+fn scalar_to_string(v: &Value) -> Option<String> {
+    match v {
+        Value::String(s) => Some(s.clone()),
+        Value::Number(n) => Some(n.to_string()),
+        Value::Bool(b) => Some(b.to_string()),
+        _ => None,
+    }
 }
 
 /// Strip `[[...]]` wiki-link brackets from a string.
@@ -123,9 +156,10 @@ pub fn strip_wikilink(s: &str) -> &str {
 }
 
 /// Wrap a non-empty string in `[[...]]` wiki-link brackets.
+/// Already-wrapped input is returned unchanged (no `[[[[X]]]]`).
 pub fn wrap_wikilink(s: &str) -> String {
-    if s.is_empty() {
-        String::new()
+    if s.is_empty() || (s.starts_with("[[") && s.ends_with("]]")) {
+        s.to_string()
     } else {
         format!("[[{}]]", s)
     }
@@ -338,5 +372,120 @@ mod tests {
             !doc.contains("%% mc-links:"),
             "no mc-links comment expected when no wiki-links:\n{doc}"
         );
+    }
+
+    #[test]
+    fn test_split_frontmatter_body_starts_after_closing_line() {
+        let (fm, body) = split_frontmatter("---\nid: X-1\n---\n# T\n").unwrap();
+        assert_eq!(fm, "id: X-1");
+        assert_eq!(body, "# T\n");
+        let (_, body) = split_frontmatter("---\nid: X-1\n---\n\n# T\n").unwrap();
+        assert_eq!(body, "\n# T\n");
+        let (_, body) = split_frontmatter("---\nid: X-1\n---").unwrap();
+        assert_eq!(body, "");
+    }
+
+    #[test]
+    fn test_parse_serialize_round_trip_is_byte_stable() {
+        // Blank line after the frontmatter, wiki-links (mc-links footer), and none.
+        for doc in [
+            "---\nid: TASK-001\nstatus: todo\n---\n\n# Title\n\n## Notes\n",
+            "---\nid: TASK-001\nstatus: todo\n---\n# Title\n",
+            "---\nid: PROJ-001\ncustomer: \"[[CUST-001]]\"\n---\n\n# P\n%% mc-links: [[CUST-001]] %%\n",
+        ] {
+            let mut current = doc.to_string();
+            for _ in 0..3 {
+                let (fm_str, body) = split_frontmatter(&current).unwrap();
+                let fm = parse_raw(&fm_str, Path::new("t.md")).unwrap();
+                current = serialize_document(&fm, &body);
+                assert_eq!(current, doc, "round trip changed the file");
+            }
+        }
+    }
+
+    #[test]
+    fn test_split_frontmatter_crlf() {
+        let content = "---\r\nid: CUST-001\r\nname: Acme\r\n---\r\n# Acme\r\n";
+        let (fm, body) = split_frontmatter(content).unwrap();
+        let val = parse_raw(&fm, Path::new("x.md")).unwrap();
+        assert_eq!(get_str(&val, "id"), Some("CUST-001"));
+        assert_eq!(get_str(&val, "name"), Some("Acme"));
+        assert!(body.contains("# Acme"));
+    }
+
+    #[test]
+    fn test_split_frontmatter_empty_block() {
+        let (fm, body) = split_frontmatter("---\n---\nBody").unwrap();
+        assert_eq!(fm, "");
+        assert_eq!(body, "Body");
+    }
+
+    #[test]
+    fn test_split_frontmatter_ignores_longer_dash_runs() {
+        // A `----` line inside the YAML block must not close it.
+        let content = "---\nnotes: |\n  ----\n  text\nid: A-1\n---\nbody";
+        let (fm, body) = split_frontmatter(content).unwrap();
+        let val = parse_raw(&fm, Path::new("x.md")).unwrap();
+        assert_eq!(get_str(&val, "id"), Some("A-1"));
+        assert_eq!(body, "body");
+    }
+
+    #[test]
+    fn test_split_frontmatter_rejects_non_delimiter_opening() {
+        assert!(split_frontmatter("----\nid: A\n---\n").is_none());
+        assert!(split_frontmatter("---id: A\n---\n").is_none());
+        assert!(split_frontmatter("---").is_none());
+        assert!(split_frontmatter("---\nid: A\n").is_none());
+    }
+
+    #[test]
+    fn test_split_frontmatter_bom_and_trailing_spaces() {
+        let (fm, _) = split_frontmatter("\u{feff}--- \nid: A-1\n---  \nbody").unwrap();
+        assert_eq!(fm, "id: A-1");
+    }
+
+    #[test]
+    fn test_update_file_keeps_body_and_size_stable() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("t.md");
+        let doc = "---\nid: TASK-001\nstatus: todo\n---\n\n# T\n\nBody.\n";
+        std::fs::write(&path, doc).unwrap();
+        update_file(&path, |fm| set_str(fm, "status", "done")).unwrap();
+        update_file(&path, |fm| set_str(fm, "status", "todo")).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), doc);
+    }
+
+    #[test]
+    fn test_parse_file_reports_path_on_bad_yaml() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("bad.md");
+        std::fs::write(&path, "---\nid: [unclosed\n---\n").unwrap();
+        let err = parse_file(&path).unwrap_err();
+        assert!(err.to_string().contains("bad.md"), "{err}");
+    }
+
+    #[test]
+    fn test_wrap_wikilink_idempotent() {
+        assert_eq!(wrap_wikilink("[[CUST-001]]"), "[[CUST-001]]");
+        assert_eq!(wrap_wikilink(&wrap_wikilink("X")), "[[X]]");
+    }
+
+    #[test]
+    fn test_get_string_list_scalar_and_numbers() {
+        let fm = parse_raw(
+            "tags: urgent\nnums: [2026, true, x]\nempty: ''",
+            Path::new("t.md"),
+        )
+        .unwrap();
+        assert_eq!(get_string_list(&fm, "tags"), vec!["urgent"]);
+        assert_eq!(get_string_list(&fm, "nums"), vec!["2026", "true", "x"]);
+        assert!(get_string_list(&fm, "empty").is_empty());
+        assert!(get_string_list(&fm, "missing").is_empty());
+    }
+
+    #[test]
+    fn test_get_link_list_scalar() {
+        let fm = parse_raw("customers: '[[CUST-001]]'", Path::new("t.md")).unwrap();
+        assert_eq!(get_link_list(&fm, "customers"), vec!["CUST-001"]);
     }
 }

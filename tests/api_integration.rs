@@ -525,6 +525,8 @@ async fn rest_covers_every_mcp_write_tool() {
         "/v1/proposals",
         "/v1/contacts",
         "/v1/tasks/{id}/move",
+        "/v1/entities/{kind}/{id}/checklist/{item}",
+        "/v1/entities/{kind}/{id}/comments",
         "/v1/index",
         "/v1/validate",
     ];
@@ -536,5 +538,253 @@ async fn rest_covers_every_mcp_write_tool() {
             entry.get("post").is_some(),
             "OpenAPI path {p} missing POST operation"
         );
+    }
+}
+
+// ───────────────────────── input handling ─────────────────────────
+
+#[tokio::test]
+async fn config_exposes_site_name_and_available_kinds() {
+    let (r, _t) = router(false);
+    let v = body_json(send(&r, authed(Method::GET, "/v1/config", None)).await).await;
+    // `mc init --name TestRepo` writes `site.name`; with no `brand:` section
+    // that is the display name.
+    assert_eq!(v["name"], "TestRepo");
+    let kinds: Vec<&str> = v["available_kinds"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|k| k.as_str().unwrap())
+        .collect();
+    assert!(kinds.contains(&"customers") && kinds.contains(&"tasks"));
+    let configured = v["configured_entities"].as_array().unwrap();
+    let mut sorted = configured.clone();
+    sorted.sort_by(|a, b| a.as_str().cmp(&b.as_str()));
+    assert_eq!(configured, &sorted);
+}
+
+#[tokio::test]
+async fn list_fields_accept_json_arrays() {
+    let (r, _t) = router(false);
+    let resp = send(
+        &r,
+        authed(
+            Method::POST,
+            "/v1/tasks",
+            Some(serde_json::json!({
+                "title": "Array tags",
+                "tags": ["alpha", "beta"],
+                "depends_on": ["TASK-009"],
+            })),
+        ),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::CREATED);
+
+    let tasks = body_json(send(&r, authed(Method::GET, "/v1/tasks?tag=beta", None)).await).await;
+    let tasks = tasks.as_array().unwrap();
+    assert_eq!(tasks.len(), 1);
+    assert_eq!(tasks[0]["tags"], serde_json::json!(["alpha", "beta"]));
+    assert_eq!(tasks[0]["depends_on"], serde_json::json!(["[[TASK-009]]"]));
+}
+
+#[tokio::test]
+async fn invalid_dates_and_priority_are_400() {
+    let (r, _t) = router(false);
+    for (path, body) in [
+        (
+            "/v1/meetings",
+            serde_json::json!({"title": "M", "date": "../../escape"}),
+        ),
+        (
+            "/v1/tasks",
+            serde_json::json!({"title": "T", "priority": 9}),
+        ),
+        (
+            "/v1/sprints",
+            serde_json::json!({"title": "S", "start_date": "2026-02-10", "end_date": "2026-02-01"}),
+        ),
+    ] {
+        let resp = send(&r, authed(Method::POST, path, Some(body))).await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "{path}");
+        let v = body_json(resp).await;
+        assert!(
+            v["detail"].as_str().unwrap().starts_with("Invalid"),
+            "{path}: {v}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn task_scoped_to_unknown_project_is_404() {
+    let (r, _t) = router(false);
+    let resp = send(
+        &r,
+        authed(
+            Method::POST,
+            "/v1/tasks",
+            Some(serde_json::json!({"title": "T", "project": "PROJ-404"})),
+        ),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn get_entity_with_mismatched_kind_is_404() {
+    let (r, _t) = router(false);
+    send(
+        &r,
+        authed(
+            Method::POST,
+            "/v1/customers",
+            Some(serde_json::json!({"name": "Acme"})),
+        ),
+    )
+    .await;
+    let ok = send(
+        &r,
+        authed(Method::GET, "/v1/entities/customer/CUST-001", None),
+    )
+    .await;
+    assert_eq!(ok.status(), StatusCode::OK);
+    let wrong = send(&r, authed(Method::GET, "/v1/entities/task/CUST-001", None)).await;
+    assert_eq!(wrong.status(), StatusCode::NOT_FOUND);
+}
+
+// ───────────────────────── checklists & comments ─────────────────────────
+
+#[tokio::test]
+async fn checklist_and_comments_round_trip() {
+    let (r, t) = router(false);
+    let resp = send(
+        &r,
+        authed(
+            Method::POST,
+            "/v1/tasks",
+            Some(serde_json::json!({"title": "Boxes"})),
+        ),
+    )
+    .await;
+    let path = t
+        .path()
+        .join(body_json(resp).await["path"].as_str().unwrap());
+    let original = std::fs::read_to_string(&path).unwrap();
+    let (fm, _) = mc::frontmatter::split_frontmatter(&original).unwrap();
+    let doc = format!("---\n{fm}\n---\n- [ ] One\n\n```\n- [ ] decoy\n```\n\n- [ ] Two\n");
+    std::fs::write(&path, &doc).unwrap();
+
+    let list = body_json(
+        send(
+            &r,
+            authed(Method::GET, "/v1/entities/task/TASK-001/checklist", None),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(list["total"], 2);
+    assert_eq!(list["items"][1]["text"], "Two");
+
+    let resp = send(
+        &r,
+        authed(
+            Method::POST,
+            "/v1/entities/task/TASK-001/checklist/2",
+            Some(serde_json::json!({"expect_text": "Two"})),
+        ),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let v = body_json(resp).await;
+    assert_eq!(
+        (v["changed"].as_bool(), v["done"].as_u64()),
+        (Some(true), Some(1))
+    );
+    let ticked = std::fs::read_to_string(&path).unwrap();
+    assert_eq!(ticked, doc.replace("- [ ] Two", "- [x] Two"));
+
+    // Stale text: 409 problem-json, file untouched.
+    let resp = send(
+        &r,
+        authed(
+            Method::POST,
+            "/v1/entities/task/TASK-001/checklist/1",
+            Some(serde_json::json!({"expect_text": "Uno"})),
+        ),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::CONFLICT);
+    assert!(body_json(resp).await["type"]
+        .as_str()
+        .unwrap()
+        .ends_with("/conflict"));
+    let resp = send(
+        &r,
+        authed(
+            Method::POST,
+            "/v1/entities/task/TASK-001/checklist/7",
+            Some(serde_json::json!({})),
+        ),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), ticked);
+
+    let resp = send(
+        &r,
+        authed(
+            Method::POST,
+            "/v1/entities/task/TASK-001/comments",
+            Some(serde_json::json!({"text": "Done **soon**", "author": "Bot"})),
+        ),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let v = body_json(resp).await;
+    assert_eq!(v["count"], 1);
+    assert_eq!(v["comment"]["author"], "Bot");
+    assert_eq!(v["comment"]["body"], "Done **soon**");
+    let content = std::fs::read_to_string(&path).unwrap();
+    assert!(content.starts_with(&ticked));
+    assert!(content.contains("\n## Comments\n\n### "));
+
+    // Only tasks and meetings take comments; empty text is rejected.
+    send(
+        &r,
+        authed(
+            Method::POST,
+            "/v1/sprints",
+            Some(serde_json::json!({"title": "S1"})),
+        ),
+    )
+    .await;
+    for (uri, body) in [
+        (
+            "/v1/entities/sprint/SPR-001/comments",
+            serde_json::json!({"text": "hi"}),
+        ),
+        (
+            "/v1/entities/task/TASK-001/comments",
+            serde_json::json!({"text": "  "}),
+        ),
+    ] {
+        let resp = send(&r, authed(Method::POST, uri, Some(body))).await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "{uri}");
+    }
+}
+
+#[tokio::test]
+async fn read_only_rejects_checks_and_comments() {
+    let (r, _t) = router(true);
+    for uri in [
+        "/v1/entities/task/TASK-001/checklist/1",
+        "/v1/entities/task/TASK-001/comments",
+    ] {
+        let resp = send(
+            &r,
+            authed(Method::POST, uri, Some(serde_json::json!({"text": "x"}))),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN, "{uri}");
     }
 }

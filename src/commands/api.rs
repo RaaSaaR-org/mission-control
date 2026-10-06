@@ -2,12 +2,11 @@
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::str::FromStr;
 
 use crate::api::auth::TokenStore;
 use crate::api::{serve_with_lock, ApiServerConfig, RepoLock};
 use crate::cli::ApiSubcommand;
-use crate::config::ResolvedConfig;
+use crate::config::{RepoMode, ResolvedConfig};
 use crate::error::{McError, McResult};
 
 pub fn run(subcmd: &ApiSubcommand, cfg: &ResolvedConfig) -> McResult<()> {
@@ -82,7 +81,18 @@ fn run_serve(
     // printing any banner. A second `mc api serve` against the same repo
     // should fail fast and not leave the user holding an unusable bearer
     // token in their scrollback.
-    let repo_lock = RepoLock::acquire(&cfg.root)?;
+    // Embedded repos keep the lock inside `.mc/` so the host project's tree
+    // stays clean (`mc init --embedded` ignores it there).
+    let lock_dir = match cfg.mode {
+        RepoMode::Standalone => cfg.root.clone(),
+        RepoMode::Embedded => cfg.root.join(".mc"),
+    };
+    let repo_lock = RepoLock::acquire(&lock_dir)?;
+
+    let bind_ip: std::net::IpAddr = bind
+        .parse()
+        .map_err(|e| McError::Other(format!("invalid --bind {bind}: {e}")))?;
+    let bind_addr = SocketAddr::new(bind_ip, port);
 
     let tokens = match (tokens_file, insecure_dev_token) {
         (Some(path), false) => {
@@ -91,7 +101,7 @@ fn run_serve(
                 McError::Other(format!("load tokens file {}: {}", tokens_path.display(), e))
             })?
         }
-        (None, true) => generate_dev_token_store()?,
+        (None, true) => generate_dev_token_store(bind_addr)?,
         (None, false) => {
             return Err(McError::Other(
                 "no token source — pass --tokens-file <path>, or use --insecure-dev-token for local development".into(),
@@ -99,11 +109,6 @@ fn run_serve(
         }
         (Some(_), true) => unreachable!("clap conflicts_with prevents this"),
     };
-
-    let bind_ip: std::net::IpAddr = bind
-        .parse()
-        .map_err(|e| McError::Other(format!("invalid --bind {bind}: {e}")))?;
-    let bind_addr = SocketAddr::new(bind_ip, port);
 
     let server_cfg = ApiServerConfig {
         bind: bind_addr,
@@ -120,7 +125,7 @@ fn run_serve(
 /// random secret. Print the plaintext token to stderr (with a loud warning)
 /// so the developer can use it for the lifetime of the server. Used by
 /// `--insecure-dev-token`.
-fn generate_dev_token_store() -> McResult<TokenStore> {
+fn generate_dev_token_store(bind: SocketAddr) -> McResult<TokenStore> {
     use argon2::password_hash::{rand_core::OsRng, SaltString};
     use argon2::{Argon2, PasswordHasher};
     use colored::Colorize;
@@ -147,9 +152,15 @@ fn generate_dev_token_store() -> McResult<TokenStore> {
     eprintln!("  Bearer token: {}", secret.cyan().bold());
     eprintln!();
     eprintln!("Use it like:");
+    // An unspecified bind address (0.0.0.0 / ::) is reachable via loopback.
+    let host = if bind.ip().is_unspecified() {
+        format!("127.0.0.1:{}", bind.port())
+    } else {
+        bind.to_string()
+    };
     eprintln!(
-        "  curl -H \"Authorization: Bearer {}\" http://127.0.0.1:5100/v1/tasks",
-        secret
+        "  curl -H \"Authorization: Bearer {}\" http://{}/v1/tasks",
+        secret, host
     );
     eprintln!(
         "{}",
@@ -186,12 +197,4 @@ fn init_tracing(format: &str) -> McResult<()> {
         }
     }
     Ok(())
-}
-
-// SocketAddr does not implement FromStr the way we want for split bind+port,
-// but the conversion above is enough. Keep this trait import live in case the
-// bind string ever evolves to include a port.
-#[allow(dead_code)]
-fn _force_use_from_str() -> Option<SocketAddr> {
-    SocketAddr::from_str("127.0.0.1:0").ok()
 }

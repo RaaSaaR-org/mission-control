@@ -1,14 +1,13 @@
 //! POST endpoints for entity creation.
 //!
-//! Each handler is a thin wrapper over `commands::new::create_*_programmatic`
-//! that holds the global write lock for the duration of the call. The lock
-//! serializes ID allocation (which is a scan-and-increment) and prevents
+//! Each handler maps its request body onto the matching `commands::new`
+//! input struct and calls `create_*` while holding the global write lock. The
+//! lock serializes ID allocation (which is a scan-and-increment) and prevents
 //! TOCTOU races between concurrent POSTs.
 
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::Json;
-use serde_json::Value as JsonValue;
 
 use crate::api::error::ApiError;
 use crate::api::schemas::{
@@ -17,9 +16,16 @@ use crate::api::schemas::{
 };
 use crate::api::AppState;
 use crate::commands::new as new_cmd;
+use crate::util::parse_comma_list;
 
-fn into_create_result(v: JsonValue) -> Result<CreateResult, ApiError> {
-    serde_json::from_value(v).map_err(|e| ApiError::Internal(format!("create result decode: {e}")))
+type CreateResponse = Result<(StatusCode, Json<CreateResult>), ApiError>;
+
+fn list(v: Option<String>) -> Vec<String> {
+    v.as_deref().map(parse_comma_list).unwrap_or_default()
+}
+
+fn created(c: new_cmd::Created) -> CreateResponse {
+    Ok((StatusCode::CREATED, Json(c.into())))
 }
 
 #[utoipa::path(
@@ -36,16 +42,15 @@ fn into_create_result(v: JsonValue) -> Result<CreateResult, ApiError> {
 pub async fn create_customer(
     State(state): State<AppState>,
     Json(body): Json<CreateCustomer>,
-) -> Result<(StatusCode, Json<CreateResult>), ApiError> {
+) -> CreateResponse {
     let _w = state.write_lock.lock().await;
-    let v = new_cmd::create_customer_programmatic(
-        &state.cfg,
-        &body.name,
-        body.owner.as_deref(),
-        body.status.as_deref(),
-        body.tags.as_deref(),
-    )?;
-    Ok((StatusCode::CREATED, Json(into_create_result(v)?)))
+    let input = new_cmd::CustomerInput {
+        name: body.name,
+        owner: body.owner,
+        status: body.status,
+        tags: list(body.tags),
+    };
+    created(new_cmd::create_customer(&state.cfg, &input)?)
 }
 
 #[utoipa::path(
@@ -62,17 +67,16 @@ pub async fn create_customer(
 pub async fn create_project(
     State(state): State<AppState>,
     Json(body): Json<CreateProject>,
-) -> Result<(StatusCode, Json<CreateResult>), ApiError> {
+) -> CreateResponse {
     let _w = state.write_lock.lock().await;
-    let v = new_cmd::create_project_programmatic(
-        &state.cfg,
-        &body.name,
-        body.owner.as_deref(),
-        body.status.as_deref(),
-        body.customers.as_deref(),
-        body.tags.as_deref(),
-    )?;
-    Ok((StatusCode::CREATED, Json(into_create_result(v)?)))
+    let input = new_cmd::ProjectInput {
+        name: body.name,
+        owner: body.owner,
+        status: body.status,
+        customers: list(body.customers),
+        tags: list(body.tags),
+    };
+    created(new_cmd::create_project(&state.cfg, &input)?)
 }
 
 #[utoipa::path(
@@ -88,21 +92,20 @@ pub async fn create_project(
 pub async fn create_meeting(
     State(state): State<AppState>,
     Json(body): Json<CreateMeeting>,
-) -> Result<(StatusCode, Json<CreateResult>), ApiError> {
+) -> CreateResponse {
     let _w = state.write_lock.lock().await;
-    let v = new_cmd::create_meeting_programmatic(
-        &state.cfg,
-        &body.title,
-        body.date.as_deref(),
-        body.time.as_deref(),
-        body.duration.as_deref(),
-        body.status.as_deref(),
-        body.tags.as_deref(),
-        body.customers.as_deref(),
-        body.projects.as_deref(),
-        body.attendees.as_deref(),
-    )?;
-    Ok((StatusCode::CREATED, Json(into_create_result(v)?)))
+    let input = new_cmd::MeetingInput {
+        title: body.title,
+        date: body.date,
+        time: body.time,
+        duration: body.duration,
+        status: body.status,
+        tags: list(body.tags),
+        customers: list(body.customers),
+        projects: list(body.projects),
+        attendees: list(body.attendees),
+    };
+    created(new_cmd::create_meeting(&state.cfg, &input)?)
 }
 
 #[utoipa::path(
@@ -118,16 +121,15 @@ pub async fn create_meeting(
 pub async fn create_research(
     State(state): State<AppState>,
     Json(body): Json<CreateResearch>,
-) -> Result<(StatusCode, Json<CreateResult>), ApiError> {
+) -> CreateResponse {
     let _w = state.write_lock.lock().await;
-    let v = new_cmd::create_research_programmatic(
-        &state.cfg,
-        &body.title,
-        body.owner.as_deref(),
-        body.agents.as_deref(),
-        body.tags.as_deref(),
-    )?;
-    Ok((StatusCode::CREATED, Json(into_create_result(v)?)))
+    let input = new_cmd::ResearchInput {
+        title: body.title,
+        owner: body.owner,
+        agents: body.agents.as_deref().map(parse_comma_list),
+        tags: list(body.tags),
+    };
+    created(new_cmd::create_research(&state.cfg, &input)?)
 }
 
 #[utoipa::path(
@@ -143,22 +145,21 @@ pub async fn create_research(
 pub async fn create_task(
     State(state): State<AppState>,
     Json(body): Json<CreateTask>,
-) -> Result<(StatusCode, Json<CreateResult>), ApiError> {
+) -> CreateResponse {
     let _w = state.write_lock.lock().await;
-    let v = new_cmd::create_task_programmatic(
-        &state.cfg,
-        &body.title,
-        body.project.as_deref(),
-        body.customer.as_deref(),
-        body.owner.as_deref(),
-        body.status.as_deref(),
-        body.priority,
-        body.tags.as_deref(),
-        body.sprint.as_deref(),
-        body.depends_on.as_deref(),
-        body.due_date.as_deref(),
-    )?;
-    Ok((StatusCode::CREATED, Json(into_create_result(v)?)))
+    let input = new_cmd::TaskInput {
+        title: body.title,
+        project: body.project,
+        customer: body.customer,
+        owner: body.owner,
+        status: body.status,
+        priority: body.priority,
+        tags: list(body.tags),
+        sprint: body.sprint,
+        depends_on: list(body.depends_on),
+        due_date: body.due_date,
+    };
+    created(new_cmd::create_task(&state.cfg, &input)?)
 }
 
 #[utoipa::path(
@@ -174,20 +175,19 @@ pub async fn create_task(
 pub async fn create_sprint(
     State(state): State<AppState>,
     Json(body): Json<CreateSprint>,
-) -> Result<(StatusCode, Json<CreateResult>), ApiError> {
+) -> CreateResponse {
     let _w = state.write_lock.lock().await;
-    let v = new_cmd::create_sprint_programmatic(
-        &state.cfg,
-        &body.title,
-        body.owner.as_deref(),
-        body.status.as_deref(),
-        body.goal.as_deref(),
-        body.start_date.as_deref(),
-        body.end_date.as_deref(),
-        body.projects.as_deref(),
-        body.tags.as_deref(),
-    )?;
-    Ok((StatusCode::CREATED, Json(into_create_result(v)?)))
+    let input = new_cmd::SprintInput {
+        title: body.title,
+        owner: body.owner,
+        status: body.status,
+        goal: body.goal,
+        start_date: body.start_date,
+        end_date: body.end_date,
+        projects: list(body.projects),
+        tags: list(body.tags),
+    };
+    created(new_cmd::create_sprint(&state.cfg, &input)?)
 }
 
 #[utoipa::path(
@@ -203,18 +203,17 @@ pub async fn create_sprint(
 pub async fn create_proposal(
     State(state): State<AppState>,
     Json(body): Json<CreateProposal>,
-) -> Result<(StatusCode, Json<CreateResult>), ApiError> {
+) -> CreateResponse {
     let _w = state.write_lock.lock().await;
-    let v = new_cmd::create_proposal_programmatic(
-        &state.cfg,
-        &body.title,
-        body.author.as_deref(),
-        body.status.as_deref(),
-        body.proposal_type.as_deref(),
-        body.tags.as_deref(),
-        body.supersedes.as_deref(),
-    )?;
-    Ok((StatusCode::CREATED, Json(into_create_result(v)?)))
+    let input = new_cmd::ProposalInput {
+        title: body.title,
+        author: body.author,
+        status: body.status,
+        proposal_type: body.proposal_type,
+        tags: list(body.tags),
+        supersedes: body.supersedes,
+    };
+    created(new_cmd::create_proposal(&state.cfg, &input)?)
 }
 
 #[utoipa::path(
@@ -230,17 +229,16 @@ pub async fn create_proposal(
 pub async fn create_contact(
     State(state): State<AppState>,
     Json(body): Json<CreateContact>,
-) -> Result<(StatusCode, Json<CreateResult>), ApiError> {
+) -> CreateResponse {
     let _w = state.write_lock.lock().await;
-    let v = new_cmd::create_contact_programmatic(
-        &state.cfg,
-        &body.name,
-        &body.customer,
-        body.role.as_deref(),
-        body.email.as_deref(),
-        body.phone.as_deref(),
-        body.status.as_deref(),
-        body.tags.as_deref(),
-    )?;
-    Ok((StatusCode::CREATED, Json(into_create_result(v)?)))
+    let input = new_cmd::ContactInput {
+        name: body.name,
+        customer: body.customer,
+        role: body.role,
+        email: body.email,
+        phone: body.phone,
+        status: body.status,
+        tags: list(body.tags),
+    };
+    created(new_cmd::create_contact(&state.cfg, &input)?)
 }

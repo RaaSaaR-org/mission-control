@@ -5,4 +5,5 @@ pub mod entities;
 pub mod health;
 pub mod maintenance;
 pub mod meta;
+pub mod notes;
 pub mod tasks;

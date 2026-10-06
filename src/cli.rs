@@ -1,33 +1,64 @@
+pub mod markdown;
+pub mod pager;
+pub mod suggest;
+pub mod ui;
+
+use clap::builder::styling::{AnsiColor, Effects, Styles};
 use clap::{Parser, Subcommand};
+
+const STYLES: Styles = Styles::styled()
+    .header(AnsiColor::Cyan.on_default().effects(Effects::BOLD))
+    .usage(AnsiColor::Cyan.on_default().effects(Effects::BOLD))
+    .literal(AnsiColor::BrightWhite.on_default().effects(Effects::BOLD))
+    .placeholder(AnsiColor::BrightBlack.on_default())
+    .valid(AnsiColor::Green.on_default())
+    .invalid(AnsiColor::Yellow.on_default().effects(Effects::BOLD))
+    .error(AnsiColor::Red.on_default().effects(Effects::BOLD));
 
 #[derive(Parser, Debug)]
 #[command(
     name = "mc",
-    about = "MissionControl CLI -- manage customers, contacts, projects, meetings, research, tasks, and proposals",
+    about = "MissionControl — git-based knowledge management for customers, projects, meetings, research, tasks and proposals",
     version,
+    styles = STYLES,
     after_help = "\x1b[1mExamples:\x1b[0m
-  mc status                          Show dashboard
-  mc list customers --status active  List active customers
-  mc show CUST-001                   Show customer details
-  mc new customer \"Acme Inc\"         Create a new customer (interactive)
-  mc -y new customer \"Acme Inc\"      Create with defaults (no prompts)
+  mc status                          Dashboard: counts, focus, recent activity
+  mc list tasks --status todo        List tasks (filters: --status, --tag, --project, ...)
+  mc show TASK-7                     Show an entity (IDs are case/padding tolerant)
   mc new task \"Fix bug\" --project PROJ-001 --priority 2
-  mc task board --project PROJ-001   Show kanban board
-  mc task move TASK-001 in-progress  Change task status
-  mc task next                       Show next actionable task
-  mc validate                        Check repo structure
-  mc index                           Rebuild JSON indexes
+  mc task board --project PROJ-001   Kanban board
+  mc task move 7 in-progress         Change task status (moves file todo/ <-> done/)
+  mc task next                       Next actionable task
+  mc validate                        Check repo structure and frontmatter
+  mc list tasks --json | jq '.[].id' Machine-readable output
   mc init                            Initialize a new MissionControl repo
-  mc init --project                  Initialize a lightweight project repo"
+
+\x1b[1mEnvironment:\x1b[0m
+  NO_COLOR=1      Disable colors (same as --color never)
+  MC_ASCII=1      Use ASCII instead of unicode glyphs
+  MC_WIDTH=<n>    Lay out tables for <n> columns (0 = unlimited)
+  MC_PAGER=<cmd>  Pager for long output (default: $PAGER, then less; cat = off)
+  MC_HYPERLINKS=0 Disable clickable terminal links (1 forces them on)
+
+\x1b[1mExit codes:\x1b[0m
+  0 success · 1 failure (not found, validation issues, I/O) · 2 invalid usage"
 )]
 pub struct Cli {
     /// Path to repo root (auto-detected if omitted)
-    #[arg(long)]
+    #[arg(long, global = true, value_name = "PATH")]
     pub root: Option<String>,
 
     /// Skip interactive prompts (use defaults)
-    #[arg(short = 'y', long = "yes")]
+    #[arg(short = 'y', long = "yes", global = true)]
     pub yes: bool,
+
+    /// Print machine-readable JSON (list, show, status, validate, index, export, task, check, comment)
+    #[arg(long, global = true)]
+    pub json: bool,
+
+    /// When to use colors (auto respects NO_COLOR and CLICOLOR_FORCE)
+    #[arg(long, global = true, value_enum, default_value_t = ui::ColorChoice::Auto, value_name = "WHEN")]
+    pub color: ui::ColorChoice,
 
     #[command(subcommand)]
     pub command: Command,
@@ -58,7 +89,9 @@ pub enum Command {
   mc list meetings --status scheduled
   mc list tasks --status in-progress --project PROJ-001
   mc list sprints --status active
-  mc list proposals --status accepted")]
+  mc list proposals --status accepted
+  mc list tasks --json")]
+    #[command(visible_alias = "ls")]
     List {
         #[command(subcommand)]
         entity: ListEntity,
@@ -72,14 +105,68 @@ pub enum Command {
   mc show RES-001
   mc show TASK-001
   mc show SPR-001
-  mc show PROP-001")]
+  mc show PROP-001
+  mc show task-7                     Loose ID (case and zero-padding are optional)
+  mc show TASK-001 --raw             Markdown source instead of the rendered view
+  mc show TASK-001 --open            Open the file in $VISUAL / $EDITOR
+
+On a terminal the body is rendered (tables, lists, code), entity references
+and file links are clickable (OSC 8), and long output goes through a pager.
+Piped output keeps the plain layout: fields plus the markdown as written.")]
     Show {
-        /// Entity ID (e.g., CUST-001, CONT-001, PROJ-001, MTG-001, TASK-001, SPR-001, PROP-001)
+        /// Entity ID (e.g., TASK-001; case and zero-padding are optional: task-1)
         id: String,
+        /// Print the markdown source instead of rendering it
+        #[arg(long)]
+        raw: bool,
+        /// Never page long output (also: MC_PAGER=cat)
+        #[arg(long)]
+        no_pager: bool,
+        /// Open the entity file in $VISUAL / $EDITOR (or the system opener)
+        #[arg(long, conflicts_with_all = ["raw", "no_pager"])]
+        open: bool,
+        /// Accepted for compatibility; the whole body is always shown
+        #[arg(long, hide = true)]
+        full: bool,
+    },
+    /// List an entity's checklist, or tick an item in it
+    #[command(after_help = "\x1b[1mExamples:\x1b[0m
+  mc check TASK-069                 List checklist items (- [ ] lines) with numbers
+  mc check TASK-069 2               Tick item 2
+  mc check TASK-069 2 --uncheck     Untick item 2
+  mc check MTG-004 --json           Items as JSON")]
+    Check {
+        /// Entity ID (e.g., TASK-069; loose forms like task-69 work)
+        id: String,
+        /// Item number, as listed by `mc check <ID>`
+        item: Option<usize>,
+        /// Untick the item instead of ticking it
+        #[arg(long, requires = "item")]
+        uncheck: bool,
+    },
+    /// Comment on a task or meeting
+    #[command(after_help = "\x1b[1mExamples:\x1b[0m
+  mc comment TASK-069 \"Shipped, see TASK-070\"
+  mc comment MTG-004 \"Follow-up booked\" --author \"Jane Doe\"
+  git log -1 --format=%B | mc comment TASK-069 -    Read the text from stdin
+
+Comments go into a \"## Comments\" section at the end of the entity's file,
+one \"### <date> <time> · <author>\" heading each. The author defaults to
+git config user.name, else $USER. Control characters are dropped, and an
+unclosed code fence or HTML block is closed at the end of the comment.")]
+    Comment {
+        /// Task or meeting ID (e.g., TASK-069)
+        id: String,
+        /// Comment text (Markdown); - reads it from stdin
+        text: String,
+        /// Author name (defaults to git config user.name, else $USER)
+        #[arg(long)]
+        author: Option<String>,
     },
     /// Rebuild entity index files (data/*.json)
     #[command(after_help = "\x1b[1mExamples:\x1b[0m
-  mc index          Rebuild all JSON indexes from entity files")]
+  mc index          Rebuild all JSON indexes from entity files
+  mc index --json   Print per-kind counts as JSON")]
     Index,
     /// Export an entity to a zip archive
     #[command(after_help = "\x1b[1mExamples:\x1b[0m
@@ -102,27 +189,37 @@ pub enum Command {
     },
     /// Validate repo structure and frontmatter
     #[command(after_help = "\x1b[1mExamples:\x1b[0m
-  mc validate       Check all entities for missing/invalid frontmatter fields
-
-Prints warnings for each issue found, or \"All files valid\" if clean.")]
+  mc validate         Check all entities for missing/invalid frontmatter fields
+  mc validate --json  Issues as JSON (exit code 1 when issues are found)")]
     Validate,
     /// Show a dashboard with counts and recent activity
     #[command(after_help = "\x1b[1mExamples:\x1b[0m
   mc status         Show entity counts, recent activity, and task summary")]
     Status,
-    /// Start a local web server to browse all MissionControl data
+    /// Start a local web server to browse and edit MissionControl data
     #[command(after_help = "\x1b[1mExamples:\x1b[0m
-  mc serve                Start on default port 5000
-  mc serve --port 8080    Start on port 8080
+  mc serve                                 Start on default port 5000
+  mc serve --port 8080                     Start on port 8080
+  mc serve --read-only                     Browse only; no editing
+  mc serve --base-path /hq                 Behind a reverse proxy (read-only)
+  mc serve --base-path /hq --allow-edits   Behind a proxy, with editing
 
-Open http://localhost:<port> in your browser to view the dashboard.")]
+Open http://localhost:<port> in your browser to view the dashboard.
+Press ? in the dashboard for keyboard shortcuts.")]
     Serve {
         /// Port to listen on
         #[arg(long, default_value_t = 5000)]
         port: u16,
-        /// Base path prefix when served behind a reverse proxy (e.g. /hq)
+        /// Base path prefix when served behind a reverse proxy (e.g. /hq).
+        /// Editing is off with a base path unless --allow-edits is given.
         #[arg(long, default_value = "")]
         base_path: String,
+        /// Turn off editing (moving, editing and creating tasks)
+        #[arg(long, conflicts_with = "allow_edits")]
+        read_only: bool,
+        /// Allow editing even when served behind a reverse proxy (--base-path)
+        #[arg(long)]
+        allow_edits: bool,
     },
     /// Start an MCP (Model Context Protocol) server over stdio
     #[command(after_help = "\x1b[1mIntegration:\x1b[0m
@@ -176,7 +273,7 @@ Open http://localhost:<port> in your browser to view the dashboard.")]
         #[arg(long)]
         force: bool,
     },
-    /// Task management commands (board, move, next)
+    /// Task workflow: kanban board, status moves, next actionable task
     #[command(after_help = "\x1b[1mExamples:\x1b[0m
   mc task board                           Show kanban board
   mc task board --project PROJ-001        Board for a project
@@ -445,6 +542,7 @@ pub enum ListEntity {
   mc list customers
   mc list customers --status active
   mc list customers --tag enterprise")]
+    #[command(alias = "customer")]
     Customers {
         /// Filter by status
         #[arg(long)]
@@ -458,6 +556,7 @@ pub enum ListEntity {
   mc list projects
   mc list projects --status active
   mc list projects --tag ml")]
+    #[command(alias = "project")]
     Projects {
         /// Filter by status
         #[arg(long)]
@@ -471,6 +570,7 @@ pub enum ListEntity {
   mc list meetings
   mc list meetings --status scheduled
   mc list meetings --tag recurring")]
+    #[command(alias = "meeting")]
     Meetings {
         /// Filter by status
         #[arg(long)]
@@ -497,6 +597,7 @@ pub enum ListEntity {
   mc list sprints
   mc list sprints --status active
   mc list sprints --tag q1")]
+    #[command(alias = "sprint")]
     Sprints {
         /// Filter by status
         #[arg(long)]
@@ -510,6 +611,7 @@ pub enum ListEntity {
   mc list proposals
   mc list proposals --status accepted
   mc list proposals --tag architecture")]
+    #[command(alias = "proposal")]
     Proposals {
         /// Filter by status
         #[arg(long)]
@@ -524,6 +626,7 @@ pub enum ListEntity {
   mc list contacts --status active
   mc list contacts --customer CUST-001
   mc list contacts --tag engineering")]
+    #[command(alias = "contact")]
     Contacts {
         /// Filter by status
         #[arg(long)]
@@ -541,6 +644,7 @@ pub enum ListEntity {
   mc list tasks --status in-progress --project PROJ-001
   mc list tasks --priority 1 --owner alice
   mc list tasks --sprint 2026-W05")]
+    #[command(alias = "task")]
     Tasks {
         /// Filter by status
         #[arg(long)]
@@ -573,7 +677,8 @@ pub enum TaskSubcommand {
   mc task board
   mc task board --project PROJ-001
   mc task board --sprint 2026-W05
-  mc task board --customer CUST-001")]
+  mc task board --customer CUST-001
+  mc task board --owner alice --all       Every card, including cancelled")]
     Board {
         /// Filter by project ID
         #[arg(long)]
@@ -584,17 +689,27 @@ pub enum TaskSubcommand {
         /// Filter by sprint label
         #[arg(long)]
         sprint: Option<String>,
+        /// Filter by owner
+        #[arg(long)]
+        owner: Option<String>,
+        /// Max cards per column (the done column shows at most 5 unless --all)
+        #[arg(long, default_value_t = 10, value_name = "N")]
+        limit: usize,
+        /// Show every card and include the cancelled column
+        #[arg(long)]
+        all: bool,
     },
     /// Move a task to a new status
     #[command(after_help = "\x1b[1mExamples:\x1b[0m
   mc task move TASK-001 in-progress
   mc task move TASK-001 todo --sprint 2026-W05
   mc task move TASK-003 done
-  mc task move TASK-003 backlog")]
+  mc task move TASK-003 backlog
+  mc task move 7 wip                      Loose ID and status aliases")]
     Move {
-        /// Task ID (e.g., TASK-001)
+        /// Task ID (TASK-001, task-1 or just 1)
         id: String,
-        /// New status (backlog, todo, in-progress, review, done, cancelled)
+        /// New status (backlog, todo, in-progress, review, done, cancelled; case-insensitive)
         status: String,
         /// Assign to a sprint (e.g., 2026-W05)
         #[arg(long)]
@@ -604,7 +719,8 @@ pub enum TaskSubcommand {
     #[command(after_help = "\x1b[1mExamples:\x1b[0m
   mc task next
   mc task next --project PROJ-001
-  mc task next --customer CUST-001")]
+  mc task next --customer CUST-001
+  mc task next -n 5                       Top five in the queue")]
     Next {
         /// Filter by project ID
         #[arg(long)]
@@ -612,6 +728,12 @@ pub enum TaskSubcommand {
         /// Filter by customer ID
         #[arg(long)]
         customer: Option<String>,
+        /// Filter by owner
+        #[arg(long)]
+        owner: Option<String>,
+        /// How many tasks to show
+        #[arg(short = 'n', long, default_value_t = 1, value_name = "N")]
+        limit: usize,
     },
 }
 
@@ -620,7 +742,8 @@ pub enum ExportEntity {
     /// Export a customer to a zip archive
     #[command(after_help = "\x1b[1mExamples:\x1b[0m
   mc export customer CUST-001       Export by ID
-  mc export customer acme-inc       Export by slug")]
+  mc export customer acme-inc       Export by slug
+  mc export customer 1 --json       Print the archive path as JSON")]
     Customer {
         /// Customer ID or slug (e.g., CUST-001 or acme-inc)
         id: String,
@@ -670,4 +793,17 @@ pub enum PrintEntity {
         #[arg(long)]
         title: Option<String>,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Cli;
+    use clap::CommandFactory;
+
+    /// Catches clashing global flags (`--json`, `--color`, `--root`, `-y`) and
+    /// other definition errors that clap only reports at parse time.
+    #[test]
+    fn cli_definition_is_valid() {
+        Cli::command().debug_assert();
+    }
 }

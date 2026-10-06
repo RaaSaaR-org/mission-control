@@ -22,6 +22,24 @@ fn parse_kind(s: &str) -> Result<EntityKind, ApiError> {
         .map_err(|_| ApiError::BadRequest(format!("unknown entity kind: {s}")))
 }
 
+/// Look up `id` and require it to be of the kind named in the path. The ID's
+/// prefix is checked before touching the filesystem.
+pub(crate) fn find_of_kind(
+    state: &AppState,
+    kind_str: &str,
+    id: &str,
+) -> Result<data::EntityRecord, ApiError> {
+    let kind = parse_kind(kind_str)?;
+    let id_kind = EntityKind::from_id(id, &state.cfg)?;
+    if id_kind != kind {
+        return Err(ApiError::Domain(McError::EntityNotFound(format!(
+            "{id} (not a {})",
+            kind.label()
+        ))));
+    }
+    Ok(data::find_entity_by_id(id, &state.cfg)?)
+}
+
 #[utoipa::path(
     get,
     path = "/v1/entities/{kind}",
@@ -45,9 +63,7 @@ pub async fn list_entities(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let kind = parse_kind(&kind)?;
     if !state.cfg.entity_available(&kind) {
-        return Err(ApiError::Domain(McError::NotAvailableInMode {
-            kind: kind.label().into(),
-        }));
+        return Err(ApiError::Domain(McError::not_available(kind, &state.cfg)));
     }
 
     let entries = data::collect_filtered(
@@ -98,14 +114,7 @@ pub async fn get_entity(
     State(state): State<AppState>,
     Path((kind_str, id)): Path<(String, String)>,
 ) -> Result<Json<EntityResponse>, ApiError> {
-    let kind = parse_kind(&kind_str)?;
-    let record = data::find_entity_by_id(&id, &state.cfg)?;
-    if record.kind != kind {
-        return Err(ApiError::Domain(McError::EntityNotFound(format!(
-            "{id} (not a {})",
-            kind.label()
-        ))));
-    }
+    let record = find_of_kind(&state, &kind_str, &id)?;
 
     let body_preview = preview(&record.body, 500);
     Ok(Json(EntityResponse {
@@ -136,14 +145,7 @@ pub async fn get_entity_raw(
     State(state): State<AppState>,
     Path((kind_str, id)): Path<(String, String)>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let kind = parse_kind(&kind_str)?;
-    let record = data::find_entity_by_id(&id, &state.cfg)?;
-    if record.kind != kind {
-        return Err(ApiError::Domain(McError::EntityNotFound(format!(
-            "{id} (not a {})",
-            kind.label()
-        ))));
-    }
+    let record = find_of_kind(&state, &kind_str, &id)?;
 
     let raw = std::fs::read_to_string(&record.source_path)
         .map_err(|e| ApiError::Internal(format!("read entity file: {e}")))?;

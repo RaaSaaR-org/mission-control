@@ -1,10 +1,10 @@
 use crate::config::{RepoMode, ResolvedConfig};
+use crate::data;
 use crate::error::{McError, McResult};
 use crate::frontmatter;
 use regex::Regex;
 use std::fmt;
 use std::path::{Path, PathBuf};
-use walkdir::WalkDir;
 
 /// The entity kinds managed by MissionControl.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -20,6 +20,18 @@ pub enum EntityKind {
 }
 
 impl EntityKind {
+    /// Every entity kind, in display order.
+    pub const ALL: [EntityKind; 8] = [
+        EntityKind::Customer,
+        EntityKind::Project,
+        EntityKind::Meeting,
+        EntityKind::Research,
+        EntityKind::Task,
+        EntityKind::Sprint,
+        EntityKind::Proposal,
+        EntityKind::Contact,
+    ];
+
     pub fn label(&self) -> &'static str {
         match self {
             EntityKind::Customer => "customer",
@@ -111,42 +123,34 @@ impl EntityKind {
             "sprint" | "sprints" => Ok(EntityKind::Sprint),
             "proposal" | "proposals" | "prop" => Ok(EntityKind::Proposal),
             "contact" | "contacts" => Ok(EntityKind::Contact),
-            _ => Err(McError::Other(format!("Unknown entity kind: {s}"))),
+            _ => Err(McError::usage(format!("Unknown entity kind: {s}"), None)),
         }
     }
 
     /// Parse an entity kind from an ID prefix like "CUST-001".
+    /// When configured prefixes overlap, the longest matching prefix wins.
     pub fn from_id(id: &str, cfg: &ResolvedConfig) -> McResult<Self> {
-        if id.starts_with(&format!("{}-", cfg.id_prefixes.customer)) {
-            Ok(EntityKind::Customer)
-        } else if id.starts_with(&format!("{}-", cfg.id_prefixes.project)) {
-            Ok(EntityKind::Project)
-        } else if id.starts_with(&format!("{}-", cfg.id_prefixes.meeting)) {
-            Ok(EntityKind::Meeting)
-        } else if id.starts_with(&format!("{}-", cfg.id_prefixes.research)) {
-            Ok(EntityKind::Research)
-        } else if id.starts_with(&format!("{}-", cfg.id_prefixes.task)) {
-            Ok(EntityKind::Task)
-        } else if id.starts_with(&format!("{}-", cfg.id_prefixes.sprint)) {
-            Ok(EntityKind::Sprint)
-        } else if id.starts_with(&format!("{}-", cfg.id_prefixes.proposal)) {
-            Ok(EntityKind::Proposal)
-        } else if id.starts_with(&format!("{}-", cfg.id_prefixes.contact)) {
-            Ok(EntityKind::Contact)
-        } else {
-            Err(McError::InvalidId(format!(
-                "{} (expected format like {}-001, {}-002, {}-003, {}-001, {}-001, {}-001, {}-001, or {}-001)",
-                id,
-                cfg.id_prefixes.customer,
-                cfg.id_prefixes.project,
-                cfg.id_prefixes.meeting,
-                cfg.id_prefixes.research,
-                cfg.id_prefixes.task,
-                cfg.id_prefixes.sprint,
-                cfg.id_prefixes.proposal,
-                cfg.id_prefixes.contact,
-            )))
-        }
+        Self::ALL
+            .into_iter()
+            .filter(|k| {
+                id.strip_prefix(k.prefix(cfg))
+                    .is_some_and(|rest| rest.starts_with('-'))
+            })
+            // `max_by_key` keeps the last of equal maxima; reversing keeps the
+            // first in `ALL` order when two kinds share a prefix.
+            .rev()
+            .max_by_key(|k| k.prefix(cfg).len())
+            .ok_or_else(|| {
+                let examples: Vec<String> = Self::ALL
+                    .iter()
+                    .map(|k| format!("{}-001", k.prefix(cfg)))
+                    .collect();
+                McError::InvalidId(format!(
+                    "{} (expected format like {})",
+                    id,
+                    examples.join(", ")
+                ))
+            })
     }
 }
 
@@ -182,6 +186,34 @@ impl fmt::Display for EntityId {
     }
 }
 
+/// Immediate subdirectories of `dir`, sorted. Missing or unreadable dirs yield nothing.
+fn subdirs(dir: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut dirs: Vec<PathBuf> = entries
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().is_ok_and(|ft| ft.is_dir()))
+        .map(|e| e.path())
+        .collect();
+    dirs.sort();
+    dirs
+}
+
+/// Task statuses whose files live in `todo/`; every other status (`done`,
+/// `cancelled`, custom ones) lives in `done/`.
+pub const ACTIVE_TASK_STATUSES: &[&str] = &["backlog", "todo", "in-progress", "review"];
+
+/// The subfolder of a `tasks/` directory (`todo` or `done`) where a task with
+/// `status` belongs. Shared by `mc new task` and `mc task move`.
+pub fn task_status_folder(status: &str) -> &'static str {
+    if ACTIVE_TASK_STATUSES.contains(&status) {
+        "todo"
+    } else {
+        "done"
+    }
+}
+
 /// A task location discovered on disk.
 pub struct TaskLocation {
     pub tasks_dir: PathBuf,
@@ -190,42 +222,19 @@ pub struct TaskLocation {
 /// Collect all directories that can contain tasks:
 /// global `tasks/`, each `projects/*/tasks/`, each `customers/*/tasks/`.
 pub fn collect_all_task_dirs(cfg: &ResolvedConfig) -> Vec<TaskLocation> {
-    let mut locations = Vec::new();
-
-    // Global tasks dir
-    locations.push(TaskLocation {
-        tasks_dir: cfg.tasks_dir.clone(),
-    });
-
-    // Project-scoped tasks
-    if cfg.projects_dir.is_dir() {
-        if let Ok(entries) = std::fs::read_dir(&cfg.projects_dir) {
-            for entry in entries.filter_map(|e| e.ok()) {
-                if entry.file_type().is_ok_and(|ft| ft.is_dir()) {
-                    let tasks_subdir = entry.path().join("tasks");
-                    locations.push(TaskLocation {
-                        tasks_dir: tasks_subdir,
-                    });
-                }
-            }
-        }
-    }
-
-    // Customer-scoped tasks
-    if cfg.customers_dir.is_dir() {
-        if let Ok(entries) = std::fs::read_dir(&cfg.customers_dir) {
-            for entry in entries.filter_map(|e| e.ok()) {
-                if entry.file_type().is_ok_and(|ft| ft.is_dir()) {
-                    let tasks_subdir = entry.path().join("tasks");
-                    locations.push(TaskLocation {
-                        tasks_dir: tasks_subdir,
-                    });
-                }
-            }
-        }
-    }
-
-    locations
+    std::iter::once(cfg.tasks_dir.clone())
+        .chain(
+            subdirs(&cfg.projects_dir)
+                .into_iter()
+                .map(|d| d.join("tasks")),
+        )
+        .chain(
+            subdirs(&cfg.customers_dir)
+                .into_iter()
+                .map(|d| d.join("tasks")),
+        )
+        .map(|tasks_dir| TaskLocation { tasks_dir })
+        .collect()
 }
 
 /// A contact directory discovered on disk.
@@ -235,126 +244,191 @@ pub struct ContactLocation {
 
 /// Collect all directories that can contain contacts: each `customers/*/contacts/`.
 pub fn collect_all_contact_dirs(cfg: &ResolvedConfig) -> Vec<ContactLocation> {
-    let mut locations = Vec::new();
-
-    if cfg.customers_dir.is_dir() {
-        if let Ok(entries) = std::fs::read_dir(&cfg.customers_dir) {
-            for entry in entries.filter_map(|e| e.ok()) {
-                if entry.file_type().is_ok_and(|ft| ft.is_dir()) {
-                    let contacts_subdir = entry.path().join("contacts");
-                    locations.push(ContactLocation {
-                        contacts_dir: contacts_subdir,
-                    });
-                }
-            }
-        }
-    }
-
-    locations
+    subdirs(&cfg.customers_dir)
+        .into_iter()
+        .map(|d| ContactLocation {
+            contacts_dir: d.join("contacts"),
+        })
+        .collect()
 }
 
 /// Scan for the next available ID for a given entity kind.
-/// For directory-based entities (Customer, Project, Research): scan directory names.
-/// For meetings: scan frontmatter `id` fields.
-/// For tasks: scan all task locations (both `todo/` and `done/` subfolders).
+///
+/// The maximum is taken over both naming conventions on disk (entity directory
+/// names like `CUST-007-acme`, file names like `TASK-012-fix.md`) and the `id`
+/// fields of the entities themselves, so a renamed directory or an oddly named
+/// file cannot cause an ID to be handed out twice. Meetings and proposals are
+/// identified by frontmatter only (their file names are date/slug based).
 /// Always returns max+1 (no gap-filling).
 ///
 /// Note: There is a theoretical TOCTOU race between reading the max ID and
-/// writing the new entity. This is acceptable for a single-user CLI — the
-/// window is microseconds and adding file locking (e.g. `fs2`/`flock`) would
-/// introduce cross-platform complexity for zero practical benefit.
+/// writing the new entity. This is acceptable for a single-user CLI; the REST
+/// API serializes writers with a lock.
 pub fn next_id(kind: EntityKind, cfg: &ResolvedConfig) -> McResult<EntityId> {
     let prefix = kind.prefix(cfg);
-    let mut max_num: u32 = 0;
-
     let id_re = Regex::new(&format!(r"^{}-(\d+)", regex::escape(prefix)))
-        .expect("regex with escaped prefix is always valid");
+        .map_err(|e| McError::Other(format!("invalid ID prefix '{prefix}': {e}")))?;
+    let number = |s: &str| -> Option<u32> { id_re.captures(s)?.get(1)?.as_str().parse().ok() };
+    let name_of = |p: &Path| -> String {
+        p.file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    };
 
-    match kind {
+    let names: Vec<String> = match kind {
         EntityKind::Customer | EntityKind::Project | EntityKind::Research | EntityKind::Sprint => {
-            let base = kind.base_dir(cfg);
-            // Scan directory names
-            if base.is_dir() {
-                for entry in std::fs::read_dir(base)? {
-                    let entry = entry?;
-                    if entry.file_type()?.is_dir() {
-                        let name = entry.file_name();
-                        let name = name.to_string_lossy();
-                        if let Some(caps) = id_re.captures(&name) {
-                            if let Ok(n) = caps[1].parse::<u32>() {
-                                max_num = max_num.max(n);
-                            }
-                        }
-                    }
-                }
-            }
+            subdirs(kind.base_dir(cfg))
+                .iter()
+                .map(|d| name_of(d))
+                .collect()
         }
-        EntityKind::Meeting | EntityKind::Proposal => {
-            let base = kind.base_dir(cfg);
-            // Scan frontmatter id fields in .md files
-            if base.is_dir() {
-                for entry in WalkDir::new(base).into_iter().filter_map(|e| e.ok()) {
-                    let path = entry.path();
-                    if path.extension().is_some_and(|e| e == "md") {
-                        if let Ok(content) = std::fs::read_to_string(path) {
-                            if let Some((fm_str, _)) = frontmatter::split_frontmatter(&content) {
-                                if let Ok(val) = frontmatter::parse_raw(&fm_str, path) {
-                                    if let Some(id_val) = frontmatter::get_str(&val, "id") {
-                                        if let Some(caps) = id_re.captures(id_val) {
-                                            if let Ok(n) = caps[1].parse::<u32>() {
-                                                max_num = max_num.max(n);
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
+        EntityKind::Task => data::task_files(cfg).iter().map(|p| name_of(p)).collect(),
+        EntityKind::Contact => data::contact_files(cfg)
+            .iter()
+            .map(|p| name_of(p))
+            .collect(),
+        EntityKind::Meeting | EntityKind::Proposal => Vec::new(),
+    };
+
+    let ids: Vec<String> = match kind {
+        // Meetings/proposals may live in nested folders that collection
+        // ignores; scan every markdown file's `id`.
+        EntityKind::Meeting | EntityKind::Proposal => data::md_files_below(kind.base_dir(cfg))
+            .iter()
+            .filter_map(|p| {
+                let content = std::fs::read_to_string(p).ok()?;
+                let (fm_str, _) = frontmatter::split_frontmatter(&content)?;
+                let fm = frontmatter::parse_raw(&fm_str, p).ok()?;
+                frontmatter::get_str(&fm, "id").map(str::to_string)
+            })
+            .collect(),
+        _ => data::collect_entities(kind, cfg)?
+            .into_iter()
+            .map(|r| r.id)
+            .collect(),
+    };
+
+    let max_num = names
+        .iter()
+        .chain(ids.iter())
+        .filter_map(|s| number(s))
+        .max()
+        .unwrap_or(0);
+
+    Ok(EntityId::new(prefix, max_num.saturating_add(1)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::commands::{init, new};
+    use crate::config;
+    use tempfile::TempDir;
+
+    fn setup_repo() -> (TempDir, ResolvedConfig) {
+        let tmp = TempDir::new().unwrap();
+        init::run(tmp.path(), false, false, Some("T"), false, true).unwrap();
+        let cfg = config::load_config(tmp.path(), config::RepoMode::Standalone).unwrap();
+        (tmp, cfg)
+    }
+
+    #[test]
+    fn test_from_id_all_kinds() {
+        let (_tmp, cfg) = setup_repo();
+        for kind in EntityKind::ALL {
+            let id = format!("{}-001", kind.prefix(&cfg));
+            assert_eq!(EntityKind::from_id(&id, &cfg).unwrap(), kind);
         }
-        EntityKind::Task => {
-            // Scan all task locations (global + per-project + per-customer)
-            let locations = collect_all_task_dirs(cfg);
-            for loc in &locations {
-                for subfolder in &["todo", "done"] {
-                    let dir = loc.tasks_dir.join(subfolder);
-                    if dir.is_dir() {
-                        if let Ok(entries) = std::fs::read_dir(&dir) {
-                            for entry in entries.filter_map(|e| e.ok()) {
-                                let name = entry.file_name();
-                                let name = name.to_string_lossy();
-                                if let Some(caps) = id_re.captures(&name) {
-                                    if let Ok(n) = caps[1].parse::<u32>() {
-                                        max_num = max_num.max(n);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        EntityKind::Contact => {
-            // Scan all contact locations (per-customer)
-            let locations = collect_all_contact_dirs(cfg);
-            for loc in &locations {
-                if loc.contacts_dir.is_dir() {
-                    if let Ok(entries) = std::fs::read_dir(&loc.contacts_dir) {
-                        for entry in entries.filter_map(|e| e.ok()) {
-                            let name = entry.file_name();
-                            let name = name.to_string_lossy();
-                            if let Some(caps) = id_re.captures(&name) {
-                                if let Ok(n) = caps[1].parse::<u32>() {
-                                    max_num = max_num.max(n);
-                                }
-                            }
-                        }
-                    }
-                }
-            }
+        assert!(EntityKind::from_id("NOPE-001", &cfg).is_err());
+        assert!(EntityKind::from_id("CUST001", &cfg).is_err());
+    }
+
+    #[test]
+    fn test_from_id_longest_prefix_wins() {
+        let (_tmp, mut cfg) = setup_repo();
+        cfg.id_prefixes.task = "T".into();
+        cfg.id_prefixes.sprint = "T-S".into();
+        assert_eq!(
+            EntityKind::from_id("T-S-001", &cfg).unwrap(),
+            EntityKind::Sprint
+        );
+        assert_eq!(
+            EntityKind::from_id("T-001", &cfg).unwrap(),
+            EntityKind::Task
+        );
+        // Duplicate prefixes resolve to the earlier kind, as before.
+        cfg.id_prefixes.contact = cfg.id_prefixes.customer.clone();
+        assert_eq!(
+            EntityKind::from_id("CUST-001", &cfg).unwrap(),
+            EntityKind::Customer
+        );
+    }
+
+    #[test]
+    fn test_next_id_starts_at_one() {
+        let (_tmp, cfg) = setup_repo();
+        for kind in EntityKind::ALL {
+            assert_eq!(next_id(kind, &cfg).unwrap().number, 1, "{kind}");
         }
     }
 
-    Ok(EntityId::new(prefix, max_num + 1))
+    #[test]
+    fn test_next_id_respects_frontmatter_ids_in_renamed_dirs() {
+        let (_tmp, cfg) = setup_repo();
+        let dir = cfg.customers_dir.join("acme-renamed");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("CUST-007.md"),
+            "---\nid: CUST-007\nname: Acme\n---\n",
+        )
+        .unwrap();
+        assert_eq!(
+            next_id(EntityKind::Customer, &cfg).unwrap().to_string(),
+            "CUST-008"
+        );
+    }
+
+    #[test]
+    fn test_next_id_tasks_across_scopes_and_odd_names() {
+        let (_tmp, cfg) = setup_repo();
+        new::create_project_programmatic(&cfg, "P", None, Some("active"), None, None).unwrap();
+        let mut input = new::TaskInput::new("Scoped");
+        input.project = Some("PROJ-001".into());
+        new::create_task(&cfg, &input).unwrap();
+        std::fs::write(
+            cfg.tasks_dir.join("todo").join("misc.md"),
+            "---\nid: TASK-010\ntitle: odd\n---\n",
+        )
+        .unwrap();
+        assert_eq!(
+            next_id(EntityKind::Task, &cfg).unwrap().to_string(),
+            "TASK-011"
+        );
+    }
+
+    #[test]
+    fn test_next_id_meetings_in_nested_folders() {
+        let (_tmp, cfg) = setup_repo();
+        let nested = cfg.meetings_dir.join("2025");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(nested.join("old.md"), "---\nid: MTG-041\n---\n").unwrap();
+        assert_eq!(
+            next_id(EntityKind::Meeting, &cfg).unwrap().to_string(),
+            "MTG-042"
+        );
+    }
+
+    #[test]
+    fn test_collect_all_task_dirs_includes_scopes() {
+        let (_tmp, cfg) = setup_repo();
+        new::create_project_programmatic(&cfg, "P", None, Some("active"), None, None).unwrap();
+        new::create_customer_programmatic(&cfg, "C", None, Some("active"), None).unwrap();
+        let dirs: Vec<PathBuf> = collect_all_task_dirs(&cfg)
+            .into_iter()
+            .map(|l| l.tasks_dir)
+            .collect();
+        assert_eq!(dirs.len(), 3);
+        assert_eq!(dirs[0], cfg.tasks_dir);
+        assert_eq!(collect_all_contact_dirs(&cfg).len(), 1);
+    }
 }

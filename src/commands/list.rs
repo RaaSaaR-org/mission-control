@@ -1,6 +1,9 @@
+use crate::cli::suggest;
+use crate::cli::ui::{self, Col, Table};
 use crate::cli::ListEntity;
+use crate::commands::index;
 use crate::config::ResolvedConfig;
-use crate::data::{self, ContactFilter, TaskFilter};
+use crate::data::{self, ContactFilter, EntityRecord, TaskFilter};
 use crate::entity::EntityKind;
 use crate::error::{McError, McResult};
 use crate::frontmatter;
@@ -35,22 +38,111 @@ pub fn run(entity: &ListEntity, cfg: &ResolvedConfig) -> McResult<()> {
                 }
             };
             if !cfg.entity_available(&kind) {
-                return Err(McError::NotAvailableInMode {
-                    kind: kind.label().to_string(),
-                });
+                return Err(McError::not_available(kind, cfg));
             }
             list_standard(kind, cfg, status_filter, tag_filter)
         }
     }
 }
 
-/// Truncate a string to `max` chars, appending "..." if needed.
-fn truncate(s: &str, max: usize) -> String {
-    if s.chars().count() > max && max > 3 {
-        format!("{}...", s.chars().take(max - 3).collect::<String>())
-    } else {
-        s.to_string()
+/// Resolve a `--status` filter against configured statuses and the statuses
+/// actually present in the data, failing with a suggestion on typos.
+fn resolve_status_filter(
+    input: Option<&str>,
+    kind: EntityKind,
+    cfg: &ResolvedConfig,
+    all: &[EntityRecord],
+) -> McResult<Option<String>> {
+    let Some(input) = input else {
+        return Ok(None);
+    };
+    let mut known: Vec<String> = kind.statuses(cfg).to_vec();
+    for e in all {
+        if let Some(s) = frontmatter::get_str(&e.frontmatter, "status") {
+            if !known.iter().any(|k| k == s) {
+                known.push(s.to_string());
+            }
+        }
     }
+    suggest::resolve_status(input, &known, kind).map(Some)
+}
+
+fn has_status(e: &EntityRecord, status: &Option<String>) -> bool {
+    match status {
+        Some(s) => frontmatter::get_str(&e.frontmatter, "status")
+            .is_some_and(|v| v.eq_ignore_ascii_case(s)),
+        None => true,
+    }
+}
+
+/// Print entities as a JSON array (same shape as `data/*.json`).
+fn print_json(entries: &[EntityRecord], cfg: &ResolvedConfig) -> McResult<()> {
+    let arr: Vec<_> = entries.iter().map(|e| index::entity_json(e, cfg)).collect();
+    println!("{}", serde_json::to_string_pretty(&arr)?);
+    Ok(())
+}
+
+fn filter_summary(filters: &[(&str, Option<String>)]) -> Vec<String> {
+    filters
+        .iter()
+        .filter_map(|(k, v)| v.as_ref().map(|v| format!("{k}={v}")))
+        .collect()
+}
+
+/// Footer line ("6 customers", "3 of 74 tasks · status=todo") or empty state.
+fn print_footer(kind: EntityKind, shown: usize, total: usize, filters: &[String]) {
+    let g = ui::glyphs();
+    let noun = |n| ui::count(n, kind.label(), kind.label_plural());
+    if shown == 0 && !ui::get().interactive {
+        // Keep stdout empty for pipes (`| wc -l`); explain on stderr.
+        eprintln!("No {} found.", kind.label_plural());
+        return;
+    }
+    if shown == 0 {
+        if total == 0 {
+            ui::info(format!("No {} yet.", kind.label_plural()));
+            ui::hint(format!(
+                "create one: {}",
+                ui::cmd(&format!("mc new {} \"...\"", kind.label()))
+            ));
+        } else {
+            ui::info(format!(
+                "No {} match {} ({} in total).",
+                kind.label_plural(),
+                filters.join(" "),
+                noun(total)
+            ));
+            ui::hint(format!(
+                "drop filters to see everything: {}",
+                ui::cmd(&format!("mc list {}", kind.label_plural()))
+            ));
+        }
+        return;
+    }
+    if !ui::get().interactive {
+        return;
+    }
+    let mut line = if filters.is_empty() {
+        noun(shown)
+    } else {
+        format!("{} of {}", shown, noun(total))
+    };
+    if !filters.is_empty() {
+        line = format!("{line} {} {}", g.sep, filters.join(" "));
+    }
+    println!("\n  {}", line.dimmed());
+}
+
+fn s<'a>(e: &'a EntityRecord, key: &str) -> &'a str {
+    frontmatter::get_str_or(&e.frontmatter, key, "")
+}
+
+fn links(e: &EntityRecord, key: &str) -> String {
+    frontmatter::get_link_list(&e.frontmatter, key).join(", ")
+}
+
+fn id_cell(e: &EntityRecord) -> String {
+    e.id.cyan().to_string()
 }
 
 fn list_standard(
@@ -59,214 +151,173 @@ fn list_standard(
     status_filter: &Option<String>,
     tag_filter: &Option<String>,
 ) -> McResult<()> {
-    let entries =
-        data::collect_filtered(kind, cfg, status_filter.as_deref(), tag_filter.as_deref())?;
+    let mut all = data::collect_entities(kind, cfg)?;
+    all.sort_by(|a, b| a.id.cmp(&b.id));
+    let status = resolve_status_filter(status_filter.as_deref(), kind, cfg, &all)?;
+    let total = all.len();
+    let entries: Vec<EntityRecord> = all
+        .into_iter()
+        .filter(|e| has_status(e, &status))
+        .filter(|e| match tag_filter {
+            Some(tag) => frontmatter::get_string_list(&e.frontmatter, "tags")
+                .iter()
+                .any(|t| t.eq_ignore_ascii_case(tag)),
+            None => true,
+        })
+        .collect();
 
-    let has_filters = status_filter.is_some() || tag_filter.is_some();
-
-    if entries.is_empty() {
-        if has_filters {
-            let mut filter_desc = Vec::new();
-            if let Some(s) = status_filter {
-                filter_desc.push(format!("status '{}'", s));
-            }
-            if let Some(t) = tag_filter {
-                filter_desc.push(format!("tag '{}'", t));
-            }
-            let valid = kind.statuses(cfg);
-            println!(
-                "{} No {} found with {} (valid statuses: {})",
-                "i".blue(),
-                kind.label_plural(),
-                filter_desc.join(" and "),
-                valid.join(", "),
-            );
-        } else {
-            println!("{} No {} found.", "i".blue(), kind.label_plural());
-        }
-        return Ok(());
+    if ui::get().json {
+        return print_json(&entries, cfg);
     }
 
-    // Print filter banner
-    if has_filters {
-        let mut parts = Vec::new();
-        if let Some(s) = status_filter {
-            parts.push(format!("status = {}", s));
-        }
-        if let Some(t) = tag_filter {
-            parts.push(format!("tag = {}", t));
-        }
-        println!(
-            "{} Showing {} with {}\n",
-            "i".blue(),
-            kind.label_plural(),
-            parts.join(", "),
-        );
-    }
+    let filters = filter_summary(&[("status", status.clone()), ("tag", tag_filter.clone())]);
 
-    // Print header
-    match kind {
-        EntityKind::Customer => {
-            println!(
-                "  {:<10} {:<28} {:<12} {:<12}",
-                "ID".bold(),
-                "Name".bold(),
-                "Status".bold(),
-                "Owner".bold()
-            );
-            println!("  {}", "─".repeat(62).dimmed());
+    let table = match kind {
+        EntityKind::Customer | EntityKind::Project => {
+            let mut t = Table::new(vec![
+                Col::new("ID").fixed(),
+                Col::new("Name").flex(16),
+                Col::new("Status"),
+                Col::new("Owner").max(20).drop(2),
+                Col::new(if kind == EntityKind::Project {
+                    "Customers"
+                } else {
+                    "Tags"
+                })
+                .max(24)
+                .drop(3),
+            ]);
             for e in &entries {
-                let id = frontmatter::get_str_or(&e.frontmatter, "id", "");
-                let name = frontmatter::get_str_or(&e.frontmatter, "name", "");
-                let status = frontmatter::get_str_or(&e.frontmatter, "status", "");
-                let owner = frontmatter::get_str_or(&e.frontmatter, "owner", "");
-                println!(
-                    "  {:<10} {:<28} {:<12} {}",
-                    id.cyan(),
-                    truncate(name, 27),
-                    format_status(status),
-                    owner.dimmed()
-                );
+                let extra = if kind == EntityKind::Project {
+                    links(e, "customers")
+                } else {
+                    frontmatter::get_string_list(&e.frontmatter, "tags").join(", ")
+                };
+                t.row(vec![
+                    id_cell(e),
+                    s(e, "name").to_string(),
+                    ui::status(s(e, "status")),
+                    s(e, "owner").dimmed().to_string(),
+                    extra.dimmed().to_string(),
+                ]);
             }
-        }
-        EntityKind::Project => {
-            println!(
-                "  {:<10} {:<28} {:<12} {:<12}",
-                "ID".bold(),
-                "Name".bold(),
-                "Status".bold(),
-                "Owner".bold()
-            );
-            println!("  {}", "─".repeat(62).dimmed());
-            for e in &entries {
-                let id = frontmatter::get_str_or(&e.frontmatter, "id", "");
-                let name = frontmatter::get_str_or(&e.frontmatter, "name", "");
-                let status = frontmatter::get_str_or(&e.frontmatter, "status", "");
-                let owner = frontmatter::get_str_or(&e.frontmatter, "owner", "");
-                println!(
-                    "  {:<10} {:<28} {:<12} {}",
-                    id.cyan(),
-                    truncate(name, 27),
-                    format_status(status),
-                    owner.dimmed()
-                );
-            }
+            t
         }
         EntityKind::Meeting => {
-            println!(
-                "  {:<10} {:<30} {:<12} {:<6} {:<12}",
-                "ID".bold(),
-                "Title".bold(),
-                "Date".bold(),
-                "Time".bold(),
-                "Status".bold()
-            );
-            println!("  {}", "─".repeat(70).dimmed());
+            let mut t = Table::new(vec![
+                Col::new("ID").fixed(),
+                Col::new("Date"),
+                Col::new("Time").drop(2),
+                Col::new("Title").flex(16),
+                Col::new("Status"),
+            ]);
             for e in &entries {
-                let id = frontmatter::get_str_or(&e.frontmatter, "id", "");
-                let title = frontmatter::get_str_or(&e.frontmatter, "title", "");
-                let date = frontmatter::get_str_or(&e.frontmatter, "date", "");
-                let time = frontmatter::get_str_or(&e.frontmatter, "time", "");
-                let status = frontmatter::get_str_or(&e.frontmatter, "status", "");
-                println!(
-                    "  {:<10} {:<30} {:<12} {:<6} {}",
-                    id.cyan(),
-                    truncate(title, 29),
-                    date,
-                    time,
-                    format_status(status)
-                );
+                t.row(vec![
+                    id_cell(e),
+                    s(e, "date").to_string(),
+                    s(e, "time").dimmed().to_string(),
+                    s(e, "title").to_string(),
+                    ui::status(s(e, "status")),
+                ]);
             }
+            t
         }
         EntityKind::Research => {
-            println!(
-                "  {:<10} {:<30} {:<12} {:<12}",
-                "ID".bold(),
-                "Title".bold(),
-                "Status".bold(),
-                "Owner".bold()
-            );
-            println!("  {}", "─".repeat(64).dimmed());
+            let mut t = Table::new(vec![
+                Col::new("ID").fixed(),
+                Col::new("Title").flex(16),
+                Col::new("Status"),
+                Col::new("Owner").max(20).drop(2),
+            ]);
             for e in &entries {
-                let id = frontmatter::get_str_or(&e.frontmatter, "id", "");
-                let title = frontmatter::get_str_or(&e.frontmatter, "title", "");
-                let status = frontmatter::get_str_or(&e.frontmatter, "status", "");
-                let owner = frontmatter::get_str_or(&e.frontmatter, "owner", "");
-                println!(
-                    "  {:<10} {:<30} {:<12} {}",
-                    id.cyan(),
-                    truncate(title, 29),
-                    format_status(status),
-                    owner.dimmed()
-                );
+                t.row(vec![
+                    id_cell(e),
+                    s(e, "title").to_string(),
+                    ui::status(s(e, "status")),
+                    s(e, "owner").dimmed().to_string(),
+                ]);
             }
+            t
         }
         EntityKind::Sprint => {
-            println!(
-                "  {:<10} {:<22} {:<12} {:<12} {:<12} {:<12}",
-                "ID".bold(),
-                "Title".bold(),
-                "Status".bold(),
-                "Start".bold(),
-                "End".bold(),
-                "Owner".bold()
-            );
-            println!("  {}", "─".repeat(80).dimmed());
+            let mut t = Table::new(vec![
+                Col::new("ID").fixed(),
+                Col::new("Title").flex(14),
+                Col::new("Status"),
+                Col::new("Start").drop(3),
+                Col::new("End").drop(3),
+                Col::new("Owner").max(20).drop(2),
+            ]);
             for e in &entries {
-                let id = frontmatter::get_str_or(&e.frontmatter, "id", "");
-                let title = frontmatter::get_str_or(&e.frontmatter, "title", "");
-                let status = frontmatter::get_str_or(&e.frontmatter, "status", "");
-                let start = frontmatter::get_str_or(&e.frontmatter, "start_date", "");
-                let end = frontmatter::get_str_or(&e.frontmatter, "end_date", "");
-                let owner = frontmatter::get_str_or(&e.frontmatter, "owner", "");
-                println!(
-                    "  {:<10} {:<22} {:<12} {:<12} {:<12} {}",
-                    id.cyan(),
-                    truncate(title, 21),
-                    format_status(status),
-                    start,
-                    end,
-                    owner.dimmed()
-                );
+                t.row(vec![
+                    id_cell(e),
+                    s(e, "title").to_string(),
+                    ui::status(s(e, "status")),
+                    s(e, "start_date").to_string(),
+                    s(e, "end_date").to_string(),
+                    s(e, "owner").dimmed().to_string(),
+                ]);
             }
+            t
         }
         EntityKind::Proposal => {
-            println!(
-                "  {:<10} {:<30} {:<12} {:<14} {:<12}",
-                "ID".bold(),
-                "Title".bold(),
-                "Status".bold(),
-                "Type".bold(),
-                "Author".bold()
-            );
-            println!("  {}", "─".repeat(78).dimmed());
+            let mut t = Table::new(vec![
+                Col::new("ID").fixed(),
+                Col::new("Title").flex(16),
+                Col::new("Status"),
+                Col::new("Type").drop(3),
+                Col::new("Author").max(20).drop(2),
+            ]);
             for e in &entries {
-                let id = frontmatter::get_str_or(&e.frontmatter, "id", "");
-                let title = frontmatter::get_str_or(&e.frontmatter, "title", "");
-                let status = frontmatter::get_str_or(&e.frontmatter, "status", "");
-                let ptype = frontmatter::get_str_or(&e.frontmatter, "type", "");
-                let author = frontmatter::get_str_or(&e.frontmatter, "author", "");
-                println!(
-                    "  {:<10} {:<30} {:<12} {:<14} {}",
-                    id.cyan(),
-                    truncate(title, 29),
-                    format_status(status),
-                    ptype,
-                    author.dimmed()
-                );
+                t.row(vec![
+                    id_cell(e),
+                    s(e, "title").to_string(),
+                    ui::status(s(e, "status")),
+                    s(e, "type").to_string(),
+                    s(e, "author").dimmed().to_string(),
+                ]);
             }
+            t
         }
         EntityKind::Task => unreachable!("Tasks use list_tasks(), not list_standard()"),
         EntityKind::Contact => unreachable!("Contacts use list_contacts(), not list_standard()"),
+    };
+
+    if !table.is_empty() {
+        table.print();
     }
-
-    println!(
-        "\n  {} {} total",
-        entries.len().to_string().bold(),
-        kind.label_plural()
-    );
-
+    print_footer(kind, entries.len(), total, &filters);
     Ok(())
+}
+
+/// Whether a task is still open (not done/cancelled).
+fn is_open(e: &EntityRecord) -> bool {
+    !matches!(s(e, "status"), "done" | "cancelled")
+}
+
+/// Due date colored by urgency: overdue red, within a week yellow.
+pub(crate) fn due_cell(e: &EntityRecord, today: &str) -> String {
+    let due = s(e, "due_date");
+    if due.is_empty() {
+        return String::new();
+    }
+    if !is_open(e) {
+        return due.dimmed().to_string();
+    }
+    if due < today {
+        return due.red().bold().to_string();
+    }
+    let soon = chrono::NaiveDate::parse_from_str(today, "%Y-%m-%d")
+        .ok()
+        .map(|d| {
+            (d + chrono::Duration::days(7))
+                .format("%Y-%m-%d")
+                .to_string()
+        });
+    match soon {
+        Some(limit) if due <= limit.as_str() => due.yellow().to_string(),
+        _ => due.to_string(),
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -280,8 +331,12 @@ fn list_tasks(
     sprint: &Option<String>,
     owner: &Option<String>,
 ) -> McResult<()> {
+    let all = data::collect_tasks(cfg)?;
+    let status = resolve_status_filter(status.as_deref(), EntityKind::Task, cfg, &all)?;
+    let total = all.len();
+
     let filter = TaskFilter {
-        status: status.as_deref(),
+        status: None,
         tag: tag.as_deref(),
         project: project.as_deref(),
         customer: customer.as_deref(),
@@ -289,136 +344,61 @@ fn list_tasks(
         sprint: sprint.as_deref(),
         owner: owner.as_deref(),
     };
+    let entries: Vec<EntityRecord> = all
+        .into_iter()
+        .filter(|e| filter.matches(&e.frontmatter) && has_status(e, &status))
+        .collect();
 
-    let entries = data::collect_tasks_filtered(cfg, &filter)?;
-
-    let has_filters = status.is_some()
-        || tag.is_some()
-        || project.is_some()
-        || customer.is_some()
-        || priority.is_some()
-        || sprint.is_some()
-        || owner.is_some();
-
-    if entries.is_empty() {
-        if has_filters {
-            let mut filter_desc = Vec::new();
-            if let Some(s) = status {
-                filter_desc.push(format!("status '{}'", s));
-            }
-            if let Some(p) = project {
-                filter_desc.push(format!("project '{}'", p));
-            }
-            if let Some(c) = customer {
-                filter_desc.push(format!("customer '{}'", c));
-            }
-            if let Some(pr) = priority {
-                filter_desc.push(format!("priority {}", pr));
-            }
-            if let Some(sp) = sprint {
-                filter_desc.push(format!("sprint '{}'", sp));
-            }
-            if let Some(o) = owner {
-                filter_desc.push(format!("owner '{}'", o));
-            }
-            if let Some(t) = tag {
-                filter_desc.push(format!("tag '{}'", t));
-            }
-            println!(
-                "{} No tasks found with {}",
-                "i".blue(),
-                filter_desc.join(" and "),
-            );
-        } else {
-            println!("{} No tasks found.", "i".blue());
-        }
-        return Ok(());
+    if ui::get().json {
+        return print_json(&entries, cfg);
     }
 
-    if has_filters {
-        let mut parts = Vec::new();
-        if let Some(s) = status {
-            parts.push(format!("status = {}", s));
-        }
-        if let Some(p) = project {
-            parts.push(format!("project = {}", p));
-        }
-        if let Some(c) = customer {
-            parts.push(format!("customer = {}", c));
-        }
-        if let Some(pr) = priority {
-            parts.push(format!("priority = {}", pr));
-        }
-        if let Some(sp) = sprint {
-            parts.push(format!("sprint = {}", sp));
-        }
-        if let Some(o) = owner {
-            parts.push(format!("owner = {}", o));
-        }
-        if let Some(t) = tag {
-            parts.push(format!("tag = {}", t));
-        }
-        println!("{} Showing tasks with {}\n", "i".blue(), parts.join(", "),);
-    }
+    let filters = filter_summary(&[
+        ("status", status.clone()),
+        ("project", project.clone()),
+        ("customer", customer.clone()),
+        ("priority", priority.map(|p| p.to_string())),
+        ("sprint", sprint.clone()),
+        ("owner", owner.clone()),
+        ("tag", tag.clone()),
+    ]);
 
-    println!(
-        "  {:<10} {:<26} {:<13} {:<4} {:<10} {:<10} {:<8}",
-        "ID".bold(),
-        "Title".bold(),
-        "Status".bold(),
-        "Pri".bold(),
-        "Owner".bold(),
-        "Project".bold(),
-        "Sprint".bold()
-    );
-    println!("  {}", "─".repeat(81).dimmed());
+    let today = crate::util::today_str();
+    let mut table = Table::new(vec![
+        Col::new("ID").fixed(),
+        Col::new("Pri"),
+        Col::new("Status"),
+        Col::new("Title").flex(18),
+        Col::new("Owner").max(16).drop(3),
+        Col::new("Project").max(12).drop(4),
+        Col::new("Due").drop(2),
+        Col::new("Sprint").max(14).drop(5),
+    ]);
     for e in &entries {
-        let id = frontmatter::get_str_or(&e.frontmatter, "id", "");
-        let title = frontmatter::get_str_or(&e.frontmatter, "title", "");
-        let status = frontmatter::get_str_or(&e.frontmatter, "status", "");
-        let owner = frontmatter::get_str_or(&e.frontmatter, "owner", "");
-        let sprint_raw = frontmatter::get_str_or(&e.frontmatter, "sprint", "");
-        let sprint = frontmatter::strip_wikilink(sprint_raw);
-        let priority = data::get_number(&e.frontmatter, "priority").unwrap_or(3);
+        let pri = data::get_number(&e.frontmatter, "priority").unwrap_or(3);
+        let sprint = frontmatter::strip_wikilink(s(e, "sprint")).to_string();
         let projects = frontmatter::get_link_list(&e.frontmatter, "projects");
-        let proj_display = projects.first().map(|s| s.as_str()).unwrap_or("");
-
-        let pri_display = match priority {
-            1 => "C".red().bold().to_string(),
-            2 => "H".yellow().bold().to_string(),
-            3 => "M".normal().to_string(),
-            4 => "L".dimmed().to_string(),
-            _ => priority.to_string(),
+        let title = if is_open(e) {
+            s(e, "title").to_string()
+        } else {
+            s(e, "title").dimmed().to_string()
         };
-
-        let title_trunc = truncate(title, 25);
-
-        println!(
-            "  {:<10} {:<26} {:<13} {:<4} {:<10} {:<10} {}",
-            id.cyan(),
-            title_trunc,
-            format_status(status),
-            pri_display,
-            if owner.is_empty() {
-                "-".dimmed().to_string()
-            } else {
-                truncate(owner, 9).dimmed().to_string()
-            },
-            if proj_display.is_empty() {
-                "-".dimmed().to_string()
-            } else {
-                truncate(proj_display, 9)
-            },
-            if sprint.is_empty() {
-                "-".dimmed().to_string()
-            } else {
-                truncate(sprint, 7)
-            },
-        );
+        table.row(vec![
+            id_cell(e),
+            ui::priority(pri),
+            ui::status(s(e, "status")),
+            title,
+            s(e, "owner").dimmed().to_string(),
+            projects.first().cloned().unwrap_or_default(),
+            due_cell(e, &today),
+            sprint.dimmed().to_string(),
+        ]);
     }
 
-    println!("\n  {} tasks total", entries.len().to_string().bold());
-
+    if !table.is_empty() {
+        table.print();
+    }
+    print_footer(EntityKind::Task, entries.len(), total, &filters);
     Ok(())
 }
 
@@ -429,128 +409,62 @@ fn list_contacts(
     customer: &Option<String>,
 ) -> McResult<()> {
     if !cfg.entity_available(&EntityKind::Contact) {
-        return Err(McError::NotAvailableInMode {
-            kind: "contact".to_string(),
-        });
+        return Err(McError::not_available(EntityKind::Contact, cfg));
     }
 
+    let all = data::collect_contacts(cfg)?;
+    let status = resolve_status_filter(status.as_deref(), EntityKind::Contact, cfg, &all)?;
+    let total = all.len();
+    drop(all);
+
     let filter = ContactFilter {
-        status: status.as_deref(),
+        status: None,
         tag: tag.as_deref(),
         customer: customer.as_deref(),
     };
+    let entries: Vec<EntityRecord> = data::collect_contacts_filtered(cfg, &filter)?
+        .into_iter()
+        .filter(|e| has_status(e, &status))
+        .collect();
 
-    let entries = data::collect_contacts_filtered(cfg, &filter)?;
-
-    let has_filters = status.is_some() || tag.is_some() || customer.is_some();
-
-    if entries.is_empty() {
-        if has_filters {
-            let mut filter_desc = Vec::new();
-            if let Some(s) = status {
-                filter_desc.push(format!("status '{}'", s));
-            }
-            if let Some(c) = customer {
-                filter_desc.push(format!("customer '{}'", c));
-            }
-            if let Some(t) = tag {
-                filter_desc.push(format!("tag '{}'", t));
-            }
-            println!(
-                "{} No contacts found with {}",
-                "i".blue(),
-                filter_desc.join(" and "),
-            );
-        } else {
-            println!("{} No contacts found.", "i".blue());
-        }
-        return Ok(());
+    if ui::get().json {
+        return print_json(&entries, cfg);
     }
 
-    if has_filters {
-        let mut parts = Vec::new();
-        if let Some(s) = status {
-            parts.push(format!("status = {}", s));
-        }
-        if let Some(c) = customer {
-            parts.push(format!("customer = {}", c));
-        }
-        if let Some(t) = tag {
-            parts.push(format!("tag = {}", t));
-        }
-        println!(
-            "{} Showing contacts with {}\n",
-            "i".blue(),
-            parts.join(", "),
-        );
-    }
+    let filters = filter_summary(&[
+        ("status", status.clone()),
+        ("customer", customer.clone()),
+        ("tag", tag.clone()),
+    ]);
 
-    println!(
-        "  {:<10} {:<24} {:<20} {:<12} {:<10}",
-        "ID".bold(),
-        "Name".bold(),
-        "Role".bold(),
-        "Customer".bold(),
-        "Status".bold()
-    );
-    println!("  {}", "─".repeat(76).dimmed());
+    let mut table = Table::new(vec![
+        Col::new("ID").fixed(),
+        Col::new("Name").flex(14),
+        Col::new("Role").max(26).drop(3),
+        Col::new("Customer").drop(2),
+        Col::new("Email").max(30).drop(4),
+        Col::new("Status"),
+    ]);
     for e in &entries {
-        let id = frontmatter::get_str_or(&e.frontmatter, "id", "");
-        let name = frontmatter::get_str_or(&e.frontmatter, "name", "");
-        let role = frontmatter::get_str_or(&e.frontmatter, "role", "");
-        let customer_raw = frontmatter::get_str_or(&e.frontmatter, "customer", "");
-        let customer_id = frontmatter::strip_wikilink(customer_raw);
-        let status = frontmatter::get_str_or(&e.frontmatter, "status", "");
-        println!(
-            "  {:<10} {:<24} {:<20} {:<12} {}",
-            id.cyan(),
-            truncate(name, 23),
-            truncate(role, 19).dimmed().to_string(),
-            customer_id,
-            format_status(status)
-        );
+        table.row(vec![
+            id_cell(e),
+            s(e, "name").to_string(),
+            s(e, "role").dimmed().to_string(),
+            frontmatter::strip_wikilink(s(e, "customer")).to_string(),
+            s(e, "email").dimmed().to_string(),
+            ui::status(s(e, "status")),
+        ]);
     }
 
-    println!("\n  {} contacts total", entries.len().to_string().bold());
-
+    if !table.is_empty() {
+        table.print();
+    }
+    print_footer(EntityKind::Contact, entries.len(), total, &filters);
     Ok(())
 }
 
+/// Colored status label (no glyph). Kept for callers that need a plain
+/// `ColoredString`; prefer [`ui::status`] for terminal output.
 pub fn format_status(status: &str) -> colored::ColoredString {
-    match status {
-        "active" | "completed" | "final" | "done" | "accepted" => status.green(),
-        "inactive" | "cancelled" | "churned" | "outdated" | "rejected" | "withdrawn" => {
-            status.red()
-        }
-        "on-hold" | "draft" | "in-progress" | "review" | "planning" | "proposed" => status.yellow(),
-        "prospect" | "scheduled" | "todo" => status.blue(),
-        "superseded" => status.dimmed(),
-        "backlog" => status.dimmed(),
-        _ => status.normal(),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_truncate_ascii() {
-        assert_eq!(truncate("hello", 10), "hello");
-        assert_eq!(truncate("hello world", 8), "hello...");
-    }
-
-    #[test]
-    fn test_truncate_unicode() {
-        // Must not panic on multi-byte characters
-        assert_eq!(truncate("Übersicht GmbH", 10), "Übersic...");
-        assert_eq!(truncate("日本語テスト", 5), "日本...");
-    }
-
-    #[test]
-    fn test_truncate_edge_cases() {
-        assert_eq!(truncate("abc", 3), "abc");
-        assert_eq!(truncate("abcd", 3), "abcd"); // max <= 3 returns as-is
-        assert_eq!(truncate("", 5), "");
-    }
+    ui::tint(status, ui::status_tone(status))
 }

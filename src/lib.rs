@@ -5,8 +5,10 @@
 //! point lives in `src/main.rs` and uses these same modules.
 
 pub mod api;
+pub mod checklist;
 pub mod cli;
 pub mod commands;
+pub mod comments;
 pub mod config;
 pub mod data;
 pub mod entity;

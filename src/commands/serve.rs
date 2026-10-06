@@ -1,82 +1,98 @@
-use crate::config::ResolvedConfig;
-use crate::data::{self, ContactFilter, TaskFilter};
+//! `mc serve`: the web dashboard.
+//!
+//! Pages are server-rendered HTML. The JSON endpoints under `/api/` back the
+//! interactive features (command palette, live refresh, task edits,
+//! checklists, comments); see
+//! `serve/api.rs`. Writes are guarded by `serve/guard.rs`.
+
+mod api;
+mod guard;
+
+use crate::config::{RepoMode, ResolvedConfig};
+use crate::data::{self, TaskFilter};
 use crate::entity::EntityKind;
 use crate::error::{McError, McResult};
-use crate::frontmatter;
-use crate::html;
-use axum::extract::{Path, Query, State};
+use crate::html::{self, Catalog, ListQuery, Page, TaskQuery};
+use axum::extract::{DefaultBodyLimit, Path, Query, State};
 use axum::http::{header, StatusCode};
 use axum::response::{Html, IntoResponse};
-use axum::routing::get;
-use axum::Router;
+use axum::routing::{get, post};
+use axum::{middleware, Router};
 use std::collections::HashMap;
 use std::sync::Arc;
 
+/// Largest JSON body the write endpoints accept.
+const MAX_BODY_BYTES: usize = 32 * 1024;
+
+/// How the dashboard is served.
+#[derive(Debug, Clone, Default)]
+pub struct ServeOptions {
+    /// Path prefix when served behind a reverse proxy (e.g. `/hq`).
+    pub base_path: String,
+    /// Never accept edits.
+    pub read_only: bool,
+    /// Accept edits even behind a reverse proxy (`base_path` set).
+    pub allow_edits: bool,
+}
+
+impl ServeOptions {
+    /// Edits are on for local use and off behind a proxy unless allowed.
+    pub fn editable(&self) -> bool {
+        !self.read_only && (self.base_path.trim_end_matches('/').is_empty() || self.allow_edits)
+    }
+}
+
 struct AppState {
     cfg: ResolvedConfig,
-    /// Cached custom CSS content (read once at startup).
+    /// Cached custom CSS content (read once at startup, relative URLs rewritten).
     custom_css: String,
     /// Base path prefix for reverse proxy deployments (e.g. "/hq").
     base_path: String,
+    /// Whether write endpoints and the edit UI are enabled.
+    editable: bool,
+    /// Serialises writes so ID allocation and file moves don't race.
+    write_lock: tokio::sync::Mutex<()>,
 }
 
-pub fn run(cfg: &ResolvedConfig, port: u16, base_path: &str) -> McResult<()> {
-    // Read custom CSS once at startup
-    let custom_css = cfg
-        .brand
-        .custom_css
-        .as_ref()
-        .and_then(|p| std::fs::read_to_string(p).ok())
-        .unwrap_or_default();
+impl AppState {
+    fn page<'a>(&'a self, catalog: &'a Catalog) -> Page<'a> {
+        Page::new(&self.cfg, catalog, &self.custom_css).with_editable(self.editable)
+    }
 
-    // Normalize base_path: strip trailing slash, keep leading slash
-    let base_path = base_path.trim_end_matches('/').to_string();
+    /// Render a page with a freshly loaded catalog and apply the base path.
+    fn render(&self, f: impl FnOnce(&Page) -> String) -> Html<String> {
+        let catalog = Catalog::load(&self.cfg);
+        Html(html::prefix_base_path(
+            &f(&self.page(&catalog)),
+            &self.base_path,
+        ))
+    }
 
-    let state = Arc::new(AppState {
-        cfg: cfg.clone(),
-        custom_css,
-        base_path: base_path.clone(),
-    });
+    fn error(&self, message: &str) -> (StatusCode, Html<String>) {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            self.render(|page| html::error_page(page, message)),
+        )
+    }
+}
+
+type Params = Query<HashMap<String, String>>;
+
+pub fn run(cfg: &ResolvedConfig, port: u16, opts: &ServeOptions) -> McResult<()> {
+    let base_path = opts.base_path.trim_end_matches('/').to_string();
+    let app = router(cfg, opts);
 
     let rt = tokio::runtime::Runtime::new()?;
     rt.block_on(async move {
-        let routes = Router::new()
-            .route("/", get(handle_dashboard))
-            .route("/customers", get(handle_customers))
-            .route("/projects", get(handle_projects))
-            .route("/meetings", get(handle_meetings))
-            .route("/research", get(handle_research))
-            .route("/sprints", get(handle_sprints))
-            .route("/proposals", get(handle_proposals))
-            .route("/contacts", get(handle_contacts))
-            .route("/tasks", get(handle_tasks_board))
-            .route("/tasks/list", get(handle_tasks))
-            .route("/entity/{id}", get(handle_detail))
-            .route("/brand/logo", get(handle_brand_logo))
-            .route("/brand/fonts/{filename}", get(handle_brand_fonts))
-            .fallback(handle_404)
-            .with_state(state);
-
-        // If base_path is set, nest all routes under it; otherwise serve at root
-        let app: Router = if base_path.is_empty() {
-            routes
-        } else {
-            // Axum nest doesn't match trailing slash on the base path itself.
-            // Add explicit redirect: /base/path/ -> /base/path
-            let bp = base_path.clone();
-            Router::new().nest(&base_path, routes).route(
-                &format!("{}/", base_path),
-                get(move || async move { axum::response::Redirect::permanent(&bp) }),
-            )
-        };
-
         let addr = format!("127.0.0.1:{}", port);
-        let url_path = if base_path.is_empty() {
-            String::new()
+        println!("MissionControl web dashboard: http://{}{}", addr, base_path);
+        if opts.editable() {
+            println!("Editing is on: tasks can be moved, edited and created from the browser.");
+        } else if opts.read_only {
+            println!("Read-only: editing is off.");
         } else {
-            format!("{}/", base_path)
-        };
-        println!("MissionControl web dashboard: http://{}{}", addr, url_path);
+            println!("Read-only behind --base-path. Pass --allow-edits to enable editing.");
+        }
         println!("Press Ctrl+C to stop.");
 
         let listener = tokio::net::TcpListener::bind(&addr).await.map_err(|e| {
@@ -94,477 +110,371 @@ pub fn run(cfg: &ResolvedConfig, port: u16, base_path: &str) -> McResult<()> {
     })
 }
 
+/// Build the dashboard router with default options for `base_path`: editable
+/// locally, read-only behind a proxy.
+pub fn build_router(cfg: &ResolvedConfig, base_path: &str) -> Router {
+    router(
+        cfg,
+        &ServeOptions {
+            base_path: base_path.to_string(),
+            ..Default::default()
+        },
+    )
+}
+
+/// Build the dashboard router, nested under `opts.base_path` when it's
+/// non-empty (e.g. `/hq` behind a reverse proxy).
+pub fn router(cfg: &ResolvedConfig, opts: &ServeOptions) -> Router {
+    // Read custom CSS once at startup. Relative url() references are rewritten
+    // to /brand/asset/ so they resolve against the stylesheet's directory.
+    let custom_css = cfg
+        .brand
+        .custom_css
+        .as_ref()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .map(|css| html::rewrite_css_urls(&css))
+        .unwrap_or_default();
+
+    // Normalize base_path: strip trailing slash, keep leading slash
+    let base_path = opts.base_path.trim_end_matches('/').to_string();
+
+    let state = Arc::new(AppState {
+        cfg: cfg.clone(),
+        custom_css,
+        base_path: base_path.clone(),
+        editable: opts.editable(),
+        write_lock: tokio::sync::Mutex::new(()),
+    });
+
+    let api = Router::new()
+        .route("/palette", get(api::palette))
+        .route("/version", get(api::version))
+        .route("/preview/{id}", get(api::preview))
+        .route("/tasks", post(api::create_task))
+        .route("/tasks/{id}", get(api::get_task).patch(api::update_task))
+        .route("/tasks/{id}/move", post(api::move_task))
+        .route("/entities/{id}/checks", post(api::check_item))
+        .route("/entities/{id}/comments", post(api::add_comment))
+        .fallback(api::not_found)
+        .method_not_allowed_fallback(api::method_not_allowed)
+        .layer(DefaultBodyLimit::max(MAX_BODY_BYTES));
+
+    let list =
+        |kind: EntityKind| get(move |s: State<Arc<AppState>>, q: Params| handle_list(kind, s, q));
+    let routes = Router::new()
+        .route("/", get(handle_dashboard))
+        .route("/customers", list(EntityKind::Customer))
+        .route("/projects", list(EntityKind::Project))
+        .route("/meetings", list(EntityKind::Meeting))
+        .route("/meetings/calendar", get(handle_calendar))
+        .route("/research", list(EntityKind::Research))
+        .route("/sprints", list(EntityKind::Sprint))
+        .route("/proposals", list(EntityKind::Proposal))
+        .route("/contacts", list(EntityKind::Contact))
+        .route("/tasks", get(handle_tasks_board))
+        .route("/tasks/list", get(handle_tasks))
+        .route("/entity/{id}", get(handle_detail))
+        .route("/files/{*path}", get(handle_file))
+        .route("/search", get(handle_search))
+        .route("/index.json", get(handle_index_json))
+        .route("/assets/archivo.woff2", get(handle_font))
+        .route("/brand/logo", get(handle_brand_logo))
+        .route("/brand/fonts/{filename}", get(handle_brand_fonts))
+        .route("/brand/asset/{*path}", get(handle_brand_asset))
+        .nest("/api", api)
+        .fallback(handle_404)
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            guard::protect_writes,
+        ))
+        .with_state(state);
+
+    if base_path.is_empty() {
+        return routes;
+    }
+    // Axum nest doesn't match trailing slash on the base path itself.
+    // Add explicit redirect: /base/path/ -> /base/path
+    let bp = base_path.clone();
+    Router::new().nest(&base_path, routes).route(
+        &format!("{}/", base_path),
+        get(move || async move { axum::response::Redirect::permanent(&bp) }),
+    )
+}
+
+/// Get a non-empty query parameter.
+fn param<'a>(params: &'a HashMap<String, String>, key: &str) -> Option<&'a str> {
+    params.get(key).map(|s| s.trim()).filter(|s| !s.is_empty())
+}
+
 async fn handle_dashboard(State(state): State<Arc<AppState>>) -> Html<String> {
+    let recent = data::recent_activity(&state.cfg, 12).unwrap_or_else(|e| {
+        eprintln!("serve: error loading recent activity: {}", e);
+        Vec::new()
+    });
+    state.render(|page| html::dashboard_page(page, &recent))
+}
+
+async fn handle_list(
+    kind: EntityKind,
+    State(state): State<Arc<AppState>>,
+    Query(params): Params,
+) -> Result<Html<String>, (StatusCode, Html<String>)> {
     let cfg = &state.cfg;
+    if !cfg.entity_available(&kind) {
+        let path = format!("/{}", kind.label_plural());
+        return Err((
+            StatusCode::NOT_FOUND,
+            state.render(|page| html::not_found_page(page, &path)),
+        ));
+    }
 
-    let all_kinds = [
-        EntityKind::Customer,
-        EntityKind::Project,
-        EntityKind::Meeting,
-        EntityKind::Research,
-        EntityKind::Task,
-        EntityKind::Sprint,
-        EntityKind::Proposal,
-        EntityKind::Contact,
-    ];
-
-    let counts: Vec<data::StatusCounts> = all_kinds
-        .iter()
-        .filter(|k| cfg.entity_available(k))
-        .filter_map(|k| data::count_by_status(*k, cfg).ok())
-        .collect();
-
-    let recent = match data::recent_activity(cfg, 15) {
-        Ok(r) => r,
-        Err(e) => {
-            eprintln!("serve: error loading recent activity: {}", e);
-            Vec::new()
-        }
+    let status = param(&params, "status");
+    let tag = param(&params, "tag");
+    // Meetings are most useful newest first.
+    let (sort, dir) = match (param(&params, "sort"), kind) {
+        (Some(s), _) => (Some(s), param(&params, "dir").unwrap_or("asc")),
+        (None, EntityKind::Meeting) => (Some("date"), "desc"),
+        (None, _) => (None, "asc"),
     };
 
-    // Collect task insights for the dashboard
-    let tasks = data::collect_tasks(cfg).unwrap_or_default();
-    let task_insights = html::TaskInsights::from_tasks(&tasks);
+    let mut entities = data::collect_filtered(kind, cfg, status, tag).map_err(|e| {
+        eprintln!("serve: error loading {}: {}", kind.label_plural(), e);
+        state.error(&e.to_string())
+    })?;
+    if let Some(field) = sort {
+        html::sort_entities(&mut entities, field, dir);
+    }
 
-    Html(html::prefix_base_path(
-        &html::dashboard_page(&counts, &recent, &task_insights, cfg, &state.custom_css),
-        &state.base_path,
-    ))
+    let query = ListQuery {
+        status,
+        tag,
+        sort,
+        dir,
+    };
+    Ok(state.render(|page| html::list_page(page, kind, &entities, &query)))
 }
 
-async fn handle_customers(
+/// The meeting calendar for `?month=YYYY-MM` (this month by default);
+/// `?overlays=1` adds sprints and task deadlines.
+async fn handle_calendar(
     State(state): State<Arc<AppState>>,
-    Query(params): Query<HashMap<String, String>>,
-) -> Result<Html<String>, (StatusCode, Html<String>)> {
-    handle_list(
-        EntityKind::Customer,
-        &state.cfg,
-        &params,
-        &state.custom_css,
-        &state.base_path,
+    Query(params): Params,
+) -> (StatusCode, Html<String>) {
+    if !state.cfg.entity_available(&EntityKind::Meeting) {
+        return (
+            StatusCode::NOT_FOUND,
+            state.render(|page| html::not_found_page(page, "/meetings/calendar")),
+        );
+    }
+    let query = html::CalendarQuery {
+        month: param(&params, "month"),
+        overlays: matches!(param(&params, "overlays"), Some("1" | "on" | "true")),
+    };
+    (
+        StatusCode::OK,
+        state.render(|page| html::calendar_page(page, &query)),
     )
 }
 
-async fn handle_projects(
-    State(state): State<Arc<AppState>>,
-    Query(params): Query<HashMap<String, String>>,
-) -> Result<Html<String>, (StatusCode, Html<String>)> {
-    handle_list(
-        EntityKind::Project,
-        &state.cfg,
-        &params,
-        &state.custom_css,
-        &state.base_path,
-    )
+fn task_query(params: &HashMap<String, String>) -> TaskQuery<'_> {
+    TaskQuery {
+        status: param(params, "status"),
+        priority: param(params, "priority").and_then(|s| s.parse().ok()),
+        owner: param(params, "owner"),
+        project: param(params, "project"),
+        customer: param(params, "customer"),
+        sprint: param(params, "sprint"),
+        sort: param(params, "sort"),
+        dir: param(params, "dir").unwrap_or("asc"),
+    }
 }
 
-async fn handle_meetings(
-    State(state): State<Arc<AppState>>,
-    Query(params): Query<HashMap<String, String>>,
-) -> Result<Html<String>, (StatusCode, Html<String>)> {
-    handle_list(
-        EntityKind::Meeting,
-        &state.cfg,
-        &params,
-        &state.custom_css,
-        &state.base_path,
+fn load_tasks(
+    state: &AppState,
+    q: &TaskQuery,
+) -> Result<(Vec<data::EntityRecord>, html::TaskFilterOptions), (StatusCode, Html<String>)> {
+    let cfg = &state.cfg;
+    let tasks = data::collect_tasks_filtered(
+        cfg,
+        &TaskFilter {
+            status: q.status,
+            tag: None,
+            project: q.project,
+            customer: q.customer,
+            priority: q.priority,
+            sprint: q.sprint,
+            owner: q.owner,
+        },
     )
-}
-
-async fn handle_research(
-    State(state): State<Arc<AppState>>,
-    Query(params): Query<HashMap<String, String>>,
-) -> Result<Html<String>, (StatusCode, Html<String>)> {
-    handle_list(
-        EntityKind::Research,
-        &state.cfg,
-        &params,
-        &state.custom_css,
-        &state.base_path,
-    )
-}
-
-async fn handle_sprints(
-    State(state): State<Arc<AppState>>,
-    Query(params): Query<HashMap<String, String>>,
-) -> Result<Html<String>, (StatusCode, Html<String>)> {
-    handle_list(
-        EntityKind::Sprint,
-        &state.cfg,
-        &params,
-        &state.custom_css,
-        &state.base_path,
-    )
-}
-
-async fn handle_proposals(
-    State(state): State<Arc<AppState>>,
-    Query(params): Query<HashMap<String, String>>,
-) -> Result<Html<String>, (StatusCode, Html<String>)> {
-    handle_list(
-        EntityKind::Proposal,
-        &state.cfg,
-        &params,
-        &state.custom_css,
-        &state.base_path,
-    )
-}
-
-async fn handle_contacts(
-    State(state): State<Arc<AppState>>,
-    Query(params): Query<HashMap<String, String>>,
-) -> Result<Html<String>, (StatusCode, Html<String>)> {
-    handle_list(
-        EntityKind::Contact,
-        &state.cfg,
-        &params,
-        &state.custom_css,
-        &state.base_path,
-    )
+    .map_err(|e| {
+        eprintln!("serve: error loading tasks: {}", e);
+        state.error(&e.to_string())
+    })?;
+    // Dropdown options come from all tasks so filters can be switched freely.
+    let all = data::collect_tasks(cfg).unwrap_or_default();
+    Ok((tasks, html::TaskFilterOptions::from_tasks(&all)))
 }
 
 async fn handle_tasks(
     State(state): State<Arc<AppState>>,
-    Query(params): Query<HashMap<String, String>>,
+    Query(params): Params,
 ) -> Result<Html<String>, (StatusCode, Html<String>)> {
-    let cfg = &state.cfg;
-    let status_filter = params
-        .get("status")
-        .filter(|s| !s.is_empty())
-        .map(|s| s.as_str());
-    let priority_filter = params
-        .get("priority")
-        .filter(|s| !s.is_empty())
-        .and_then(|s| s.parse::<u32>().ok());
-    let owner_filter = params
-        .get("owner")
-        .filter(|s| !s.is_empty())
-        .map(|s| s.as_str());
-    let project_filter = params
-        .get("project")
-        .filter(|s| !s.is_empty())
-        .map(|s| s.as_str());
-    let sprint_filter = params
-        .get("sprint")
-        .filter(|s| !s.is_empty())
-        .map(|s| s.as_str());
-
-    let filter = TaskFilter {
-        status: status_filter,
-        tag: None,
-        project: project_filter,
-        customer: None,
-        priority: priority_filter,
-        sprint: sprint_filter,
-        owner: owner_filter,
-    };
-
-    let tasks = data::collect_tasks_filtered(cfg, &filter).map_err(|e| {
-        eprintln!("serve: error loading tasks: {}", e);
-        error_response(&e.to_string())
-    })?;
-    let valid_statuses = EntityKind::Task.statuses(cfg);
-
-    // Collect unique owners, projects, sprints for filter dropdowns
-    let all_tasks = data::collect_tasks_filtered(
-        cfg,
-        &TaskFilter {
-            status: None,
-            tag: None,
-            project: None,
-            customer: None,
-            priority: None,
-            sprint: None,
-            owner: None,
-        },
-    )
-    .unwrap_or_default();
-    let filter_options = html::TaskFilterOptions::from_tasks(&all_tasks);
-
-    Ok(Html(html::prefix_base_path(
-        &html::tasks_list_page(
-            &tasks,
-            status_filter,
-            priority_filter,
-            owner_filter,
-            project_filter,
-            sprint_filter,
-            valid_statuses,
-            &filter_options,
-            cfg,
-            &state.custom_css,
-        ),
-        &state.base_path,
-    )))
+    let query = task_query(&params);
+    let (mut tasks, options) = load_tasks(&state, &query)?;
+    if let Some(field) = query.sort {
+        html::sort_entities(&mut tasks, field, query.dir);
+    }
+    Ok(state.render(|page| html::tasks_list_page(page, &tasks, &query, &options)))
 }
 
 async fn handle_tasks_board(
     State(state): State<Arc<AppState>>,
-    Query(params): Query<HashMap<String, String>>,
+    Query(params): Params,
 ) -> Result<Html<String>, (StatusCode, Html<String>)> {
-    let cfg = &state.cfg;
-    let project = params
-        .get("project")
-        .filter(|s| !s.is_empty())
-        .map(|s| s.as_str());
-    let customer = params
-        .get("customer")
-        .filter(|s| !s.is_empty())
-        .map(|s| s.as_str());
-    let sprint = params
-        .get("sprint")
-        .filter(|s| !s.is_empty())
-        .map(|s| s.as_str());
-
-    let filter = TaskFilter {
+    // The board groups by status and orders lanes itself, so status,
+    // priority and sort parameters don't apply.
+    let query = TaskQuery {
         status: None,
-        tag: None,
-        project,
-        customer,
         priority: None,
-        sprint,
-        owner: None,
+        sort: None,
+        ..task_query(&params)
     };
-
-    let tasks = data::collect_tasks_filtered(cfg, &filter).map_err(|e| {
-        eprintln!("serve: error loading tasks: {}", e);
-        error_response(&e.to_string())
-    })?;
-
-    Ok(Html(html::prefix_base_path(
-        &html::board_page(&tasks, cfg, &state.custom_css),
-        &state.base_path,
-    )))
-}
-
-fn handle_list(
-    kind: EntityKind,
-    cfg: &ResolvedConfig,
-    params: &HashMap<String, String>,
-    custom_css: &str,
-    base_path: &str,
-) -> Result<Html<String>, (StatusCode, Html<String>)> {
-    let status_filter = params
-        .get("status")
-        .filter(|s| !s.is_empty())
-        .map(|s| s.as_str());
-    let tag_filter = params
-        .get("tag")
-        .filter(|s| !s.is_empty())
-        .map(|s| s.as_str());
-    let sort_field = params
-        .get("sort")
-        .filter(|s| !s.is_empty())
-        .map(|s| s.as_str());
-    let sort_dir = params
-        .get("dir")
-        .filter(|s| !s.is_empty())
-        .map(|s| s.as_str())
-        .unwrap_or("asc");
-
-    let mut entities =
-        data::collect_filtered(kind, cfg, status_filter, tag_filter).map_err(|e| {
-            eprintln!("serve: error loading {}: {}", kind.label_plural(), e);
-            error_response(&e.to_string())
-        })?;
-
-    // Sort entities if requested
-    if let Some(field) = sort_field {
-        html::sort_entities(&mut entities, field, sort_dir);
-    }
-
-    let valid_statuses = kind.statuses(cfg);
-
-    Ok(Html(html::prefix_base_path(
-        &html::list_page(
-            kind.label_plural(),
-            &entities,
-            status_filter,
-            tag_filter,
-            valid_statuses,
-            sort_field,
-            sort_dir,
-            &cfg.mode,
-            &cfg.configured_entities,
-            &cfg.brand,
-            custom_css,
-        ),
-        base_path,
-    )))
+    let (tasks, options) = load_tasks(&state, &query)?;
+    Ok(state.render(|page| html::board_page(page, &tasks, &query, &options)))
 }
 
 async fn handle_detail(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
-) -> Result<Html<String>, StatusCode> {
-    let cfg = &state.cfg;
-
-    let entity = data::find_entity_by_id(&id, cfg).map_err(|_| StatusCode::NOT_FOUND)?;
-
-    let prefixes = vec![
-        cfg.id_prefixes.customer.as_str(),
-        cfg.id_prefixes.project.as_str(),
-        cfg.id_prefixes.meeting.as_str(),
-        cfg.id_prefixes.research.as_str(),
-        cfg.id_prefixes.task.as_str(),
-        cfg.id_prefixes.sprint.as_str(),
-        cfg.id_prefixes.proposal.as_str(),
-        cfg.id_prefixes.contact.as_str(),
-    ];
-
-    // Collect related entities based on entity kind
-    let related = collect_related_entities(&entity, cfg);
-
-    Ok(Html(html::prefix_base_path(
-        &html::detail_page(&entity, &prefixes, &related, cfg, &state.custom_css),
-        &state.base_path,
-    )))
-}
-
-/// Collect entities related to the given entity.
-fn collect_related_entities(
-    entity: &data::EntityRecord,
-    cfg: &ResolvedConfig,
-) -> Vec<html::RelatedSection> {
-    let mut sections = Vec::new();
-
-    match entity.kind {
-        EntityKind::Customer => {
-            // Projects linked to this customer
-            if let Ok(projects) = data::collect_entities(EntityKind::Project, cfg) {
-                let related: Vec<_> = projects
-                    .into_iter()
-                    .filter(|p| {
-                        let customers = frontmatter::get_link_list(&p.frontmatter, "customers");
-                        let customer = frontmatter::get_str_or(&p.frontmatter, "customer", "");
-                        let customer = frontmatter::strip_wikilink(customer);
-                        customers.iter().any(|c| c.eq_ignore_ascii_case(&entity.id))
-                            || customer.eq_ignore_ascii_case(&entity.id)
-                    })
-                    .collect();
-                if !related.is_empty() {
-                    sections.push(html::RelatedSection {
-                        title: "Projects".to_string(),
-                        kind: EntityKind::Project,
-                        entities: related,
-                    });
-                }
+) -> (StatusCode, Html<String>) {
+    let catalog = Catalog::load(&state.cfg);
+    let page = state.page(&catalog);
+    let html = match catalog.records.iter().find(|r| r.id == id) {
+        Some(entity) => html::detail_page(&page, entity),
+        None => match data::find_entity_by_id(&id, &state.cfg) {
+            Ok(entity) => html::detail_page(&page, &entity),
+            Err(_) => {
+                let page_html = html::not_found_page(&page, &format!("/entity/{id}"));
+                return (
+                    StatusCode::NOT_FOUND,
+                    Html(html::prefix_base_path(&page_html, &state.base_path)),
+                );
             }
-            // Contacts for this customer
-            let filter = ContactFilter {
-                status: None,
-                tag: None,
-                customer: Some(&entity.id),
-            };
-            if let Ok(contacts) = data::collect_contacts_filtered(cfg, &filter) {
-                if !contacts.is_empty() {
-                    sections.push(html::RelatedSection {
-                        title: "Contacts".to_string(),
-                        kind: EntityKind::Contact,
-                        entities: contacts,
-                    });
-                }
-            }
-            // Tasks for this customer
-            let filter = TaskFilter {
-                status: None,
-                tag: None,
-                project: None,
-                customer: Some(&entity.id),
-                priority: None,
-                sprint: None,
-                owner: None,
-            };
-            if let Ok(tasks) = data::collect_tasks_filtered(cfg, &filter) {
-                if !tasks.is_empty() {
-                    sections.push(html::RelatedSection {
-                        title: "Tasks".to_string(),
-                        kind: EntityKind::Task,
-                        entities: tasks,
-                    });
-                }
-            }
-        }
-        EntityKind::Project => {
-            // Tasks linked to this project
-            let filter = TaskFilter {
-                status: None,
-                tag: None,
-                project: Some(&entity.id),
-                customer: None,
-                priority: None,
-                sprint: None,
-                owner: None,
-            };
-            if let Ok(tasks) = data::collect_tasks_filtered(cfg, &filter) {
-                if !tasks.is_empty() {
-                    sections.push(html::RelatedSection {
-                        title: "Tasks".to_string(),
-                        kind: EntityKind::Task,
-                        entities: tasks,
-                    });
-                }
-            }
-            // Meetings linked to this project
-            if let Ok(meetings) = data::collect_entities(EntityKind::Meeting, cfg) {
-                let related: Vec<_> = meetings
-                    .into_iter()
-                    .filter(|m| {
-                        let projects = frontmatter::get_link_list(&m.frontmatter, "projects");
-                        let project = frontmatter::get_str_or(&m.frontmatter, "project", "");
-                        let project = frontmatter::strip_wikilink(project);
-                        projects.iter().any(|p| p.eq_ignore_ascii_case(&entity.id))
-                            || project.eq_ignore_ascii_case(&entity.id)
-                    })
-                    .collect();
-                if !related.is_empty() {
-                    sections.push(html::RelatedSection {
-                        title: "Meetings".to_string(),
-                        kind: EntityKind::Meeting,
-                        entities: related,
-                    });
-                }
-            }
-        }
-        EntityKind::Sprint => {
-            // Tasks in this sprint
-            let filter = TaskFilter {
-                status: None,
-                tag: None,
-                project: None,
-                customer: None,
-                priority: None,
-                sprint: Some(&entity.id),
-                owner: None,
-            };
-            if let Ok(tasks) = data::collect_tasks_filtered(cfg, &filter) {
-                if !tasks.is_empty() {
-                    sections.push(html::RelatedSection {
-                        title: "Tasks".to_string(),
-                        kind: EntityKind::Task,
-                        entities: tasks,
-                    });
-                }
-            }
-        }
-        _ => {}
-    }
-
-    sections
-}
-
-fn error_response(message: &str) -> (StatusCode, Html<String>) {
+        },
+    };
     (
-        StatusCode::INTERNAL_SERVER_ERROR,
-        Html(html::error_page(message)),
+        StatusCode::OK,
+        Html(html::prefix_base_path(&html, &state.base_path)),
     )
 }
 
-async fn handle_404(State(state): State<Arc<AppState>>, uri: axum::http::Uri) -> Html<String> {
-    Html(html::prefix_base_path(
-        &html::not_found_page(uri.path(), &state.cfg, &state.custom_css),
-        &state.base_path,
-    ))
+/// Repo files linked from notes: Markdown is rendered as a page, images and
+/// PDFs are served as they are. Hidden paths, other file types and anything
+/// outside the repo are not served.
+async fn handle_file(
+    State(state): State<Arc<AppState>>,
+    Path(path): Path<String>,
+) -> axum::response::Response {
+    let cfg = &state.cfg;
+    let not_found = || {
+        (
+            StatusCode::NOT_FOUND,
+            state.render(|page| html::not_found_page(page, &format!("/files/{path}"))),
+        )
+            .into_response()
+    };
+    let rel = std::path::Path::new(&path);
+    let visible = rel.components().enumerate().all(|(i, c)| match c {
+        std::path::Component::Normal(s) => {
+            let s = s.to_string_lossy();
+            !s.starts_with('.') || (i == 0 && s == ".mc" && cfg.mode == RepoMode::Embedded)
+        }
+        _ => false,
+    });
+    let file = cfg.root.join(rel);
+    let inside = cfg.root.canonicalize().ok().zip(file.canonicalize().ok());
+    if !visible || !inside.is_some_and(|(root, f)| f.starts_with(root) && f.is_file()) {
+        return not_found();
+    }
+    let ext = file
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if ext == "md" {
+        let Ok(content) = std::fs::read_to_string(&file) else {
+            return not_found();
+        };
+        let catalog = Catalog::load(cfg);
+        if let Some(id) = catalog.id_for_path(&file) {
+            let href = format!("{}/entity/{}", state.base_path, id);
+            return axum::response::Redirect::to(&href).into_response();
+        }
+        let page = state.page(&catalog);
+        let html = html::file_page(&page, &file, &content);
+        return Html(html::prefix_base_path(&html, &state.base_path)).into_response();
+    }
+    let content_type = match ext.as_str() {
+        "pdf" => "application/pdf",
+        "png" | "jpg" | "jpeg" | "gif" | "webp" | "svg" => {
+            content_type_for(&ext).unwrap_or("application/octet-stream")
+        }
+        _ => return not_found(),
+    };
+    match std::fs::read(&file) {
+        Ok(bytes) => (
+            [
+                (header::CONTENT_TYPE, content_type),
+                (header::CACHE_CONTROL, "no-cache"),
+                // Files are shown, never run: no scripts even in SVGs.
+                (
+                    header::CONTENT_SECURITY_POLICY,
+                    "default-src 'none'; img-src 'self'; style-src 'unsafe-inline'; sandbox",
+                ),
+                (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
+            ],
+            bytes,
+        )
+            .into_response(),
+        Err(_) => not_found(),
+    }
+}
+
+async fn handle_search(State(state): State<Arc<AppState>>, Query(params): Params) -> Html<String> {
+    let q = params.get("q").map(String::as_str).unwrap_or("");
+    state.render(|page| html::search_page(page, q))
+}
+
+/// Every entity's ID, title, kind, status and date, for client-side jump-to.
+async fn handle_index_json(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let catalog = Catalog::load(&state.cfg);
+    (
+        [
+            (header::CONTENT_TYPE, "application/json"),
+            (header::CACHE_CONTROL, "no-cache"),
+        ],
+        html::index_json(&catalog),
+    )
+}
+
+async fn handle_font() -> impl IntoResponse {
+    (
+        [
+            (header::CONTENT_TYPE, "font/woff2"),
+            (header::CACHE_CONTROL, "public, max-age=31536000, immutable"),
+        ],
+        html::ARCHIVO_WOFF2,
+    )
+}
+
+async fn handle_404(
+    State(state): State<Arc<AppState>>,
+    uri: axum::http::Uri,
+) -> (StatusCode, Html<String>) {
+    (
+        StatusCode::NOT_FOUND,
+        state.render(|page| html::not_found_page(page, uri.path())),
+    )
 }
 
 async fn handle_brand_logo(
@@ -573,13 +483,7 @@ async fn handle_brand_logo(
     let logo_path = state.cfg.brand.logo.as_ref().ok_or(StatusCode::NOT_FOUND)?;
     let content = std::fs::read(logo_path).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     let ext = logo_path.extension().and_then(|e| e.to_str()).unwrap_or("");
-    let content_type = match ext {
-        "svg" => "image/svg+xml",
-        "png" => "image/png",
-        "jpg" | "jpeg" => "image/jpeg",
-        "webp" => "image/webp",
-        _ => "application/octet-stream",
-    };
+    let content_type = content_type_for(ext).unwrap_or("application/octet-stream");
     Ok(([(header::CONTENT_TYPE, content_type)], content))
 }
 
@@ -604,16 +508,13 @@ async fn handle_brand_fonts(
         return Err(StatusCode::NOT_FOUND);
     }
 
+    let ext = filename.rsplit('.').next().unwrap_or("");
+    let content_type = match ext {
+        "woff2" | "woff" | "ttf" | "otf" => content_type_for(ext),
+        _ => None,
+    }
+    .ok_or(StatusCode::BAD_REQUEST)?;
     let content = std::fs::read(&file_path).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    let content_type = if filename.ends_with(".woff2") {
-        "font/woff2"
-    } else if filename.ends_with(".ttf") {
-        "font/ttf"
-    } else if filename.ends_with(".woff") {
-        "font/woff"
-    } else {
-        return Err(StatusCode::BAD_REQUEST);
-    };
     Ok((
         [
             (header::CONTENT_TYPE, content_type),
@@ -621,4 +522,62 @@ async fn handle_brand_fonts(
         ],
         content,
     ))
+}
+
+/// Serve files referenced by the custom stylesheet (fonts, images), relative
+/// to the stylesheet's directory.
+async fn handle_brand_asset(
+    State(state): State<Arc<AppState>>,
+    Path(path): Path<String>,
+) -> Result<impl IntoResponse, StatusCode> {
+    let css_path = state
+        .cfg
+        .brand
+        .custom_css
+        .as_ref()
+        .ok_or(StatusCode::NOT_FOUND)?;
+    let base = css_path
+        .parent()
+        .and_then(|p| p.canonicalize().ok())
+        .ok_or(StatusCode::NOT_FOUND)?;
+    let file_path = base
+        .join(&path)
+        .canonicalize()
+        .map_err(|_| StatusCode::NOT_FOUND)?;
+    // Path traversal protection: the resolved file must stay inside the CSS directory.
+    if !file_path.starts_with(&base) || !file_path.is_file() {
+        return Err(StatusCode::NOT_FOUND);
+    }
+    let ext = file_path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let content_type = content_type_for(&ext).ok_or(StatusCode::NOT_FOUND)?;
+    let content = std::fs::read(&file_path).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok((
+        [
+            (header::CONTENT_TYPE, content_type),
+            (header::CACHE_CONTROL, "public, max-age=3600"),
+        ],
+        content,
+    ))
+}
+
+/// Content type for static brand files. Returns `None` for unsupported types.
+fn content_type_for(ext: &str) -> Option<&'static str> {
+    Some(match ext {
+        "svg" => "image/svg+xml",
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "webp" => "image/webp",
+        "gif" => "image/gif",
+        "ico" => "image/x-icon",
+        "woff2" => "font/woff2",
+        "woff" => "font/woff",
+        "ttf" => "font/ttf",
+        "otf" => "font/otf",
+        "css" => "text/css",
+        _ => return None,
+    })
 }
