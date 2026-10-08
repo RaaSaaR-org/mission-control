@@ -8,9 +8,27 @@ use super::{go_key, is_closed, Page, NAV_GROUPS};
 use crate::config::RepoMode;
 use crate::entity::EntityKind;
 use crate::frontmatter;
+use std::sync::LazyLock;
 
-static APP_CSS: &str = include_str!("../assets/app.css");
-static APP_JS: &str = include_str!("../assets/app.js");
+/// The dashboard stylesheet, served at `/assets/app.css`.
+pub const APP_CSS: &str = include_str!("../assets/app.css");
+/// The dashboard script, served at `/assets/app.js`.
+pub const APP_JS: &str = include_str!("../assets/app.js");
+
+/// A short hash of an asset's content. Asset URLs carry it (`?v=…`) so they
+/// can be cached for good and still change with every build that edits them.
+pub fn asset_version(content: &str) -> String {
+    // FNV-1a: stable across builds and platforms, unlike `DefaultHasher`.
+    let hash = content.bytes().fold(0xcbf2_9ce4_8422_2325_u64, |h, b| {
+        (h ^ u64::from(b)).wrapping_mul(0x0000_0100_0000_01b3)
+    });
+    format!("{:012x}", hash & 0xffff_ffff_ffff)
+}
+
+static CSS_HREF: LazyLock<String> =
+    LazyLock::new(|| format!("/assets/app.css?v={}", asset_version(APP_CSS)));
+static JS_HREF: LazyLock<String> =
+    LazyLock::new(|| format!("/assets/app.js?v={}", asset_version(APP_JS)));
 
 /// Applies the saved theme and density before first paint.
 const BOOT_SCRIPT: &str = r#"<script>try{var d=document.documentElement,t=localStorage.getItem("mc-theme");if(t==="light"||t==="dark")d.dataset.theme=t;if(localStorage.getItem("mc-density")==="compact")d.classList.add("density-compact")}catch(e){}</script>"#;
@@ -63,7 +81,8 @@ pub(crate) fn layout(
   {FAVICON}
   <title>{title} – {brand_name}</title>
   {BOOT_SCRIPT}
-  <style>{APP_CSS}</style>
+  <link rel="stylesheet" href="{css_href}">
+  <script src="{js_href}" defer></script>
   {brand_css}
   {font_css}
   {custom_css_block}
@@ -98,10 +117,11 @@ pub(crate) fn layout(
 {palette}
 {sheet}
 {dialog}
-<script>{APP_JS}</script>
 </body>
 </html>"##,
         title = escape_html(title),
+        css_href = *CSS_HREF,
+        js_href = *JS_HREF,
         brand_css = brand_css(brand),
         font_css = font_face_css(brand),
         search_query = escape_html(search_query),

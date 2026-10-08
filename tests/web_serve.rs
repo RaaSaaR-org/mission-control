@@ -88,7 +88,14 @@ async fn every_page_renders_in_the_shell() {
         assert!(html.contains(r#"class="toast-region""#), "{uri}");
         assert!(html.contains(r#"<dialog class="palette""#), "{uri}");
         assert!(html.contains(r#"class="theme-switch""#), "{uri}");
-        assert!(html.contains("@layer mc-tokens"), "{uri}");
+        assert!(
+            html.contains(r#"<link rel="stylesheet" href="/assets/app.css?v="#),
+            "{uri}"
+        );
+        assert!(
+            !html.contains("@layer mc-tokens"),
+            "{uri}: CSS is linked, not inlined"
+        );
         // Names and titles are always escaped.
         assert!(!html.contains("<script>alert"), "{uri}");
     }
@@ -164,6 +171,48 @@ async fn font_and_index_are_served() {
 }
 
 #[tokio::test]
+async fn css_and_js_are_separate_cacheable_assets() {
+    let tmp = repo();
+    let router = router_for(&tmp, "");
+    let html = text(get(&router, "/tasks").await).await;
+    let version = |name: &str| {
+        let start = html.find(&format!("/assets/{name}?v=")).expect(name) + name.len() + 11;
+        html[start..start + 12].to_string()
+    };
+    assert!(version("app.css").bytes().all(|b| b.is_ascii_hexdigit()));
+    assert_ne!(version("app.css"), version("app.js"));
+    assert!(html.contains(r#"<script src="/assets/app.js?v="#));
+    assert!(html.contains(" defer></script>"));
+    // Only the tiny theme boot script stays inline.
+    assert!(html.len() < 60_000, "page is {} bytes", html.len());
+
+    for (uri, mime, needle) in [
+        (
+            "/assets/app.css",
+            "text/css; charset=utf-8",
+            "@layer mc-tokens",
+        ),
+        (
+            "/assets/app.js",
+            "text/javascript; charset=utf-8",
+            "softRefresh",
+        ),
+    ] {
+        let resp = get(&router, &format!("{uri}?v=abc")).await;
+        assert_eq!(resp.status(), StatusCode::OK, "{uri}");
+        assert_eq!(resp.headers()[header::CONTENT_TYPE], mime);
+        assert!(resp.headers()[header::CACHE_CONTROL]
+            .to_str()
+            .unwrap()
+            .contains("immutable"));
+        assert!(text(resp).await.contains(needle), "{uri}");
+    }
+    // The font is found next to the stylesheet under any base path.
+    let css = text(get(&router, "/assets/app.css").await).await;
+    assert!(css.contains(r#"url("archivo.woff2")"#));
+}
+
+#[tokio::test]
 async fn base_path_prefixes_every_url() {
     let tmp = repo();
     let router = router_for(&tmp, "/hq/");
@@ -191,6 +240,12 @@ async fn base_path_prefixes_every_url() {
     assert_eq!(resp.status(), StatusCode::PERMANENT_REDIRECT);
     let resp = get(&router, "/hq/assets/archivo.woff2").await;
     assert_eq!(resp.status(), StatusCode::OK);
+    let html = text(get(&router, "/hq/tasks").await).await;
+    assert!(html.contains(r#"href="/hq/assets/app.css?v="#));
+    assert!(html.contains(r#"src="/hq/assets/app.js?v="#));
+    for uri in ["/hq/assets/app.css", "/hq/assets/app.js"] {
+        assert_eq!(get(&router, uri).await.status(), StatusCode::OK, "{uri}");
+    }
 }
 
 #[tokio::test]
@@ -259,4 +314,73 @@ async fn meeting_calendar_keeps_the_base_path() {
     );
     assert!(html.contains(r#"href="/hq/meetings/calendar?month=2026-03" title="Hide sprints"#));
     assert!(html.contains(r#"href="/hq/meetings" data-view-key="l""#));
+}
+
+#[tokio::test]
+async fn loose_entity_ids_redirect_and_misses_offer_search() {
+    let tmp = repo();
+    for (base, uri, to) in [
+        ("", "/entity/task-1", "/entity/TASK-001"),
+        ("", "/entity/TASK-0001", "/entity/TASK-001"),
+        ("/hq", "/hq/entity/task1", "/hq/entity/TASK-001"),
+    ] {
+        let resp = get(&router_for(&tmp, base), uri).await;
+        assert_eq!(resp.status(), StatusCode::PERMANENT_REDIRECT, "{uri}");
+        assert_eq!(resp.headers()[header::LOCATION], to, "{uri}");
+    }
+    let resp = get(&router_for(&tmp, ""), "/entity/task-99").await;
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    assert!(text(resp).await.contains(r#"href="/search?q=task-99""#));
+}
+
+#[tokio::test]
+async fn disabled_kinds_say_how_to_enable_them() {
+    let tmp = TempDir::new().unwrap();
+    write(
+        tmp.path(),
+        "config/config.yml",
+        "site:\n  name: Small\npaths:\n  tasks: tasks/\n  meetings: meetings/\n",
+    );
+    let cfg = config::load_config(tmp.path(), RepoMode::Standalone).unwrap();
+    assert!(!cfg.entity_available(&mc::entity::EntityKind::Proposal));
+    let router = build_router(&cfg, "");
+    let resp = get(&router, "/proposals").await;
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    let html = text(resp).await;
+    assert!(html.contains("Not available"), "{html}");
+    assert!(html.contains("<code>proposals: proposals/</code>"));
+}
+
+/// The browser-side fixes live in the shipped script and stylesheet; these
+/// checks keep them from being dropped silently.
+#[tokio::test]
+async fn shipped_script_and_styles_keep_their_fixes() {
+    let tmp = repo();
+    let router = router_for(&tmp, "");
+    let js = text(get(&router, "/assets/app.js").await).await;
+    // Tab passes through the sidebar search; the palette returns focus.
+    assert!(!js.contains(r#"siteInput.addEventListener("focus""#));
+    assert!(js.contains("palOpener"));
+    // Own writes don't swallow an outside change made just before them.
+    assert!(js.contains("data.prev_version !== known"));
+    assert!(js.contains(r#"hideNotice("offline")"#));
+    // Undo acts on the live card after a refresh; refresh keeps the place.
+    assert!(js.contains("live !== current"));
+    assert!(js.contains("scrollLeft = scrolls[i]"));
+    // "Create another" refreshes when the dialog closes; Back resets filters.
+    assert!(js.contains("refreshOnClose"));
+    assert!(js.contains(r#""pageshow""#));
+    // Loose IDs, date ties and month names in the palette; Mac Ctrl+K.
+    assert!(js.contains("byScoreThenDate"));
+    assert!(js.contains(r#""Sep""#) && !js.contains("toLocaleDateString"));
+    assert!(js.contains("isMac && typing(e.target)"));
+
+    let css = text(get(&router, "/assets/app.css").await).await;
+    assert!(css.contains(
+        ".nav-toggle { position: absolute; opacity: 0; pointer-events: none; visibility: hidden; }"
+    ));
+    assert!(css.contains(".filter-cell:has(select:focus-visible)"));
+    assert!(css.contains("width: fit-content;"));
+    assert!(css.contains(".fp-scroll.at-end"));
+    assert!(css.contains(".tb-cell:last-child { border-right: 0; }"));
 }

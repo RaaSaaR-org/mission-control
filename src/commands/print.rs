@@ -1,17 +1,22 @@
+use crate::cli::ui;
 use crate::cli::{PrintEntity, PrintTemplate};
-use crate::config::ResolvedConfig;
+use crate::config::{RepoMode, ResolvedConfig};
 use crate::data;
 use crate::entity::EntityKind;
 use crate::error::{McError, McResult};
 use crate::frontmatter;
+use crate::html::Catalog;
+use crate::util;
 use colored::*;
 use genpdf::elements;
 use genpdf::fonts;
 use genpdf::style;
 use genpdf::Alignment;
 use pulldown_cmark::{Event, HeadingLevel, Options, Parser, Tag, TagEnd};
+use regex::Regex;
 use serde_json::Value as JsonValue;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
+use std::sync::LazyLock;
 
 /// Font sizes used throughout the PDF.
 const H1_SIZE: u8 = 16;
@@ -36,17 +41,61 @@ const META_LABEL_SIZE: u8 = 9;
 const MARGIN_MM: f64 = 20.0;
 
 pub fn run(entity: &PrintEntity, cfg: &ResolvedConfig) -> McResult<()> {
-    match entity {
-        PrintEntity::Meeting { id, output } => print_meeting(id, output.as_deref(), cfg),
+    let printed = match entity {
+        PrintEntity::Meeting { id, output } => {
+            meeting_pdf(cfg, id, output.as_deref(), Access::Cli)?
+        }
         PrintEntity::Research { id, output, file } => {
-            print_research(id, output.as_deref(), file.as_deref(), cfg)
+            research_pdf(cfg, id, output.as_deref(), file.as_deref(), Access::Cli)?
         }
         PrintEntity::File {
             path,
             output,
             template,
             title,
-        } => print_file(path, output.as_deref(), template, title.as_deref(), cfg),
+        } => file_pdf(
+            cfg,
+            path,
+            output.as_deref(),
+            template,
+            title.as_deref(),
+            Access::Cli,
+        )?,
+    };
+    report_written(&printed.path);
+    Ok(())
+}
+
+/// Which paths a print may read and write. The CLI takes paths as typed
+/// (relative to the working directory); MCP callers are confined to the
+/// repo root, so a prompt-injected note can't make an agent read
+/// `~/.ssh/id_rsa` into a PDF or overwrite `~/.zshrc`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Access {
+    Cli,
+    Repo,
+}
+
+/// A rendered PDF.
+struct Printed {
+    id: Option<String>,
+    title: String,
+    path: PathBuf,
+}
+
+impl Printed {
+    /// `{id, title, path}` for MCP, with `path` relative to the repo root.
+    fn to_json(&self, cfg: &ResolvedConfig) -> JsonValue {
+        let root = cfg.root.canonicalize().unwrap_or_else(|_| cfg.root.clone());
+        let path = self.path.strip_prefix(&root).unwrap_or(&self.path);
+        let mut out = serde_json::json!({
+            "title": self.title,
+            "path": path.display().to_string(),
+        });
+        if let Some(id) = &self.id {
+            out["id"] = JsonValue::from(id.as_str());
+        }
+        out
     }
 }
 
@@ -221,39 +270,183 @@ fn accent_color(cfg: &ResolvedConfig) -> style::Color {
 // Meeting PDF
 // ---------------------------------------------------------------------------
 
-fn print_meeting(id: &str, output: Option<&str>, cfg: &ResolvedConfig) -> McResult<()> {
-    report_written(&print_meeting_programmatic(cfg, id, output)?);
-    Ok(())
+fn report_written(path: &Path) {
+    // Relative to the working directory when it's below it.
+    let shown = std::env::current_dir()
+        .ok()
+        .and_then(|cwd| {
+            let cwd = cwd.canonicalize().unwrap_or(cwd);
+            let abs = path.canonicalize().ok()?;
+            abs.strip_prefix(&cwd).ok().map(Path::to_path_buf)
+        })
+        .unwrap_or_else(|| path.to_path_buf())
+        .display()
+        .to_string();
+    ui::success(format!("PDF written to {}", shown.bold()));
+    let opener = if cfg!(target_os = "macos") {
+        "open"
+    } else if cfg!(windows) {
+        "start"
+    } else {
+        "xdg-open"
+    };
+    ui::hint(format!(
+        "view it with {}",
+        ui::cmd(&format!("{opener} {}", shell_quote(&shown)))
+    ));
 }
 
-fn report_written(result: &JsonValue) {
-    println!(
-        "{} PDF written to {}",
-        "success:".green().bold(),
-        result["path"].as_str().unwrap_or("?")
-    );
+fn shell_quote(s: &str) -> String {
+    if s.chars()
+        .all(|c| c.is_ascii_alphanumeric() || "-_./".contains(c))
+    {
+        s.to_string()
+    } else {
+        format!("'{}'", s.replace('\'', r"'\''"))
+    }
 }
 
-/// Render the document to `output` (or `default_name`) and return the
-/// absolute path when it can be resolved.
-fn write_pdf(
-    doc: genpdf::Document,
+/// Where to write the PDF: `output` (or `default_name`), as typed for the
+/// CLI. For [`Access::Repo`] the path is taken relative to the repo root and
+/// must stay inside it, be visible (no `.git/...`), end in `.pdf` and not
+/// replace a file that isn't a PDF.
+fn output_path(
+    cfg: &ResolvedConfig,
     output: Option<&str>,
     default_name: String,
-) -> McResult<String> {
-    let out_path = PathBuf::from(output.unwrap_or(&default_name));
-    doc.render_to_file(&out_path)
-        .map_err(|e| McError::Pdf(format!("Failed to write PDF: {e}")))?;
-    let display_path = out_path.canonicalize().unwrap_or(out_path);
-    Ok(display_path.display().to_string())
+    access: Access,
+) -> McResult<PathBuf> {
+    let output = output.map(str::to_string).unwrap_or(default_name);
+    if access == Access::Cli {
+        return Ok(PathBuf::from(output));
+    }
+    let usage = |msg: String| {
+        McError::usage(
+            msg,
+            Some("give a .pdf path inside the repository, e.g. exports/report.pdf".into()),
+        )
+    };
+    let root = cfg.root.canonicalize()?;
+    let joined = root.join(&output);
+    if joined
+        .extension()
+        .is_none_or(|e| !e.eq_ignore_ascii_case("pdf"))
+    {
+        return Err(usage(format!("output '{output}' must end in .pdf")));
+    }
+    let (Some(parent), Some(name)) = (joined.parent(), joined.file_name()) else {
+        return Err(usage(format!("'{output}' is not a file path")));
+    };
+    // Resolving the parent folds `..` and symlinks, so the check below sees
+    // where the file really lands.
+    let parent = parent.canonicalize().map_err(|_| {
+        McError::not_found(
+            format!("the folder for '{output}' does not exist"),
+            Some("write into an existing folder of the repository".into()),
+        )
+    })?;
+    let path = parent.join(name);
+    let inside = path
+        .strip_prefix(&root)
+        .is_ok_and(|rel| visible_in_repo(rel, cfg));
+    if !inside {
+        return Err(usage(format!(
+            "output '{output}' is outside the repository or hidden"
+        )));
+    }
+    if let Ok(meta) = path.symlink_metadata() {
+        let is_pdf = || {
+            use std::io::Read;
+            let mut head = [0u8; 5];
+            std::fs::File::open(&path)
+                .and_then(|mut f| f.read_exact(&mut head))
+                .is_ok_and(|()| &head == b"%PDF-")
+        };
+        if meta.file_type().is_symlink() || !meta.is_file() || !is_pdf() {
+            return Err(McError::conflict(
+                format!("'{output}' exists and is not a PDF; refusing to overwrite it"),
+                Some("choose another output path".into()),
+            ));
+        }
+    }
+    Ok(path)
+}
+
+/// Whether a repo-relative path has only visible components (the `.mc`
+/// folder of an embedded repo excepted), like the dashboard's `/files`.
+fn visible_in_repo(rel: &Path, cfg: &ResolvedConfig) -> bool {
+    rel.components().enumerate().all(|(i, c)| match c {
+        Component::Normal(s) => {
+            let s = s.to_string_lossy();
+            !s.starts_with('.') || (i == 0 && s == ".mc" && cfg.mode == RepoMode::Embedded)
+        }
+        _ => false,
+    })
+}
+
+/// Render the document and write it to `path` in one step, so a failed
+/// render never leaves a truncated file behind.
+fn write_pdf(doc: genpdf::Document, path: &Path) -> McResult<()> {
+    let mut buf = Vec::new();
+    doc.render(&mut buf)
+        .map_err(|e| McError::Pdf(format!("Failed to render PDF: {e}")))?;
+    util::atomic_write(path, &buf)
+        .map_err(|e| McError::Pdf(format!("Failed to write {}: {e}", path.display())))
+}
+
+static OBSIDIAN_COMMENT_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?s)%%.*?%%").expect("static regex is valid"));
+static WIKILINK_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"\[\[([^\[\]|]+)(?:\|([^\[\]]*))?\]\]").expect("static regex is valid")
+});
+
+/// Text for a reference: `[[target|Alias]]` → `Alias`; `[[CUST-001]]` or
+/// `CUST-001` → the entity's name when it's known; otherwise the target.
+fn link_text(raw: &str, catalog: Option<&Catalog>) -> String {
+    let raw = raw.trim();
+    let (target, alias) = match WIKILINK_RE.captures(raw) {
+        Some(c) if c.get(0).is_some_and(|m| m.len() == raw.len()) => (
+            c.get(1).map_or("", |m| m.as_str().trim()),
+            c.get(2)
+                .map(|m| m.as_str().trim())
+                .filter(|a| !a.is_empty()),
+        ),
+        _ => (raw, None),
+    };
+    if let Some(alias) = alias {
+        return alias.to_string();
+    }
+    catalog
+        .and_then(|c| c.canonical_id(target).and_then(|id| c.name(id)))
+        .unwrap_or(target)
+        .to_string()
+}
+
+/// Notes as a reader should see them: Obsidian `%% comments %%` (like the
+/// `%% mc-links %%` footer) dropped and wiki-links shown as plain text.
+fn printable_markdown(body: &str, catalog: Option<&Catalog>) -> String {
+    let body = OBSIDIAN_COMMENT_RE.replace_all(body, "");
+    WIKILINK_RE
+        .replace_all(&body, |c: &regex::Captures| link_text(&c[0], catalog))
+        .into_owned()
 }
 
 /// Cover-page metadata for a print template, from frontmatter. Empty values
 /// are skipped when the cover page is rendered.
-fn meta_pairs(template: &PrintTemplate, fm: &serde_yaml::Value) -> Vec<(&'static str, String)> {
+fn meta_pairs(
+    template: &PrintTemplate,
+    fm: &serde_yaml::Value,
+    catalog: Option<&Catalog>,
+) -> Vec<(&'static str, String)> {
     let get = |key: &str| frontmatter::get_str(fm, key).unwrap_or("").to_string();
     let joined = |key: &str| frontmatter::get_string_list(fm, key).join(", ");
-    let links = |key: &str| frontmatter::get_link_list(fm, key).join(", ");
+    let links = |key: &str| {
+        frontmatter::get_string_list(fm, key)
+            .iter()
+            .map(|l| link_text(l, catalog))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
 
     match template {
         PrintTemplate::Standard => {
@@ -269,7 +462,10 @@ fn meta_pairs(template: &PrintTemplate, fm: &serde_yaml::Value) -> Vec<(&'static
             ]
         }
         PrintTemplate::Meeting => {
-            let participants: Vec<String> = get_attendees(fm).into_iter().map(|a| a.name).collect();
+            let participants: Vec<String> = get_attendees(fm, catalog)
+                .into_iter()
+                .map(|a| a.name)
+                .collect();
             vec![
                 ("Date", get("date")),
                 ("Time", get("time")),
@@ -299,8 +495,14 @@ fn meta_pairs(template: &PrintTemplate, fm: &serde_yaml::Value) -> Vec<(&'static
 }
 
 /// "Summary" section from the frontmatter `summary` field, if present.
-fn push_summary(doc: &mut genpdf::Document, fm: &serde_yaml::Value, pc: style::Color) {
-    let summary = frontmatter::get_str(fm, "summary").unwrap_or("").trim();
+fn push_summary(
+    doc: &mut genpdf::Document,
+    fm: &serde_yaml::Value,
+    pc: style::Color,
+    catalog: Option<&Catalog>,
+) {
+    let summary = printable_markdown(frontmatter::get_str(fm, "summary").unwrap_or(""), catalog);
+    let summary = summary.trim();
     if summary.is_empty() {
         return;
     }
@@ -316,12 +518,23 @@ fn push_summary(doc: &mut genpdf::Document, fm: &serde_yaml::Value, pc: style::C
     push_section_separator(doc);
 }
 
-/// Programmatic variant of `print_meeting` -- returns JSON instead of printing.
+/// Print a meeting for MCP: the output path is relative to the repo root and
+/// must stay inside it. Returns `{id, title, path}` (repo-relative path).
 pub fn print_meeting_programmatic(
     cfg: &ResolvedConfig,
     id: &str,
     output: Option<&str>,
 ) -> McResult<JsonValue> {
+    Ok(meeting_pdf(cfg, id, output, Access::Repo)?.to_json(cfg))
+}
+
+fn meeting_pdf(
+    cfg: &ResolvedConfig,
+    id: &str,
+    output: Option<&str>,
+    access: Access,
+) -> McResult<Printed> {
+    let out_path = output_path(cfg, output, format!("{id}.pdf"), access)?;
     let entity = data::find_entity_by_id(id, cfg)?;
     if entity.kind != EntityKind::Meeting {
         return Err(McError::usage(
@@ -339,8 +552,9 @@ pub fn print_meeting_programmatic(
     let pc = primary_color(cfg);
     let ac = accent_color(cfg);
     let mut doc = create_document(font_family, title, &cfg.brand.name, pc, ac);
-    let attendees = get_attendees(fm);
-    let meta_pairs = meta_pairs(&PrintTemplate::Meeting, fm);
+    let catalog = Catalog::load(cfg);
+    let attendees = get_attendees(fm, Some(&catalog));
+    let meta_pairs = meta_pairs(&PrintTemplate::Meeting, fm, Some(&catalog));
 
     // Cover page
     push_cover_page(
@@ -416,45 +630,46 @@ pub fn print_meeting_programmatic(
     }
 
     // Body content
-    render_markdown(&mut doc, &entity.body, pc);
+    render_markdown(
+        &mut doc,
+        &printable_markdown(&entity.body, Some(&catalog)),
+        pc,
+    );
 
     // Footer
     push_document_footer(&mut doc);
 
-    let path = write_pdf(doc, output, format!("{}.pdf", id))?;
-    Ok(serde_json::json!({
-        "id": id,
-        "title": title,
-        "path": path,
-    }))
+    write_pdf(doc, &out_path)?;
+    Ok(Printed {
+        id: Some(id.to_string()),
+        title: title.to_string(),
+        path: out_path,
+    })
 }
 
 // ---------------------------------------------------------------------------
 // Research PDF
 // ---------------------------------------------------------------------------
 
-fn print_research(
-    id: &str,
-    output: Option<&str>,
-    specific_file: Option<&str>,
-    cfg: &ResolvedConfig,
-) -> McResult<()> {
-    report_written(&print_research_programmatic(
-        cfg,
-        id,
-        output,
-        specific_file,
-    )?);
-    Ok(())
-}
-
-/// Programmatic variant of `print_research` -- returns JSON instead of printing.
+/// Print a research report for MCP: the output path is relative to the repo
+/// root and must stay inside it. Returns `{id, title, path}`.
 pub fn print_research_programmatic(
     cfg: &ResolvedConfig,
     id: &str,
     output: Option<&str>,
     file: Option<&str>,
 ) -> McResult<JsonValue> {
+    Ok(research_pdf(cfg, id, output, file, Access::Repo)?.to_json(cfg))
+}
+
+fn research_pdf(
+    cfg: &ResolvedConfig,
+    id: &str,
+    output: Option<&str>,
+    file: Option<&str>,
+    access: Access,
+) -> McResult<Printed> {
+    let out_path = output_path(cfg, output, format!("{id}-final-report.pdf"), access)?;
     let entity = data::find_entity_by_id(id, cfg)?;
     if entity.kind != EntityKind::Research {
         return Err(McError::usage(
@@ -471,7 +686,8 @@ pub fn print_research_programmatic(
     let pc = primary_color(cfg);
     let ac = accent_color(cfg);
     let mut doc = create_document(font_family, title, &cfg.brand.name, pc, ac);
-    let meta_pairs = meta_pairs(&PrintTemplate::Research, fm);
+    let catalog = Catalog::load(cfg);
+    let meta_pairs = meta_pairs(&PrintTemplate::Research, fm, Some(&catalog));
 
     // Cover page
     push_cover_page(
@@ -486,7 +702,7 @@ pub fn print_research_programmatic(
     );
 
     // Summary (page 2+)
-    push_summary(&mut doc, fm, pc);
+    push_summary(&mut doc, fm, pc, Some(&catalog));
 
     // Find final/ directory
     let source_dir = entity
@@ -512,7 +728,11 @@ pub fn print_research_programmatic(
             "{} No files in final/ directory, using entity file body.",
             "warning:".yellow().bold()
         );
-        render_markdown(&mut doc, &entity.body, pc);
+        render_markdown(
+            &mut doc,
+            &printable_markdown(&entity.body, Some(&catalog)),
+            pc,
+        );
     } else {
         report_files.sort();
         let total = report_files.len();
@@ -540,7 +760,7 @@ pub fn print_research_programmatic(
                 doc.push(elements::Break::new(0.3));
             }
 
-            render_markdown(&mut doc, &body, pc);
+            render_markdown(&mut doc, &printable_markdown(&body, Some(&catalog)), pc);
 
             if i + 1 < total {
                 push_section_separator(&mut doc);
@@ -552,32 +772,20 @@ pub fn print_research_programmatic(
     // Footer
     push_document_footer(&mut doc);
 
-    let path = write_pdf(doc, output, format!("{}-final-report.pdf", id))?;
-    Ok(serde_json::json!({
-        "id": id,
-        "title": title,
-        "path": path,
-    }))
+    write_pdf(doc, &out_path)?;
+    Ok(Printed {
+        id: Some(id.to_string()),
+        title: title.to_string(),
+        path: out_path,
+    })
 }
 
 // ---------------------------------------------------------------------------
 // File PDF (generic markdown file)
 // ---------------------------------------------------------------------------
 
-fn print_file(
-    path: &str,
-    output: Option<&str>,
-    template: &PrintTemplate,
-    title: Option<&str>,
-    cfg: &ResolvedConfig,
-) -> McResult<()> {
-    report_written(&print_file_programmatic(
-        cfg, path, output, template, title,
-    )?);
-    Ok(())
-}
-
-/// Programmatic variant of `print_file` -- returns JSON instead of printing.
+/// Print a Markdown file for MCP: `path` must be a visible `.md` file inside
+/// the repo and the output stays inside it too. Returns `{title, path}`.
 pub fn print_file_programmatic(
     cfg: &ResolvedConfig,
     path: &str,
@@ -585,8 +793,28 @@ pub fn print_file_programmatic(
     template: &PrintTemplate,
     title_override: Option<&str>,
 ) -> McResult<JsonValue> {
-    let file_path = resolve_input_path(cfg, path)
-        .ok_or_else(|| McError::not_found(format!("File not found: {}", path), None))?;
+    Ok(file_pdf(cfg, path, output, template, title_override, Access::Repo)?.to_json(cfg))
+}
+
+fn file_pdf(
+    cfg: &ResolvedConfig,
+    path: &str,
+    output: Option<&str>,
+    template: &PrintTemplate,
+    title_override: Option<&str>,
+    access: Access,
+) -> McResult<Printed> {
+    let file_path = match access {
+        Access::Cli => resolve_input_path(cfg, path)
+            .ok_or_else(|| McError::not_found(format!("File not found: {}", path), None))?,
+        Access::Repo => repo_input_path(cfg, path)?,
+    };
+    let stem = file_path
+        .file_stem()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_string();
+    let out_path = output_path(cfg, output, format!("{stem}.pdf"), access)?;
 
     let content = std::fs::read_to_string(&file_path)?;
 
@@ -622,9 +850,10 @@ pub fn print_file_programmatic(
         PrintTemplate::Sprint => "Sprint Report",
     };
 
+    let catalog = Catalog::load(cfg);
     let meta_pairs = fm
         .as_ref()
-        .map(|fm| meta_pairs(template, fm))
+        .map(|fm| meta_pairs(template, fm, Some(&catalog)))
         .unwrap_or_default();
 
     let font_family = load_fonts(cfg)?;
@@ -646,25 +875,46 @@ pub fn print_file_programmatic(
 
     // For research template: render summary before body if present
     if let (PrintTemplate::Research, Some(fm)) = (template, &fm) {
-        push_summary(&mut doc, fm, pc);
+        push_summary(&mut doc, fm, pc, Some(&catalog));
     }
 
     // Body content
-    render_markdown(&mut doc, &body, pc);
+    render_markdown(&mut doc, &printable_markdown(&body, Some(&catalog)), pc);
 
     // Footer
     push_document_footer(&mut doc);
 
-    let stem = file_path
-        .file_stem()
-        .unwrap_or_default()
-        .to_string_lossy()
-        .to_string();
-    let path = write_pdf(doc, output, format!("{}.pdf", stem))?;
-    Ok(serde_json::json!({
-        "title": title,
-        "path": path,
-    }))
+    write_pdf(doc, &out_path)?;
+    Ok(Printed {
+        id: None,
+        title,
+        path: out_path,
+    })
+}
+
+/// A Markdown file named by an MCP caller: relative to the repo root (an
+/// absolute path must point inside it), visible, and ending in `.md`.
+fn repo_input_path(cfg: &ResolvedConfig, path: &str) -> McResult<PathBuf> {
+    let root = cfg.root.canonicalize()?;
+    let file = root
+        .join(path)
+        .canonicalize()
+        .ok()
+        .filter(|f| f.is_file())
+        .ok_or_else(|| McError::not_found(format!("File not found: {path}"), None))?;
+    let allowed = file
+        .strip_prefix(&root)
+        .is_ok_and(|rel| visible_in_repo(rel, cfg))
+        && file
+            .extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case("md"));
+    if !allowed {
+        return Err(McError::usage(
+            format!("'{path}' is not a Markdown file inside the repository"),
+            Some("give the path of a visible .md file relative to the repo root".into()),
+        ));
+    }
+    Ok(file)
 }
 
 /// Resolve a user-supplied markdown path: as given (absolute or relative to
@@ -878,7 +1128,9 @@ struct Attendee {
 ///       company: Acme
 ///   OR
 ///     - Alice (Engineer, Acme)
-fn get_attendees(fm: &serde_yaml::Value) -> Vec<Attendee> {
+///
+/// Names may be wiki-links (`[[CONT-003-jane|Jane Doe]]`), shown as text.
+fn get_attendees(fm: &serde_yaml::Value, catalog: Option<&Catalog>) -> Vec<Attendee> {
     let seq = fm
         .as_mapping()
         .and_then(|m| m.get(serde_yaml::Value::String("attendees".into())))
@@ -891,11 +1143,12 @@ fn get_attendees(fm: &serde_yaml::Value) -> Vec<Attendee> {
     seq.iter()
         .filter_map(|item| {
             if let Some(map) = item.as_mapping() {
-                let name = map
-                    .get(serde_yaml::Value::String("name".into()))
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
+                let name = link_text(
+                    map.get(serde_yaml::Value::String("name".into()))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or(""),
+                    catalog,
+                );
                 let role = map
                     .get(serde_yaml::Value::String("role".into()))
                     .and_then(|v| v.as_str())
@@ -913,7 +1166,7 @@ fn get_attendees(fm: &serde_yaml::Value) -> Vec<Attendee> {
                 })
             } else {
                 item.as_str().map(|s| Attendee {
-                    name: s.to_string(),
+                    name: link_text(s, catalog),
                     role: String::new(),
                     company: String::new(),
                 })
@@ -1329,12 +1582,118 @@ mod tests {
             Path::new("m.md"),
         )
         .unwrap();
-        let pairs = meta_pairs(&PrintTemplate::Meeting, &fm);
+        let pairs = meta_pairs(&PrintTemplate::Meeting, &fm, None);
         let get = |k: &str| pairs.iter().find(|(l, _)| *l == k).map(|(_, v)| v.as_str());
         assert_eq!(get("Customers"), Some("CUST-001"));
         assert_eq!(get("Projects"), Some("PROJ-002, PROJ-003"));
         assert_eq!(get("Participants"), Some("Alice, Bob"));
         assert_eq!(get("Time"), Some(""));
+    }
+
+    #[test]
+    fn links_and_obsidian_comments_print_as_plain_text() {
+        let fm = frontmatter::parse_raw(
+            "attendees: ['[[florian-fromm|Florian Fromm]]', '[[CONT-003]]', Plain Name, {name: '[[x|Bob]]'}]\ncustomers: ['[[CUST-004|Villeroy & Boch]]']",
+            Path::new("m.md"),
+        )
+        .unwrap();
+        let pairs = meta_pairs(&PrintTemplate::Meeting, &fm, None);
+        let get = |k: &str| pairs.iter().find(|(l, _)| *l == k).map(|(_, v)| v.as_str());
+        assert_eq!(
+            get("Participants"),
+            Some("Florian Fromm, CONT-003, Plain Name, Bob")
+        );
+        assert_eq!(get("Customers"), Some("Villeroy & Boch"));
+
+        let body = "Notes on [[PROJ-001|the project]] and [[TASK-002]].\n\n%% private\nnote %%\nEnd.\n%% mc-links: [[CUST-004|Villeroy & Boch]] [[PROJ-001]] %%\n";
+        let out = printable_markdown(body, None);
+        assert_eq!(out, "Notes on the project and TASK-002.\n\n\nEnd.\n\n");
+    }
+
+    #[test]
+    fn link_text_uses_entity_names_from_the_catalog() {
+        let (_tmp, cfg) = setup();
+        new::create_customer(&cfg, &new::CustomerInput::new("Acme")).unwrap();
+        let mut input = new::MeetingInput::new("Kickoff");
+        input.customers = vec!["CUST-001".into()];
+        new::create_meeting(&cfg, &input).unwrap();
+        let catalog = Catalog::load(&cfg);
+        assert_eq!(link_text("[[MTG-001]]", Some(&catalog)), "Kickoff");
+        assert_eq!(link_text("MTG-001", Some(&catalog)), "Kickoff");
+        assert_eq!(link_text("[[MTG-001|Alias]]", Some(&catalog)), "Alias");
+        assert_eq!(link_text("[[CUST-009]]", Some(&catalog)), "CUST-009");
+    }
+
+    #[test]
+    fn mcp_prints_stay_inside_the_repo() {
+        let (tmp, cfg) = setup();
+        let outside = TempDir::new().unwrap();
+        let secret = outside.path().join("secret.md");
+        std::fs::write(&secret, "# Secret\n").unwrap();
+        let victim = outside.path().join("victim.txt");
+        std::fs::write(&victim, "precious\n").unwrap();
+        std::fs::write(tmp.path().join("notes.md"), "# Notes\n").unwrap();
+        std::fs::write(tmp.path().join("notes.txt"), "plain\n").unwrap();
+        let std = &PrintTemplate::Standard;
+        let print = |path: &str, output: Option<&str>| {
+            print_file_programmatic(&cfg, path, output, std, None).unwrap_err()
+        };
+
+        // Inputs: outside the root, hidden, not Markdown.
+        assert!(matches!(
+            print(secret.to_str().unwrap(), None),
+            McError::Usage { .. }
+        ));
+        assert!(matches!(
+            print("../secret.md", None),
+            McError::NotFound { .. }
+        ));
+        assert!(matches!(print("notes.txt", None), McError::Usage { .. }));
+        std::fs::create_dir_all(tmp.path().join(".git")).unwrap();
+        std::fs::write(tmp.path().join(".git/x.md"), "x").unwrap();
+        assert!(matches!(print(".git/x.md", None), McError::Usage { .. }));
+
+        // Outputs: escaping the root, absolute elsewhere, not a PDF, hidden.
+        for output in [
+            "../escape.pdf".to_string(),
+            outside.path().join("x.pdf").display().to_string(),
+            "notes.txt.pdf/../notes.txt".to_string(),
+            "report.txt".to_string(),
+            ".git/x.pdf".to_string(),
+        ] {
+            let err = print("notes.md", Some(&output));
+            assert!(matches!(err, McError::Usage { .. }), "{output}: {err}");
+        }
+        assert!(matches!(
+            print("notes.md", Some(victim.to_str().unwrap())),
+            McError::Usage { .. }
+        ));
+        std::fs::write(tmp.path().join("fake.pdf"), "not a pdf").unwrap();
+        assert!(matches!(
+            print("notes.md", Some("fake.pdf")),
+            McError::Conflict { .. }
+        ));
+        let err = print_meeting_programmatic(&cfg, "MTG-001", Some("../outside/overwritten.pdf"))
+            .unwrap_err();
+        assert!(!matches!(err, McError::EntityNotFound(_)), "{err}");
+        assert_eq!(std::fs::read_to_string(&victim).unwrap(), "precious\n");
+    }
+
+    #[test]
+    fn mcp_print_writes_inside_the_repo_and_returns_a_relative_path() {
+        if discover_system_fonts().is_none() {
+            return;
+        }
+        let (tmp, cfg) = setup();
+        std::fs::write(tmp.path().join("notes.md"), "# Notes\n").unwrap();
+        let std = &PrintTemplate::Standard;
+        let result =
+            print_file_programmatic(&cfg, "notes.md", Some("archive/notes.pdf"), std, None)
+                .unwrap();
+        assert_eq!(result["path"], "archive/notes.pdf");
+        assert!(tmp.path().join("archive/notes.pdf").is_file());
+        // Re-printing over an existing PDF is fine.
+        print_file_programmatic(&cfg, "notes.md", Some("archive/notes.pdf"), std, None).unwrap();
     }
 
     #[test]
@@ -1378,6 +1737,7 @@ mod tests {
             return;
         }
         let (tmp, cfg) = setup();
+        new::create_customer(&cfg, &new::CustomerInput::new("Acme")).unwrap();
         let mut input = new::MeetingInput::new("Kickoff");
         input.attendees = vec!["Alice".into(), "Bob".into()];
         input.customers = vec!["CUST-001".into()];

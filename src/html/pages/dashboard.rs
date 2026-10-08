@@ -12,11 +12,11 @@ use crate::html::components::{
     progress_bar_planned, section_title, status_bar, status_lamp,
 };
 use crate::html::format::{
-    capitalize, entity_href, escape_html, fmt_date, fmt_day_relative, href_with, iso_week,
-    parse_date, plural, status_label, time_ago,
+    capitalize, entity_href, escape_html, files_href, fmt_date, fmt_day_relative, href_with,
+    iso_week, parse_date, plural, status_label, time_ago,
 };
 use crate::html::layout::layout;
-use crate::html::{all_kinds, is_cancelled, is_closed, Page, NAV_GROUPS};
+use crate::html::{is_cancelled, is_closed, Page, NAV_GROUPS};
 use chrono::NaiveDate;
 use regex::Regex;
 use std::path::Path;
@@ -57,6 +57,7 @@ pub fn dashboard_page(page: &Page, recent: &[RecentFile]) -> String {
     }
     body.push_str("</div>");
 
+    body.push_str(&super::milestones::overview(page));
     body.push_str(&status_board(page));
     body.push_str(&activity(page, recent));
 
@@ -246,8 +247,14 @@ fn sprint_card(page: &Page, s: &EntityRecord) -> String {
         .catalog
         .of_kind(EntityKind::Task)
         .filter(|t| {
-            frontmatter::strip_wikilink(frontmatter::get_str_or(&t.frontmatter, "sprint", ""))
-                == s.id
+            // Older files name the sprint by its title instead of its ID.
+            let sprint = frontmatter::strip_wikilink(
+                frontmatter::get_str_or(&t.frontmatter, "sprint", "").trim(),
+            );
+            sprint == s.id
+                || frontmatter::get_str(&s.frontmatter, "title").is_some_and(|title| {
+                    !sprint.is_empty() && title.trim().eq_ignore_ascii_case(sprint)
+                })
         })
         .collect();
     let done = tasks
@@ -375,6 +382,17 @@ fn activity(page: &Page, recent: &[RecentFile]) -> String {
                 entity_href(&f.id),
                 escape_html(if f.name.is_empty() { &f.id } else { &f.name })
             )
+        } else if let Some(href) = f
+            .path
+            .strip_prefix(&page.cfg.root)
+            .ok()
+            .and_then(files_href)
+        {
+            // Other notes in the repo open as rendered files.
+            format!(
+                r#"<a class="name-link activity-name" href="{href}">{}</a>"#,
+                escape_html(shown)
+            )
         } else {
             format!(
                 r#"<span class="activity-name">{}</span>"#,
@@ -386,14 +404,21 @@ fn activity(page: &Page, recent: &[RecentFile]) -> String {
         } else {
             id_chip(&f.id)
         };
-        let ctx = extract_path_context(&f.path, &page.cfg.root);
-        let ctx = if ctx.is_empty() {
-            String::new()
-        } else {
-            format!(
-                r#"<span class="activity-context">{}</span>"#,
-                escape_html(&ctx)
-            )
+        let ctx = match extract_path_context(&f.path, &page.cfg.root) {
+            // The customer or project folder a file sits in, unless it's
+            // that entity's own file.
+            Some(dir) => match page.catalog.canonical_id(&dir) {
+                Some(id) if id == f.id => String::new(),
+                Some(id) if page.catalog.name(id).is_some() => format!(
+                    r#"<span class="activity-context">in {}</span>"#,
+                    page.catalog.ref_html(id)
+                ),
+                _ => format!(
+                    r#"<span class="activity-context">in {}</span>"#,
+                    escape_html(&strip_id_prefix(&dir).replace('-', " "))
+                ),
+            },
+            None => String::new(),
         };
         html.push_str(&format!(
             r#"<li><span class="activity-kind">{}</span><span class="activity-main">{primary}{id}{ctx}</span><span class="activity-time" title="{}">{}</span></li>"#,
@@ -410,8 +435,10 @@ fn activity(page: &Page, recent: &[RecentFile]) -> String {
 fn detect_entity_type(id: &str, path: &Path, cfg: &ResolvedConfig) -> &'static str {
     if !id.is_empty() {
         // Longest prefix wins so e.g. "TASK" doesn't shadow a longer prefix.
-        let mut candidates: Vec<(&str, &'static str)> =
-            all_kinds().map(|k| (k.prefix(cfg), k.label())).collect();
+        let mut candidates: Vec<(&str, &'static str)> = EntityKind::ALL
+            .iter()
+            .map(|k| (k.prefix(cfg), k.label()))
+            .collect();
         candidates.sort_by_key(|c| std::cmp::Reverse(c.0.len()));
         for (prefix, label) in candidates {
             if id.starts_with(&format!("{prefix}-")) {
@@ -444,25 +471,19 @@ fn detect_entity_type(id: &str, path: &Path, cfg: &ResolvedConfig) -> &'static s
     }
 }
 
-/// Extract a short context string from a path (e.g. parent customer name).
-fn extract_path_context(path: &Path, root: &Path) -> String {
+/// The customer or project folder a file sits in (`CUST-001-acme-inc`), if any.
+fn extract_path_context(path: &Path, root: &Path) -> Option<String> {
     let rel = path.strip_prefix(root).unwrap_or(path);
     let rel_str = rel.to_string_lossy();
     let parts: Vec<&str> = rel_str.split('/').collect();
     for (i, part) in parts.iter().enumerate() {
-        if *part == "customers" || *part == "projects" {
-            // Only meaningful for files nested below the entity's own file.
-            if parts.len() > i + 2 {
-                if let Some(parent) = parts.get(i + 1) {
-                    let name = strip_id_prefix(parent);
-                    if !name.is_empty() {
-                        return name.replace('-', " ");
-                    }
-                }
+        if (*part == "customers" || *part == "projects") && parts.len() > i + 2 {
+            if let Some(parent) = parts.get(i + 1).filter(|p| !p.is_empty()) {
+                return Some(parent.to_string());
             }
         }
     }
-    String::new()
+    None
 }
 
 /// Strip entity ID prefix from a directory name (e.g. "CUST-001-acme" → "acme").
@@ -488,13 +509,47 @@ mod tests {
             extract_path_context(
                 &PathBuf::from("/r/customers/CUST-001-acme-inc/contacts/CONT-001.md"),
                 &root
-            ),
-            "acme inc"
+            )
+            .as_deref(),
+            Some("CUST-001-acme-inc")
         );
         assert_eq!(
             extract_path_context(&PathBuf::from("/r/customers/CUST-001.md"), &root),
-            ""
+            None
         );
+    }
+
+    #[test]
+    fn activity_links_documents_and_names_their_folder() {
+        let (_d, cfg) = test_config();
+        let dir = cfg.projects_dir.join("PROJ-003-sprind-next");
+        let mut project = rec(
+            EntityKind::Project,
+            "PROJ-003",
+            "name: SPRIND Next Frontier",
+        );
+        project.source_path = dir.join("PROJ-003.md");
+        let cat = catalog(vec![project], &cfg);
+        let page = Page::new(&cfg, &cat, "");
+        let file = |id: &str, name: &str, path: std::path::PathBuf| RecentFile {
+            id: id.into(),
+            name: name.into(),
+            modified: SystemTime::now(),
+            path,
+        };
+        let html = activity(
+            &page,
+            &[
+                file("PROJ-003", "SPRIND Next Frontier", dir.join("PROJ-003.md")),
+                file("", "Track 1 brief", dir.join("application/track 1.md")),
+            ],
+        );
+        // The project's own file doesn't repeat itself as context.
+        assert_eq!(html.matches("activity-context").count(), 1, "{html}");
+        assert!(html.contains(
+            r#"<span class="activity-context">in <a class="ref" href="/entity/PROJ-003""#
+        ));
+        assert!(html.contains(r#"<a class="name-link activity-name" href="/files/projects/PROJ-003-sprind-next/application/track%201.md">Track 1 brief</a>"#), "{html}");
     }
 
     #[test]

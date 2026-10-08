@@ -32,14 +32,16 @@ pub use brand::{brand_css, font_face_css, prefix_base_path, rewrite_css_urls};
 pub use catalog::{display_name, Catalog};
 pub use components::{status_badge, status_tone};
 pub use edit::PRIORITIES;
+pub use layout::{asset_version, APP_CSS, APP_JS};
 pub use markdown::render_markdown;
-pub use notes::comment_html;
+pub use notes::{comment_html, MAX_COMMENT};
 pub use pages::calendar::{calendar_page, CalendarQuery};
 pub use pages::dashboard::dashboard_page;
 pub use pages::detail::{detail_fragments, detail_page};
-pub use pages::errors::{error_page, not_found_page};
+pub use pages::errors::{error_page, not_available_page, not_found_page};
 pub use pages::files::file_page;
 pub use pages::lists::{list_page, sort_entities, ListQuery};
+pub use pages::milestones::milestones_page;
 pub use pages::preview::{preview_card, preview_not_found};
 pub use pages::search::{index_json, palette_json, search_page};
 pub use pages::tasks::{board_page, task_card, tasks_list_page, TaskFilterOptions, TaskQuery};
@@ -84,7 +86,12 @@ impl<'a> Page<'a> {
 const NAV_GROUPS: &[(&str, &[EntityKind])] = &[
     (
         "Work",
-        &[EntityKind::Task, EntityKind::Sprint, EntityKind::Meeting],
+        &[
+            EntityKind::Task,
+            EntityKind::Milestone,
+            EntityKind::Sprint,
+            EntityKind::Meeting,
+        ],
     ),
     (
         "Clients",
@@ -106,22 +113,8 @@ fn go_key(kind: EntityKind) -> Option<&'static str> {
         EntityKind::Project => "p",
         EntityKind::Research => "r",
         EntityKind::Sprint => "s",
-        EntityKind::Contact | EntityKind::Proposal => return None,
+        EntityKind::Contact | EntityKind::Proposal | EntityKind::Milestone => return None,
     })
-}
-
-fn all_kinds() -> impl Iterator<Item = EntityKind> {
-    [
-        EntityKind::Customer,
-        EntityKind::Project,
-        EntityKind::Meeting,
-        EntityKind::Research,
-        EntityKind::Task,
-        EntityKind::Sprint,
-        EntityKind::Proposal,
-        EntityKind::Contact,
-    ]
-    .into_iter()
 }
 
 /// Statuses that mean a task needs no more work.

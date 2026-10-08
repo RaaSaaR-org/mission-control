@@ -6,7 +6,7 @@ use crate::comments::{self, Comment};
 use crate::data::{self, EntityRecord};
 use crate::entity::EntityKind;
 use crate::frontmatter;
-use crate::html::catalog::{display_name, split_wikilink};
+use crate::html::catalog::display_name;
 use crate::html::components::{
     icon, id_chip, lamp, owner_html, priority_html, progress_bar, status_badge,
 };
@@ -30,7 +30,11 @@ const MAX_ECHOED_ID: usize = 40;
 /// Slugged references (`CONT-003-jane-doe`) resolve to their entity.
 pub fn preview_card(page: &Page, id: &str) -> Option<String> {
     let catalog = page.catalog;
-    let id = catalog.canonical_id(id).unwrap_or(id);
+    let id = catalog
+        .resolve(id, None)
+        .id()
+        .or_else(|| catalog.canonical_id(id))
+        .unwrap_or(id);
     let rec = catalog.records.iter().find(|r| r.id == id)?;
     Some(card(rec, page))
 }
@@ -156,6 +160,11 @@ fn fields(rec: &EntityRecord, page: &Page) -> Vec<(&'static str, String)> {
             out.push(("Start", day("start_date")));
             out.push(("Target", day("target_date").or_else(|| day("end_date"))));
         }
+        EntityKind::Milestone => {
+            out.push(("Start", day("start_date")));
+            out.push(("Deadline", day("due_date")));
+            out.push(("Description", text("description")));
+        }
         EntityKind::Sprint => {
             out.push(("Start", day("start_date")));
             out.push(("End", day("end_date")));
@@ -235,15 +244,7 @@ fn attendees(rec: &EntityRecord, page: &Page) -> Option<String> {
     let items = frontmatter::get_string_list(&rec.frontmatter, "attendees");
     let names: Vec<String> = items
         .iter()
-        .map(|raw| {
-            let (target, alias) = split_wikilink(raw);
-            page.catalog
-                .canonical_id(target)
-                .and_then(|id| page.catalog.name(id))
-                .or(alias)
-                .unwrap_or(target)
-                .to_string()
-        })
+        .map(|raw| page.catalog.ref_label(raw))
         .filter(|n| !n.trim().is_empty())
         .collect();
     if names.is_empty() {

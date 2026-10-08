@@ -1,7 +1,7 @@
 //! REST API for MissionControl.
 //!
-//! Exposes the entity surface (CRUD where supported, plus task move,
-//! checklists, comments, validate, index) over HTTP/JSON. Mirrors the MCP tool surface so any
+//! Exposes the entity surface (CRUD where supported, plus task field
+//! updates, move and next, checklists, comments, validate, index) over HTTP/JSON. Mirrors the MCP tool surface so any
 //! client that knows mc semantics can drive it without spawning a process
 //! per request.
 //!
@@ -19,10 +19,11 @@
 //! per-process mutex is correct and trivially auditable. If contention ever
 //! shows up, the next step is sharding by entity kind, then by repo subtree.
 //!
-//! Cross-process safety is enforced by an exclusive `flock` on
-//! `<repo>/.mc-api.lock` (`<repo>/.mc/.mc-api.lock` when embedded) — a
-//! second `mc api serve` against the same repo fails fast at startup instead
-//! of handing out duplicate IDs.
+//! An exclusive `flock` on `<repo>/.mc-api.lock` (`<repo>/.mc/.mc-api.lock`
+//! when embedded) makes a second `mc api serve` against the same repo fail
+//! fast at startup. Writes from other processes (CLI, `mc mcp`, dashboard)
+//! are serialized by the repo-wide write lock in [`crate::lock`], which every
+//! shared write function holds.
 //!
 //! # Auth
 //!
@@ -33,8 +34,9 @@
 //!
 //! # Errors
 //!
-//! Every error response is `application/problem+json` (RFC 7807). See
-//! [`error::ProblemJson`] and [`error::problem_from_mc_error`].
+//! Every error response is `application/problem+json` (RFC 7807), including
+//! axum's own rejections, unknown routes and wrong methods. See
+//! [`error::ProblemJson`] and [`error::problem_responses`].
 
 pub mod auth;
 pub mod error;
@@ -49,7 +51,7 @@ use axum::extract::{DefaultBodyLimit, Request};
 use axum::http::HeaderName;
 use axum::middleware;
 use axum::response::IntoResponse;
-use axum::routing::{get, post};
+use axum::routing::{get, patch, post};
 use axum::{Json, Router};
 use tokio::sync::Mutex;
 use tower::ServiceBuilder;
@@ -142,7 +144,7 @@ impl Modify for SecurityAddon {
 #[openapi(
     info(
         title = "MissionControl REST API",
-        version = "0.2.0",
+        version = env!("CARGO_PKG_VERSION"),
         description = "HTTP/JSON surface for mc — list, create, and update tasks, customers, projects, meetings, research, sprints, proposals, and contacts.",
         license(name = "MIT")
     ),
@@ -160,12 +162,15 @@ impl Modify for SecurityAddon {
         handlers::notes::add_comment,
         handlers::tasks::list_tasks,
         handlers::tasks::move_task,
+        handlers::tasks::next_tasks,
+        handlers::tasks::update_task,
         handlers::creates::create_customer,
         handlers::creates::create_project,
         handlers::creates::create_meeting,
         handlers::creates::create_research,
         handlers::creates::create_task,
         handlers::creates::create_sprint,
+        handlers::creates::create_milestone,
         handlers::creates::create_proposal,
         handlers::creates::create_contact,
         handlers::maintenance::rebuild_index,
@@ -193,9 +198,13 @@ impl Modify for SecurityAddon {
         crate::api::schemas::CreateResearch,
         crate::api::schemas::CreateTask,
         crate::api::schemas::CreateSprint,
+        crate::api::schemas::CreateMilestone,
         crate::api::schemas::CreateProposal,
         crate::api::schemas::CreateContact,
         crate::api::schemas::MoveTaskBody,
+        crate::api::schemas::UpdateTask,
+        crate::api::schemas::UpdateTaskResult,
+        crate::api::schemas::NextTasksResult,
         crate::api::schemas::CheckItemView,
         crate::api::schemas::ChecklistResponse,
         crate::api::schemas::CheckItemBody,
@@ -207,7 +216,7 @@ impl Modify for SecurityAddon {
     tags(
         (name = "meta", description = "Repository metadata (config, status)"),
         (name = "entities", description = "Generic entity CRUD"),
-        (name = "tasks", description = "Task list and status transitions"),
+        (name = "tasks", description = "Task list, next actionable tasks, field updates and status transitions"),
         (name = "maintenance", description = "Index rebuild and validation")
     )
 )]
@@ -267,6 +276,8 @@ pub fn build_router(cfg: ResolvedConfig, server_cfg: &ApiServerConfig) -> Router
             "/v1/tasks",
             get(handlers::tasks::list_tasks).post(handlers::creates::create_task),
         )
+        .route("/v1/tasks/next", get(handlers::tasks::next_tasks))
+        .route("/v1/tasks/{id}", patch(handlers::tasks::update_task))
         .route("/v1/tasks/{id}/move", post(handlers::tasks::move_task))
         // Create endpoints for the remaining kinds. We use plural-form paths
         // here so they do not collide with the generic GET /v1/entities/{kind}
@@ -276,20 +287,33 @@ pub fn build_router(cfg: ResolvedConfig, server_cfg: &ApiServerConfig) -> Router
         .route("/v1/meetings", post(handlers::creates::create_meeting))
         .route("/v1/research", post(handlers::creates::create_research))
         .route("/v1/sprints", post(handlers::creates::create_sprint))
+        .route("/v1/milestones", post(handlers::creates::create_milestone))
         .route("/v1/proposals", post(handlers::creates::create_proposal))
         .route("/v1/contacts", post(handlers::creates::create_contact))
         .route("/v1/index", post(handlers::maintenance::rebuild_index))
-        .route("/v1/validate", post(handlers::maintenance::run_validate))
-        .layer(middleware::from_fn_with_state(
+        // Validation only reads, so GET works with read-only tokens; POST
+        // stays for existing clients and is treated as a read too.
+        .route(
+            "/v1/validate",
+            get(handlers::maintenance::run_validate).post(handlers::maintenance::run_validate),
+        )
+        // Only matched routes need a token; unknown paths are a plain 404.
+        .route_layer(middleware::from_fn_with_state(
             auth_state.clone(),
             auth::require_auth,
         ))
-        .with_state(state);
+        .with_state(state.clone());
 
     let request_id_header = HeaderName::from_static("x-request-id");
 
     Router::new().merge(public).merge(v1).layer(
         ServiceBuilder::new()
+            // Outermost, so it also sees the timeout's 408 and every
+            // rejection produced further in.
+            .layer(middleware::from_fn_with_state(
+                state,
+                error::problem_responses,
+            ))
             .layer(SetRequestIdLayer::new(
                 request_id_header.clone(),
                 MakeRequestUuid,

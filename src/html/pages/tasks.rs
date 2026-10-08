@@ -23,18 +23,50 @@ use std::collections::{BTreeSet, HashMap};
 /// Cards shown in full in the done lane before the rest collapse.
 const DONE_VISIBLE: usize = 10;
 
+/// Sort key that puts open work first (in progress, review, to do,
+/// backlog), finished work last, then by priority, due date and ID.
+pub(crate) fn task_order(t: &EntityRecord) -> (u8, u32, String, String) {
+    let fm = &t.frontmatter;
+    let rank = match frontmatter::get_str_or(fm, "status", "") {
+        "in-progress" => 0,
+        "review" => 1,
+        "todo" => 2,
+        "backlog" => 3,
+        "done" | "completed" => 5,
+        "cancelled" | "canceled" => 6,
+        _ => 4,
+    };
+    let due = parse_date(frontmatter::get_str_or(fm, "due_date", "")).map_or_else(
+        || "9999-99-99".to_string(),
+        |d| d.format("%Y-%m-%d").to_string(),
+    );
+    (
+        rank,
+        data::get_number(fm, "priority").unwrap_or(3),
+        due,
+        t.id.clone(),
+    )
+}
+
 /// Filter options derived from all tasks for populating dropdowns.
 pub struct TaskFilterOptions {
     pub owners: Vec<String>,
     pub projects: Vec<String>,
     pub sprints: Vec<String>,
+    pub milestones: Vec<String>,
 }
 
 impl TaskFilterOptions {
     pub fn from_tasks(tasks: &[EntityRecord]) -> Self {
+        Self::from_records(tasks)
+    }
+
+    /// Options from any collection of task records.
+    pub fn from_records<'a>(tasks: impl IntoIterator<Item = &'a EntityRecord>) -> Self {
         let mut owners = BTreeSet::new();
         let mut projects = BTreeSet::new();
         let mut sprints = BTreeSet::new();
+        let mut milestones = BTreeSet::new();
         for t in tasks {
             let owner = frontmatter::get_str_or(&t.frontmatter, "owner", "");
             if !owner.is_empty() {
@@ -44,6 +76,11 @@ impl TaskFilterOptions {
                 if !p.is_empty() {
                     projects.insert(p);
                 }
+            }
+            if let Some(m) =
+                frontmatter::get_link_str(&t.frontmatter, "milestone").filter(|s| !s.is_empty())
+            {
+                milestones.insert(m.to_string());
             }
             let sprint =
                 frontmatter::strip_wikilink(frontmatter::get_str_or(&t.frontmatter, "sprint", ""));
@@ -55,6 +92,7 @@ impl TaskFilterOptions {
             owners: owners.into_iter().collect(),
             projects: projects.into_iter().collect(),
             sprints: sprints.into_iter().collect(),
+            milestones: milestones.into_iter().collect(),
         }
     }
 }
@@ -68,6 +106,7 @@ pub struct TaskQuery<'a> {
     pub project: Option<&'a str>,
     pub customer: Option<&'a str>,
     pub sprint: Option<&'a str>,
+    pub milestone: Option<&'a str>,
     /// Sort field for the list view (`id`, `name`, `priority`, `due_date`).
     pub sort: Option<&'a str>,
     /// `asc` or `desc`.
@@ -82,6 +121,7 @@ impl TaskQuery<'_> {
             && self.project.is_none()
             && self.customer.is_none()
             && self.sprint.is_none()
+            && self.milestone.is_none()
     }
 
     /// Link to `path` with these filters plus extra pairs.
@@ -94,6 +134,7 @@ impl TaskQuery<'_> {
             ("project", self.project.unwrap_or("")),
             ("customer", self.customer.unwrap_or("")),
             ("sprint", self.sprint.unwrap_or("")),
+            ("milestone", self.milestone.unwrap_or("")),
         ];
         pairs.extend_from_slice(extra);
         href_with(path, &pairs)
@@ -151,6 +192,23 @@ fn task_toolbar(
             .collect();
         cells.push_str(&filter_cell("owner", "Owner", &owners, query.owner));
     }
+    // Every milestone, not only those tasks already use: the timeline links
+    // to `?milestone=` for milestones without tasks, and the active filter
+    // must stay visible (and survive the next auto-submit) there too.
+    let milestones: BTreeSet<String> = catalog
+        .of_kind(EntityKind::Milestone)
+        .map(|m| m.id.clone())
+        .chain(options.milestones.iter().cloned())
+        .collect();
+    if !milestones.is_empty() {
+        let milestones: Vec<String> = milestones.into_iter().collect();
+        cells.push_str(&filter_cell(
+            "milestone",
+            "Milestone",
+            &named(&milestones),
+            query.milestone,
+        ));
+    }
     if !options.sprints.is_empty() {
         cells.push_str(&filter_cell(
             "sprint",
@@ -160,7 +218,11 @@ fn task_toolbar(
         ));
     }
 
-    let mut html = format!(r#"<form class="toolbar filter-form" method="get" action="{action}">"#);
+    // autocomplete=off: going Back must not restore stale filter values over
+    // the page the server rendered.
+    let mut html = format!(
+        r#"<form class="toolbar filter-form" method="get" action="{action}" autocomplete="off">"#
+    );
     if !cells.is_empty() {
         html.push_str(&format!(r#"<div class="filter-group">{cells}</div>"#));
     }
@@ -229,7 +291,11 @@ pub fn tasks_list_page(
     let mut body = page_header(
         "Tasks",
         &meta,
-        &format!("{}{density}{}", new_task_action(page), view_toggle(false)),
+        &format!(
+            "{}{density}{}",
+            new_task_action(page),
+            filtered_view_toggle(query, false)
+        ),
     );
 
     if total == 0 {
@@ -274,17 +340,24 @@ pub fn tasks_list_page(
         sorted("Priority", "col-priority", "priority"),
         th("Owner", "col-owner", None),
         th("Project", "col-project", None),
+        th("Milestone", "col-milestone", None),
         th("Sprint", "col-sprint", None),
         sorted("Due", "col-date", "due_date"),
     ]
     .concat();
 
-    let rows: String = tasks
-        .iter()
+    // Without a chosen sort, open work comes first.
+    let mut ordered: Vec<&EntityRecord> = tasks.iter().collect();
+    if query.sort.is_none() {
+        ordered.sort_by_cached_key(|t| task_order(t));
+    }
+    let rows: String = ordered
+        .into_iter()
         .map(|e| {
             let fm = &e.frontmatter;
             let status = frontmatter::get_str_or(fm, "status", "");
             let priority = data::get_number(fm, "priority").unwrap_or(3);
+            let milestone = frontmatter::get_link_str(fm,"milestone").filter(|s| !s.is_empty()).map(|m| page.catalog.ref_html(m)).unwrap_or_default();
             let sprint = frontmatter::get_str_or(fm, "sprint", "");
             let sprint = if sprint.trim().is_empty() {
                 String::new()
@@ -292,7 +365,7 @@ pub fn tasks_list_page(
                 refs_clip(page, &[sprint.to_string()])
             };
             format!(
-                r#"<tr data-row data-id="{id}" data-status="{st}"><td class="col-id">{}</td><td class="col-name">{}{}</td><td class="col-status">{}</td><td class="col-priority">{}</td><td class="col-owner">{}</td><td class="col-project">{}</td><td class="col-sprint">{sprint}</td><td class="col-date">{}</td></tr>"#,
+                r#"<tr data-row data-id="{id}" data-status="{st}"><td class="col-id">{}</td><td class="col-name">{}{}</td><td class="col-status">{}</td><td class="col-priority">{}</td><td class="col-owner">{}</td><td class="col-project">{}</td><td class="col-milestone">{milestone}</td><td class="col-sprint">{sprint}</td><td class="col-date">{}</td></tr>"#,
                 id_chip(&e.id),
                 entity_name_link(e),
                 tag_chips_compact(&frontmatter::get_string_list(fm, "tags"), None, 2),
@@ -310,6 +383,20 @@ pub fn tasks_list_page(
     body.push_str(&table_count(tasks.len(), total));
 
     layout(page, "Tasks", "/tasks", "", &body)
+}
+
+/// The board/list switch, keeping the active filters. `query.href` is
+/// already attribute-safe (percent-encoded values joined with `&amp;`).
+fn filtered_view_toggle(query: &TaskQuery, board: bool) -> String {
+    view_toggle(board)
+        .replace(
+            "href=\"/tasks\"",
+            &format!("href=\"{}\"", query.href("/tasks", &[])),
+        )
+        .replace(
+            "href=\"/tasks/list\"",
+            &format!("href=\"{}\"", query.href("/tasks/list", &[])),
+        )
 }
 
 fn new_task_action(page: &Page) -> String {
@@ -369,7 +456,11 @@ pub fn board_page(
     let mut body = page_header(
         "Tasks",
         &format!("{shown} on the board, cancelled hidden"),
-        &format!("{}{}", new_task_action(page), view_toggle(true)),
+        &format!(
+            "{}{}",
+            new_task_action(page),
+            filtered_view_toggle(query, true)
+        ),
     );
     if total_tasks(page) == 0 {
         body.push_str(&no_tasks_yet(page));
@@ -621,5 +712,41 @@ mod tests {
         assert!(html.contains("filter-cell is-set"));
         assert!(html.contains("Showing <span data-filter-count>1</span> of 14"));
         assert!(html.contains("reset-link"));
+        // Going Back must not restore stale filter values.
+        assert!(html.contains(
+            r#"class="toolbar filter-form" method="get" action="/tasks/list" autocomplete="off""#
+        ));
+    }
+
+    #[test]
+    fn task_list_without_sort_puts_open_work_first() {
+        let (_d, cfg) = test_config();
+        let mut all = tasks();
+        all.push(rec(
+            EntityKind::Task,
+            "TASK-003",
+            "title: Later\nstatus: todo\npriority: 1\ndue_date: 2099-01-01",
+        ));
+        all.push(rec(
+            EntityKind::Task,
+            "TASK-004",
+            "title: Gone\nstatus: cancelled",
+        ));
+        all.reverse();
+        let cat = catalog(tasks(), &cfg);
+        let page = Page::new(&cfg, &cat, "");
+        let html = tasks_list_page(
+            &page,
+            &all,
+            &TaskQuery::default(),
+            &TaskFilterOptions::from_tasks(&all),
+        );
+        let pos = |id: &str| html.find(&format!(r#"data-id="{id}""#)).unwrap();
+        // In progress, then to do by priority and due date, then done, then cancelled.
+        assert!(pos("TASK-002") < pos("TASK-001"));
+        assert!(pos("TASK-001") < pos("TASK-003"));
+        assert!(pos("TASK-003") < pos("TASK-100"));
+        assert!(pos("TASK-100") < pos("TASK-111"));
+        assert!(pos("TASK-111") < pos("TASK-004"));
     }
 }

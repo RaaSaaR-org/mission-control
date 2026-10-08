@@ -15,6 +15,7 @@ use crate::api::AppState;
 use crate::data;
 use crate::entity::EntityKind;
 use crate::error::McError;
+use crate::mcp::{entity_json, repo_relative, resolve_entity, status_filter};
 
 /// Resolve the path segment to an `EntityKind`, or 400.
 fn parse_kind(s: &str) -> Result<EntityKind, ApiError> {
@@ -22,22 +23,23 @@ fn parse_kind(s: &str) -> Result<EntityKind, ApiError> {
         .map_err(|_| ApiError::BadRequest(format!("unknown entity kind: {s}")))
 }
 
-/// Look up `id` and require it to be of the kind named in the path. The ID's
-/// prefix is checked before touching the filesystem.
+/// Look up `id` and require it to be of the kind named in the path. IDs are
+/// forgiving like the CLI's (`task-7`, `7` → `TASK-007`); the prefix is
+/// checked before touching the filesystem.
 pub(crate) fn find_of_kind(
     state: &AppState,
     kind_str: &str,
     id: &str,
 ) -> Result<data::EntityRecord, ApiError> {
     let kind = parse_kind(kind_str)?;
-    let id_kind = EntityKind::from_id(id, &state.cfg)?;
-    if id_kind != kind {
-        return Err(ApiError::Domain(McError::EntityNotFound(format!(
-            "{id} (not a {})",
-            kind.label()
-        ))));
-    }
-    Ok(data::find_entity_by_id(id, &state.cfg)?)
+    resolve_entity(&state.cfg, id, Some(kind)).map_err(|e| match e {
+        // Malformed input keeps its `invalid-id` problem type.
+        McError::Usage { message, hint } => ApiError::Domain(McError::InvalidId(match hint {
+            Some(hint) => format!("{message} ({hint})"),
+            None => message,
+        })),
+        e => ApiError::Domain(e),
+    })
 }
 
 #[utoipa::path(
@@ -49,7 +51,7 @@ pub(crate) fn find_of_kind(
         EntityListQuery
     ),
     responses(
-        (status = 200, description = "Array of entities (frontmatter as JSON, free-form per kind)"),
+        (status = 200, description = "Array of entities: frontmatter as JSON (free-form per kind, wiki-link brackets stripped) plus `_kind` and `_source` (path relative to the repo root)"),
         (status = 400, body = crate::api::error::ProblemJson, description = "Unknown entity kind"),
         (status = 401, body = crate::api::error::ProblemJson),
         (status = 403, body = crate::api::error::ProblemJson, description = "Kind not available in this repo mode")
@@ -66,30 +68,14 @@ pub async fn list_entities(
         return Err(ApiError::Domain(McError::not_available(kind, &state.cfg)));
     }
 
-    let entries = data::collect_filtered(
-        kind,
-        &state.cfg,
-        query.status.as_deref(),
-        query.tag.as_deref(),
-    )?;
+    let status = query
+        .status
+        .as_deref()
+        .map(|s| status_filter(&state.cfg, kind, s));
+    let entries =
+        data::collect_filtered(kind, &state.cfg, status.as_deref(), query.tag.as_deref())?;
 
-    let json: Vec<serde_json::Value> = entries
-        .iter()
-        .map(|e| {
-            let mut v = data::yaml_to_json(&e.frontmatter);
-            if let Some(obj) = v.as_object_mut() {
-                obj.insert(
-                    "_kind".into(),
-                    serde_json::Value::String(e.kind.label().into()),
-                );
-                obj.insert(
-                    "_source".into(),
-                    serde_json::Value::String(e.source_path.display().to_string()),
-                );
-            }
-            v
-        })
-        .collect();
+    let json: Vec<serde_json::Value> = entries.iter().map(|e| entity_json(e, &state.cfg)).collect();
 
     Ok(Json(serde_json::Value::Array(json)))
 }
@@ -100,7 +86,7 @@ pub async fn list_entities(
     tag = "entities",
     params(
         ("kind" = String, Path, description = "Entity kind"),
-        ("id" = String, Path, description = "Entity ID, e.g. CUST-001")
+        ("id" = String, Path, description = "Entity ID, e.g. CUST-001 (case and zero-padding are forgiven: cust-1)")
     ),
     responses(
         (status = 200, body = EntityResponse),
@@ -120,8 +106,8 @@ pub async fn get_entity(
     Ok(Json(EntityResponse {
         kind: record.kind.label().into(),
         id: record.id.clone(),
-        source_path: record.source_path.display().to_string(),
-        frontmatter: data::yaml_to_json(&record.frontmatter),
+        source_path: repo_relative(&state.cfg, &record.source_path),
+        frontmatter: frontmatter_json(&record, &state.cfg),
         body_preview,
     }))
 }
@@ -156,6 +142,20 @@ pub async fn get_entity_raw(
         HeaderValue::from_static("text/markdown; charset=utf-8"),
     );
     Ok((StatusCode::OK, headers, raw))
+}
+
+/// The frontmatter as list endpoints show it (wiki-link brackets stripped),
+/// without their `_kind`/`_source` additions.
+fn frontmatter_json(
+    record: &data::EntityRecord,
+    cfg: &crate::config::ResolvedConfig,
+) -> serde_json::Value {
+    let mut v = entity_json(record, cfg);
+    if let Some(obj) = v.as_object_mut() {
+        obj.remove("_kind");
+        obj.remove("_source");
+    }
+    v
 }
 
 fn preview(body: &str, max: usize) -> String {

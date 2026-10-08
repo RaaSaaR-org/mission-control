@@ -8,7 +8,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use utoipa::ToSchema;
 
-/// Generic create response — `{id, name, path}` for entity creates.
+/// Generic create response — `{id, name, path}` for entity creates, with
+/// `path` relative to the repo root.
 ///
 /// `name` accepts the legacy `title` field on inputs from creators that use
 /// `title` (meeting, research, task, sprint, proposal). For clients consuming
@@ -21,12 +22,12 @@ pub struct CreateResult {
     pub path: String,
 }
 
-impl From<crate::commands::new::Created> for CreateResult {
-    fn from(c: crate::commands::new::Created) -> Self {
+impl CreateResult {
+    pub fn new(c: crate::commands::new::Created, cfg: &crate::config::ResolvedConfig) -> Self {
         CreateResult {
+            path: crate::mcp::repo_relative(cfg, &c.path),
             id: c.id,
             name: c.name,
-            path: c.path.display().to_string(),
         }
     }
 }
@@ -36,6 +37,7 @@ pub struct MoveTaskResult {
     pub id: String,
     pub old_status: String,
     pub new_status: String,
+    /// The task file, relative to the repo root.
     pub path: String,
 }
 
@@ -47,6 +49,7 @@ pub struct IndexResult {
     pub research: usize,
     pub tasks: usize,
     pub sprints: usize,
+    pub milestones: usize,
     pub proposals: usize,
     pub contacts: usize,
 }
@@ -61,6 +64,8 @@ pub struct ValidationReport {
 pub struct ValidationIssue {
     pub path: String,
     pub check: String,
+    /// `error` (fails validation) or `warning` (e.g. a link to a missing entity).
+    pub severity: String,
     pub message: String,
 }
 
@@ -114,6 +119,7 @@ pub struct PrefixView {
     pub research: String,
     pub task: String,
     pub sprint: String,
+    pub milestone: String,
     pub proposal: String,
     pub contact: String,
 }
@@ -126,6 +132,7 @@ pub struct StatusView {
     pub research: Vec<String>,
     pub task: Vec<String>,
     pub sprint: Vec<String>,
+    pub milestone: Vec<String>,
     pub proposal: Vec<String>,
     pub contact: Vec<String>,
 }
@@ -137,7 +144,10 @@ pub struct StatusView {
 pub struct EntityResponse {
     pub kind: String,
     pub id: String,
+    /// The entity file, relative to the repo root.
     pub source_path: String,
+    /// Frontmatter as JSON, wiki-link brackets stripped (`PROJ-001`, not
+    /// `[[PROJ-001]]`).
     pub frontmatter: JsonValue,
     pub body_preview: String,
 }
@@ -260,12 +270,37 @@ pub struct CreateTask {
     /// Sprint ID, e.g. `SPR-001`.
     #[serde(default)]
     pub sprint: Option<String>,
+    /// Milestone ID or unique title, e.g. `MS-001` (must exist; stored as the ID).
+    #[serde(default)]
+    pub milestone: Option<String>,
     /// Task IDs this task depends on, comma-separated string or array.
     #[serde(default, deserialize_with = "comma_list")]
     pub depends_on: Option<String>,
     /// `YYYY-MM-DD`.
     #[serde(default)]
     pub due_date: Option<String>,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct CreateMilestone {
+    pub title: String,
+    /// What the milestone delivers (stored in the frontmatter).
+    #[serde(default)]
+    pub description: Option<String>,
+    /// Planned start, `YYYY-MM-DD`.
+    #[serde(default)]
+    pub start_date: Option<String>,
+    /// Deadline, `YYYY-MM-DD`; must not be before `start_date`.
+    #[serde(default)]
+    pub due_date: Option<String>,
+    #[serde(default)]
+    pub owner: Option<String>,
+    /// Defaults to the first configured milestone status (`planned`).
+    #[serde(default)]
+    pub status: Option<String>,
+    /// Project IDs, comma-separated string or array.
+    #[serde(default, deserialize_with = "comma_list")]
+    pub projects: Option<String>,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -354,6 +389,10 @@ pub struct TaskListQuery {
     pub priority: Option<u32>,
     #[serde(default)]
     pub sprint: Option<String>,
+    /// Milestone ID or unique title (404 when unknown); an empty value lists
+    /// tasks without a milestone.
+    #[serde(default)]
+    pub milestone: Option<String>,
     #[serde(default)]
     pub owner: Option<String>,
 }
@@ -363,6 +402,87 @@ pub struct MoveTaskBody {
     pub status: String,
     #[serde(default)]
     pub sprint: Option<String>,
+}
+
+/// Change some of a task's fields; omitted fields stay as they are, empty
+/// values clear. Validated like task creation; nothing is written if any
+/// value is invalid.
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct UpdateTask {
+    /// New title (single line; also replaces the note's `# Title` heading).
+    #[serde(default)]
+    pub title: Option<String>,
+    /// New status; moves the file like `POST /v1/tasks/{id}/move`.
+    #[serde(default)]
+    pub status: Option<String>,
+    /// 1 (critical) to 4 (low).
+    #[serde(default)]
+    pub priority: Option<u32>,
+    #[serde(default)]
+    pub owner: Option<String>,
+    /// Sprint ID or title, stored as the ID.
+    #[serde(default)]
+    pub sprint: Option<String>,
+    /// Milestone ID or unique title, stored as the ID.
+    #[serde(default)]
+    pub milestone: Option<String>,
+    /// `YYYY-MM-DD`.
+    #[serde(default)]
+    pub due_date: Option<String>,
+    /// Project IDs replacing the linked projects, comma-separated string or
+    /// array (`project` works too).
+    #[serde(default, alias = "project", deserialize_with = "comma_list")]
+    pub projects: Option<String>,
+    /// Customer IDs replacing the linked customers, comma-separated string or
+    /// array (`customer` works too).
+    #[serde(default, alias = "customer", deserialize_with = "comma_list")]
+    pub customers: Option<String>,
+    /// Tags replacing the task's tags, comma-separated string or array.
+    #[serde(default, deserialize_with = "comma_list")]
+    pub tags: Option<String>,
+    /// Task IDs replacing the dependencies, comma-separated string or array.
+    #[serde(default, deserialize_with = "comma_list")]
+    pub depends_on: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct UpdateTaskResult {
+    pub id: String,
+    /// Fields whose value actually changed (`status` last); empty when the
+    /// task already had every given value.
+    pub changed: Vec<String>,
+    pub old_status: String,
+    pub new_status: String,
+    /// The task file, relative to the repo root.
+    pub path: String,
+}
+
+#[derive(Debug, Deserialize, utoipa::IntoParams)]
+pub struct NextTasksQuery {
+    /// Only tasks linked to this project ID.
+    #[serde(default)]
+    pub project: Option<String>,
+    /// Only tasks linked to this customer ID.
+    #[serde(default)]
+    pub customer: Option<String>,
+    /// Only tasks of this owner (case-insensitive).
+    #[serde(default)]
+    pub owner: Option<String>,
+    /// How many tasks to return (default 5).
+    #[serde(default)]
+    pub limit: Option<usize>,
+}
+
+/// `GET /v1/tasks/next` payload.
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct NextTasksResult {
+    /// Actionable tasks, best first, shaped like `GET /v1/tasks` items.
+    pub tasks: Vec<JsonValue>,
+    /// Number of actionable tasks in total (before `limit`).
+    pub actionable: usize,
+    /// Open tasks waiting on unfinished dependencies.
+    pub blocked: usize,
 }
 
 /// One Markdown checklist item (`- [ ] text`).
@@ -446,6 +566,7 @@ pub struct CommentResult {
     pub comment: CommentView,
     /// Comments on the entity after this one was added.
     pub count: usize,
+    /// The entity file, relative to the repo root.
     pub path: String,
 }
 

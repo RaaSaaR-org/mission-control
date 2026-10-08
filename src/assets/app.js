@@ -112,6 +112,7 @@
   // ── API ───────────────────────────────────────────────────────────
   // Writes carry X-MC-Request; the server rejects writes without it.
   var known = null; // last repo version seen
+  var stale = false; // an outside change landed just before one of our writes
   var writeSeq = 0;
   function api(method, path, body) {
     var opts = { method: method, credentials: "same-origin", headers: { Accept: "application/json" } };
@@ -128,7 +129,15 @@
           err.field = data.field;
           throw err;
         }
-        if (data.version) { known = data.version; writeSeq++; hideNotice(); invalidatePreviews(); }
+        if (data.version) {
+          // The write's own version would hide a change made just before it,
+          // so compare what the server saw before writing; refresh later.
+          if (data.prev_version && known !== null && data.prev_version !== known) stale = true;
+          known = data.version;
+          writeSeq++;
+          hideNotice("offline");
+          invalidatePreviews();
+        }
         return data;
       });
     }, function () {
@@ -282,6 +291,16 @@
   doc.addEventListener("input", function (e) {
     if (e.target.matches && e.target.matches("input[data-filter]")) applyFilter(e.target);
   });
+  // Back/forward: re-enable fields disabled for the submit, and show the
+  // filters of the page as rendered, not as the browser remembers them.
+  window.addEventListener("pageshow", function (e) {
+    $$(".filter-form [disabled]").forEach(function (f) { f.disabled = false; });
+    if (!e.persisted) return;
+    $$("select[data-autosubmit]").forEach(function (sel) {
+      var d = $$("option", sel).filter(function (o) { return o.defaultSelected; })[0];
+      sel.value = d ? d.value : "";
+    });
+  });
   doc.addEventListener("keydown", function (e) {
     var input = e.target;
     if (e.key !== "Escape" || !input.matches || !input.matches("input[data-filter]") || !input.value) return;
@@ -338,11 +357,14 @@
     siteInput.select();
   }
 
+  var palOpener = null; // focus returns here when the palette closes
   mc.openPalette = function (q) {
     if (!palette || typeof palette.showModal !== "function") { focusSearch(); return; }
     if (palette.open) { palInput.select(); return; }
     if (dialogOpen()) return;
     closeMenu();
+    var active = doc.activeElement;
+    palOpener = active && active !== doc.body && active !== main ? active : null;
     palInput.value = q || "";
     palSel = 0;
     palette.showModal();
@@ -382,10 +404,15 @@
     var title = String(e.t || "").toLowerCase();
     var tags = (e.tags || []).map(function (t) { return String(t).toLowerCase(); });
     var num = (id.match(/-(\d+)$/) || [])[1];
+    var pre = id.split("-")[0];
     var total = 0;
     for (var i = 0; i < terms.length; i++) {
       var term = terms[i], s = 0;
+      // IDs typed the CLI way: task-72, task72, TASK-0072.
+      var loose = num && /^([a-z]+)-?0*(\d+)$/.exec(term);
       if (id === term) s = 1000;
+      else if (loose && parseInt(loose[2], 10) === parseInt(num, 10) &&
+        (pre === loose[1] || (loose[1].length >= 2 && pre.indexOf(loose[1]) === 0))) s = 900;
       else if (num && /^\d+$/.test(term) && parseInt(term, 10) === parseInt(num, 10)) s = 700;
       else if (id.indexOf(term) === 0) s = 500;
       else if (title.indexOf(term) !== -1 || wordStart(title, term)) s = scoreText(title, term);
@@ -446,6 +473,20 @@
     var pageHits = pages.map(function (p) { return { type: "page", page: p, score: scoreLabel(p.label, terms) }; })
       .filter(function (x) { return x.score > 0; });
     var byScore = function (a, b) { return b.score - a.score; };
+    // Equal matches: the nearest upcoming date first, then the most recent
+    // past one, then undated entities.
+    var todayIso = isoDay(new Date());
+    var dateRank = function (e) {
+      var d = /^\d{4}-\d{2}-\d{2}$/.test(e.d || "") ? e.d : "";
+      if (!d) return [2, 0];
+      var diff = Math.abs(Date.parse(d) - Date.parse(todayIso));
+      return [d >= todayIso ? 0 : 1, diff];
+    };
+    var byScoreThenDate = function (a, b) {
+      if (b.score !== a.score) return b.score - a.score;
+      var ra = dateRank(a.e), rb = dateRank(b.e);
+      return ra[0] - rb[0] || ra[1] - rb[1];
+    };
     if (palData) {
       var kinds = {};
       palData.entities.forEach(function (e) {
@@ -454,7 +495,7 @@
         (kinds[e.k] = kinds[e.k] || []).push({ type: "entity", e: e, score: s });
       });
       var entityGroups = (palData.kinds || []).filter(function (k) { return kinds[k.k]; }).map(function (k) {
-        var items = kinds[k.k].sort(byScore);
+        var items = kinds[k.k].sort(byScoreThenDate);
         return { label: k.label, best: items[0].score, items: items.slice(0, 8) };
       });
       // The kind holding the best match comes first.
@@ -512,13 +553,17 @@
     });
     return span;
   }
+  // Same month names as the server-rendered pages ("Sep", never "Sept").
+  var MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
   function shortDate(d) {
     var m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(d || "");
-    if (!m) return "";
-    var date = new Date(+m[1], +m[2] - 1, +m[3]);
-    var opts = { day: "numeric", month: "short" };
-    if (+m[1] !== new Date().getFullYear()) opts.year = "numeric";
-    return date.toLocaleDateString("en-GB", opts);
+    if (!m || +m[2] < 1 || +m[2] > 12) return "";
+    var year = +m[1] !== new Date().getFullYear() ? " " + m[1] : "";
+    return +m[3] + " " + MONTHS[+m[2] - 1] + year;
+  }
+  function isoDay(date) {
+    var pad = function (n) { return (n < 10 ? "0" : "") + n; };
+    return date.getFullYear() + "-" + pad(date.getMonth() + 1) + "-" + pad(date.getDate());
   }
 
   function renderPalette() {
@@ -636,12 +681,31 @@
     });
     // Clicking the backdrop closes the palette.
     palette.addEventListener("click", function (e) { if (e.target === palette) palette.close(); });
-    if (siteInput) {
-      siteInput.addEventListener("focus", function () {
-        if (typeof palette.showModal !== "function") return;
-        var q = siteInput.value;
-        siteInput.blur();
-        mc.openPalette(q);
+    palette.addEventListener("close", function () {
+      var back = palOpener;
+      palOpener = null;
+      // An action may have opened another dialog meanwhile; it keeps focus.
+      if (back && back.isConnected && !dialogOpen() && doc.activeElement !== back) back.focus({ preventScroll: true });
+    });
+    // The sidebar search opens the palette when clicked or typed into, but
+    // Tab passes through it to the navigation.
+    if (siteInput && typeof palette.showModal === "function") {
+      siteInput.addEventListener("mousedown", function (e) {
+        if (e.button !== 0) return;
+        e.preventDefault();
+        mc.openPalette(siteInput.value);
+        // Opened by pointer: don't bring the (touch) keyboard back on close.
+        palOpener = null;
+      });
+      siteInput.addEventListener("keydown", function (e) {
+        if (e.isComposing || e.metaKey || e.ctrlKey || e.altKey) return;
+        if (e.key === "Enter" || e.key === "ArrowDown") {
+          e.preventDefault();
+          mc.openPalette(siteInput.value);
+        } else if (e.key.length === 1) {
+          e.preventDefault();
+          mc.openPalette(siteInput.value + e.key);
+        }
       });
     }
     // Warm the cache once the page is idle so the first open is instant.
@@ -689,11 +753,11 @@
     clearErrors(form);
     // Prefill from where the user is: a hub's detail page or the active filters.
     var hub = $(".detail[data-entity-kind]");
-    if (hub && /^(project|customer|sprint)$/.test(hub.dataset.entityKind)) {
+    if (hub && /^(project|customer|sprint|milestone)$/.test(hub.dataset.entityKind)) {
       setField(form, hub.dataset.entityKind, hub.dataset.entityId);
     }
     $$(".filter-form select").forEach(function (s) {
-      if (s.value && /^(project|sprint|status|priority)$/.test(s.name)) setField(form, s.name, s.value);
+      if (s.value && /^(project|sprint|milestone|status|priority)$/.test(s.name)) setField(form, s.name, s.value);
       if (s.value && s.name === "owner") setField(form, "owner", s.value);
     });
     Object.keys(preset || {}).forEach(function (k) { setField(form, k, preset[k]); });
@@ -715,7 +779,7 @@
     var v = formValues(form);
     if (!v.title) { form.elements.title.focus(); return; }
     var body = { title: v.title };
-    ["status", "owner", "project", "customer", "sprint", "due_date"].forEach(function (k) {
+    ["status", "owner", "project", "customer", "sprint", "milestone", "due_date"].forEach(function (k) {
       if (v[k]) body[k] = v[k];
     });
     if (v.priority) body.priority = parseInt(v.priority, 10);
@@ -736,7 +800,19 @@
         var link = $(".kanban-card", inserted);
         if (link && !dialogOpen()) link.focus();
       } else if (!$("#board")) {
-        softRefresh(true);
+        // Refresh once "Create another" is done, not under the open dialog.
+        var dlg = form.closest("dialog");
+        if (dlg && dlg.open) {
+          if (!dlg.dataset.refreshOnClose) {
+            dlg.dataset.refreshOnClose = "1";
+            dlg.addEventListener("close", function () {
+              delete dlg.dataset.refreshOnClose;
+              softRefresh(true);
+            }, { once: true });
+          }
+        } else {
+          softRefresh(true);
+        }
       }
       mc.toast("Created " + id + ": " + data.task.title, "positive", { label: "Open", href: base + data.href });
     }, function (err) {
@@ -858,8 +934,15 @@
       mc.toast(msg, "positive", isUndo ? null : {
         label: "Undo",
         onClick: function () {
+          // The board may have been re-rendered since: undo on the live card.
+          var live = $('.kanban-item[data-id="' + id.replace(/["\\]/g, "") + '"]');
+          if (live && live !== current) { moveTask(live, from, true); return; }
           // A card moved off the board (e.g. cancelled) comes back to its lane.
-          if (!current.parentNode && fromLane) placeInLane(current, fromLane);
+          if (!current.isConnected) {
+            var back = laneFor(from);
+            if (!back) return;
+            placeInLane(current, back);
+          }
           moveTask(current, from, true);
         }
       });
@@ -993,6 +1076,13 @@
     if (menu && !menu.contains(e.target) && !(menuBtn && menuBtn.contains(e.target))) closeMenu();
   });
   window.addEventListener("resize", function () { closeMenu(); });
+  // The flight plan's fade (phones) goes once it's scrolled to the end.
+  doc.addEventListener("scroll", function (e) {
+    var t = e.target;
+    if (t.classList && t.classList.contains("fp-scroll")) {
+      t.classList.toggle("at-end", t.scrollLeft + t.clientWidth >= t.scrollWidth - 2);
+    }
+  }, true);
   window.addEventListener("scroll", function () { closeMenu(); }, true);
 
   // ── Task edit form ────────────────────────────────────────────────
@@ -1041,6 +1131,14 @@
       if (block && data.html.title_block) block.replaceWith(el(data.html.title_block));
       var rail = $(".detail-sidebar");
       if (rail && data.html.rail) rail.replaceWith(el(data.html.rail));
+      var h1 = $(".detail-title");
+      if (h1 && data.task && data.task.title && h1.textContent !== data.task.title) {
+        h1.textContent = data.task.title;
+        var art = $(".detail[data-entity-id]");
+        if (art) art.dataset.entityTitle = data.task.title;
+        var sep = doc.title.lastIndexOf(" – ");
+        doc.title = data.task.title + " (" + id + ")" + (sep !== -1 ? doc.title.slice(sep) : "");
+      }
       var newBlock = $(".title-block");
       if (newBlock) {
         newBlock.classList.add("is-updated");
@@ -1181,7 +1279,8 @@
   }
   doc.addEventListener("keydown", function (e) {
     if (e.defaultPrevented || e.isComposing) return;
-    var mod = e.metaKey || e.ctrlKey;
+    // On a Mac, Ctrl+K in a text field is the system's "delete to end of line".
+    var mod = e.metaKey || (e.ctrlKey && !(isMac && typing(e.target)));
     if (mod && !e.altKey && !e.shiftKey && (e.key === "k" || e.key === "K")) {
       e.preventDefault();
       if (palette && palette.open) palette.close(); else mc.openPalette();
@@ -1471,6 +1570,16 @@
         var filters = {};
         $$("input[data-filter]", main).forEach(function (i) { filters[i.getAttribute("data-filter")] = i.value; });
         var openDetails = $$("details", main).map(function (d) { return d.open; });
+        // Keep the reader's place: sideways scroll, keyboard focus, j/k row.
+        var SCROLLERS = ".kanban-board, .fp-scroll, .table-wrap";
+        var scrolls = $$(SCROLLERS, main).map(function (x) { return x.scrollLeft; });
+        var a = doc.activeElement;
+        var holder = a && a !== main && main.contains(a) && a.closest("[data-id]");
+        var focusId = holder ? holder.dataset.id : null;
+        var focusSel = !holder ? null : a.classList.contains("card-move") ? ".card-move"
+          : a.tagName.toLowerCase() + (a.classList.length ? "." + a.classList[0] : "");
+        var cursorRow = cursor !== -1 ? cursorRows()[cursor] : null;
+        var cursorId = cursorRow ? cursorRow.dataset.id : null;
         main.innerHTML = nextMain.innerHTML;
         var nav = $(".main-nav"), nextNav = next.querySelector(".main-nav");
         if (nav && nextNav) nav.innerHTML = nextNav.innerHTML;
@@ -1486,7 +1595,17 @@
           var v = filters[i.getAttribute("data-filter")];
           if (v) { i.value = v; applyFilter(i); }
         });
+        $$(SCROLLERS, main).forEach(function (x, i) { if (scrolls[i]) x.scrollLeft = scrolls[i]; });
+        if (focusId) {
+          var again = $$("[data-id]", main).filter(function (x) { return x.dataset.id === focusId; })[0];
+          var target = again && (again.matches(focusSel) ? again : $(focusSel, again) || again);
+          if (target && target.focus) target.focus({ preventScroll: true });
+        }
         cursor = -1;
+        if (cursorId) {
+          cursor = cursorRows().map(function (r) { return r.dataset.id; }).indexOf(cursorId);
+          if (cursor !== -1) cursorRows()[cursor].classList.add("is-cursor");
+        }
         invalidatePalette();
         hidePreview();
         invalidatePreviews();
@@ -1512,7 +1631,7 @@
         if (known === null) { known = d.version; return; }
         if (d.version === known) {
           // A change seen while busy is applied once the page is idle again.
-          if (noticeKind === "changed" && !busyUi()) softRefresh(true);
+          if ((noticeKind === "changed" || stale) && !busyUi()) { stale = false; softRefresh(true); }
           return;
         }
         known = d.version;

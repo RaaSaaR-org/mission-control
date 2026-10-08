@@ -21,7 +21,7 @@
 
 @font-face {
     font-family: "Archivo";
-    src: url("/assets/archivo.woff2") format("woff2");
+    src: url("archivo.woff2") format("woff2"); /* next to app.css */
     font-weight: 100 900;
     font-stretch: 62% 125%;
     font-display: swap;
@@ -340,7 +340,8 @@ select option { color: var(--mc-text-primary); background: var(--mc-surface-rais
     view-transition-name: sidebar;
 }
 
-.nav-toggle { position: absolute; opacity: 0; pointer-events: none; }
+/* Hidden (and out of the Tab order) until the phone layout shows its label. */
+.nav-toggle { position: absolute; opacity: 0; pointer-events: none; visibility: hidden; }
 .sidebar-top .nav-toggle-label, .sidebar-top .topbar-search { display: none; }
 
 .sidebar-top {
@@ -704,6 +705,11 @@ select option { color: var(--mc-text-primary); background: var(--mc-surface-rais
 }
 .filter-cell:last-child { border-right: 0; }
 .filter-cell:focus-within { background: var(--mc-surface-muted); }
+/* The select draws no outline of its own; ring the cell instead (inset, as
+   the group clips anything outside). */
+.filter-cell:has(select:focus-visible) {
+    box-shadow: 0 -1px 0 var(--mc-border-light), inset 0 0 0 2px var(--mc-focus);
+}
 
 .filter-label {
     font-size: var(--fs-sm);
@@ -952,6 +958,25 @@ a.tag:hover { color: var(--mc-text-primary); text-decoration: none; }
 .ref:hover { color: var(--mc-blue-text); text-decoration: underline; }
 .plain-link { color: var(--mc-blue-text); }
 .ref-plain { color: var(--mc-text-secondary); }
+/* A wikilink whose ID now belongs to someone else (see Catalog::resolve). */
+.ref-stale { text-decoration: underline dotted var(--mc-amber); text-underline-offset: 3px; }
+.ref-warn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 14px;
+    height: 14px;
+    margin-left: 4px;
+    border-radius: 50%;
+    background: var(--mc-amber-bg);
+    color: var(--mc-amber-text);
+    font-size: 10px;
+    font-weight: 700;
+    line-height: 1;
+    vertical-align: 1px;
+    cursor: help;
+}
+.ref-warn::before { content: "!"; }
 .refs .more {
     margin-left: 2px;
     color: var(--mc-text-muted);
@@ -1209,6 +1234,7 @@ a.tag:hover { color: var(--mc-text-primary); text-decoration: none; }
 }
 .activity-main .name-link, .activity-name { overflow: hidden; text-overflow: ellipsis; }
 .activity-context { font-size: var(--fs-sm); color: var(--mc-text-muted); overflow: hidden; text-overflow: ellipsis; }
+.activity-context .ref { color: var(--mc-text-secondary); }
 .activity-time { font-size: var(--fs-sm); color: var(--mc-text-muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
 
 /* ── Flight plan (signature) ──────────────────────────────────────── */
@@ -1959,6 +1985,29 @@ details[open] > summary::before { transform: rotate(45deg); }
 .col-when { width: 120px; }
 .data-table .col-when .when { padding: 4px 0; }
 .col-tags { min-width: 120px; }
+/* Contact and reference columns keep their text whole before the name
+   column takes what's left. */
+.data-table td.col-email .clip { max-width: 36ch; }
+.data-table td.col-refs { white-space: nowrap; }
+.data-table td.col-refs .clip { max-width: 32ch; }
+
+/* Meetings by date: the magenta "now" line between upcoming and past. */
+.data-table tbody tr.today-divider td { height: auto; padding: 0; border-bottom: 0; background: none; }
+.today-divider span {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 12px;
+    font-size: var(--fs-xs);
+    font-weight: 600;
+    letter-spacing: .04em;
+    text-transform: uppercase;
+    color: var(--mc-route);
+}
+.today-divider span::after { content: ""; flex: 1; height: 2px; background: var(--mc-route); }
+.past-scheduled { display: inline-flex; align-items: center; gap: 6px; }
+.past-scheduled .badge { opacity: .55; }
+.past-scheduled::after { content: "Needs update"; font-size: var(--fs-xs); font-weight: 500; color: var(--mc-amber-text); white-space: nowrap; }
 
 .table-count {
     margin-top: 12px;
@@ -2022,6 +2071,7 @@ html.density-compact .kanban-card-title { -webkit-line-clamp: 2; line-clamp: 2; 
     border-right: 1px solid var(--mc-border-light);
     box-shadow: 0 -1px 0 var(--mc-border-light);
 }
+.tb-cell:last-child { border-right: 0; }
 .tb-label { font-size: var(--fs-sm); font-weight: 500; line-height: 16px; color: var(--mc-text-muted); }
 .tb-value {
     display: flex;
@@ -2058,6 +2108,9 @@ html.density-compact .kanban-card-title { -webkit-line-clamp: 2; line-clamp: 2; 
 }
 .detail-empty { margin-bottom: 16px; }
 .notes-title { margin-top: 40px; }
+/* Hub pages whose notes open with their own heading get no "Notes" title,
+   just the same room after the related lists. */
+.related-section + .detail-body, .related-section + .checklist-progress { margin-top: 40px; }
 
 .detail-sidebar {
     position: sticky;
@@ -2076,7 +2129,11 @@ html.density-compact .kanban-card-title { -webkit-line-clamp: 2; line-clamp: 2; 
 }
 .field dt { font-size: var(--fs-sm); line-height: 20px; color: var(--mc-text-muted); }
 .field dd { margin: 0; min-width: 0; font-size: var(--fs-base); overflow-wrap: anywhere; }
-.value-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
+.value-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+/* Dependencies: status lamp, name, ID; finished ones recede. */
+.dep { line-height: 20px; overflow-wrap: break-word; }
+.dep .entity-id { margin-left: 6px; white-space: nowrap; }
+.dep.is-done .ref { color: var(--mc-text-muted); }
 .detail-source { margin-top: 12px; }
 .file-doc .detail-source { margin: -8px 0 24px; }
 .detail-source code {
@@ -2179,7 +2236,11 @@ html.density-compact .kanban-card-title { -webkit-line-clamp: 2; line-clamp: 2; 
 .prose li > input[type="checkbox"]:first-child { position: absolute; top: 5.5px; left: -20px; margin: 0; }
 .prose table {
     display: block;
+    /* The frame hugs the table; wide tables scroll inside it. */
+    width: fit-content;
     max-width: 100%;
+    /* Words stay whole (no "€80.0 / 00"); a table too wide scrolls. */
+    overflow-wrap: break-word;
     overflow-x: auto;
     border-collapse: separate;
     border-spacing: 0;
@@ -2825,6 +2886,7 @@ dialog.sheet .sheet-body.form { padding: 20px; }
     .kanban-column { scroll-snap-align: start; }
 
     .fp-track { min-width: 720px; }
+    .nav-toggle { visibility: visible; }
     .board-row { grid-template-columns: 140px minmax(0, 1fr); gap: 16px; }
     .row-filter { margin-left: 0; flex: 1 1 200px; }
 }
@@ -2839,16 +2901,40 @@ dialog.sheet .sheet-body.form { padding: 20px; }
     .page-title, .detail-title { font-size: 22px; line-height: 28px; }
     .overview-grid { grid-template-columns: minmax(0, 1fr); }
     .panel { padding: 0 16px 8px; }
-    .filter-group { flex-direction: column; width: 100%; }
-    .filter-cell { border-right: 0; border-bottom: 1px solid var(--mc-border-light); }
-    .filter-cell:last-child { border-bottom: 0; }
-    .toolbar .filter-cell select { flex: 1; max-width: none; }
+    /* Filters two by two, so the first rows of the list stay in view. */
+    .filter-group { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); width: 100%; }
+    .filter-cell { min-width: 0; border-right: 0; }
+    .filter-cell:nth-child(odd):not(:last-child) { border-right: 1px solid var(--mc-border-light); }
+    .filter-cell:last-child:nth-child(odd) { grid-column: 1 / -1; }
+    .toolbar .filter-cell select { flex: 1; min-width: 0; max-width: none; }
     .row-filter { width: 100%; flex-basis: 100%; }
     .board-row { grid-template-columns: minmax(0, 1fr); gap: 8px; }
     .board-label { justify-content: flex-start; }
     .board-total { font-size: var(--fs-lg); line-height: 24px; }
     .activity li { grid-template-columns: minmax(0, 1fr) auto; }
     .activity-kind { display: none; }
+    /* Titles get the full width and two lines: series like "Jour Fixe
+       (9/13)" differ only at the end. */
+    .activity-main { flex-wrap: wrap; row-gap: 2px; white-space: normal; }
+    .activity-context { display: none; }
+    .activity-main .name-link, .activity-name, .item .name-link {
+        display: -webkit-box;
+        flex: 1 1 100%;
+        -webkit-line-clamp: 2;
+        line-clamp: 2;
+        -webkit-box-orient: vertical;
+        white-space: normal;
+        overflow-wrap: anywhere;
+    }
+    /* The six-week strip: about three weeks in view, fading out where it
+       scrolls on. */
+    .fp-track { min-width: 520px; }
+    .fp-scroll {
+        -webkit-mask-image: linear-gradient(to right, #000 88%, transparent);
+        mask-image: linear-gradient(to right, #000 88%, transparent);
+        scroll-snap-type: x proximity;
+    }
+    .fp-scroll.at-end { -webkit-mask-image: none; mask-image: none; }
     .item { grid-template-columns: 72px minmax(0, 1fr); gap: 12px; }
     .related-list li { grid-template-columns: minmax(0, 1fr) auto; }
     .related-status { display: none; }
@@ -2859,6 +2945,8 @@ dialog.sheet .sheet-body.form { padding: 20px; }
     .fp-body { grid-template-columns: 56px minmax(0, 1fr); }
     .fp-older { padding: 0 8px; }
     .title-block { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .title-block .tb-cell:nth-child(2n) { border-right: 0; }
+    .title-block .tb-cell:last-child:nth-child(odd) { grid-column: 1 / -1; border-right: 0; }
     .field { grid-template-columns: 96px minmax(0, 1fr); }
     .toast-region { left: 16px; }
     .form-grid { grid-template-columns: minmax(0, 1fr); }
@@ -2895,6 +2983,9 @@ dialog.sheet .sheet-body.form { padding: 20px; }
         font-size: var(--fs-sm);
     }
     .table-wrap .data-table tbody td:empty { display: none; }
+    .table-wrap .data-table tbody td.col-refs { white-space: normal; }
+    .table-wrap .data-table tbody tr.today-divider { padding: 0; }
+    .table-wrap .data-table tbody tr.today-divider td { flex: 1 1 100%; }
     .table-wrap .data-table tbody td.col-name {
         order: -1;
         flex: 1 1 100%;
@@ -2962,6 +3053,8 @@ html.mc-sweep .fp-wp {
     .kanban-column.is-drop-target { outline: 2px dashed Highlight; outline-offset: -2px; }
     .card-move { opacity: 1; }
     .panel.signal { border-top: 3px solid CanvasText; }
+    .filter-cell:has(select:focus-visible) { outline: 2px solid Highlight; outline-offset: -2px; }
+    .ref-warn { border: 1px solid CanvasText; }
     .preview-pop, .menu { border: 1px solid CanvasText; }
 }
 
@@ -2992,3 +3085,58 @@ html.mc-sweep .fp-wp {
     .prose a::after { content: " (" attr(href) ")"; font-size: .85em; color: #555; }
     .prose a[href^="/entity/"]::after { content: none; }
 }
+
+/* Work-package timeline. Shared by the overview and milestone page. */
+.gantt-scroll { overflow-x:auto; border:1px solid var(--mc-border-light); border-radius:var(--mc-radius-lg); background:var(--mc-surface-raised); }
+.gantt { min-width:850px; --gantt-label:300px; }
+.gantt-axis, .gantt-row { display:grid; grid-template-columns:var(--gantt-label) minmax(0,1fr); }
+.gantt-axis { height:52px; color:var(--mc-text-muted); font:12px var(--font-readout); border-bottom:1px solid var(--mc-border-light); background:var(--mc-surface-muted); }
+.gantt-axis > span { padding:19px 18px; position:sticky; left:0; z-index:2; background:var(--mc-surface-muted); }
+.gantt-scale { position:relative; margin-right:24px; }
+.gantt-tick { position:absolute; inset-block:0; border-left:1px solid var(--mc-border-light); padding:18px 8px; white-space:nowrap; }
+.gantt-tick.is-end { transform:translateX(-100%); border-left:0; border-right:1px solid var(--mc-border-light); }
+.gantt-rows { position:relative; }
+.gantt-row { min-height:86px; border-bottom:1px solid var(--mc-border-light); color:var(--mc-text-primary); text-decoration:none; }
+.gantt-row:last-child { border-bottom:0; }
+.gantt-summary { cursor:pointer; list-style:none; }
+.gantt-summary::-webkit-details-marker { display:none; }
+.gantt-summary:hover { background:var(--mc-blue-bg); }
+.gantt-label { display:flex; flex-direction:column; justify-content:center; gap:5px; padding:14px 18px; border-right:1px solid var(--mc-border-light); min-width:0; position:sticky; left:0; z-index:1; background:var(--mc-surface-raised); }
+.gantt-label strong { font-size:14px; line-height:1.35; }
+.gantt-group > summary .gantt-label strong::before { content:'›'; color:var(--mc-blue); margin-right:7px; display:inline-block; }
+.gantt-group[open] > summary .gantt-label strong::before { transform:rotate(90deg); }
+.gantt-meta, .gantt-dates { font:11px var(--font-readout); color:var(--mc-text-muted); }
+.gantt-late { color:var(--mc-red-text); margin-left:6px; }
+.gantt-track { position:relative; margin-right:24px; }
+.gantt-bar { position:absolute; top:28px; height:28px; min-width:3px; border:1px solid var(--mc-blue); border-radius:5px; background:var(--mc-blue-bg); overflow:hidden; color:var(--mc-blue-text); }
+.gantt-bar > span { display:block; height:100%; background:var(--mc-blue); opacity:.35; }
+.gantt-bar b { position:absolute; inset:0; display:grid; place-items:center; font:11px var(--font-readout); }
+.gantt-deadline { position:absolute; top:37px; height:10px; width:10px; transform:translateX(-50%) rotate(45deg); background:var(--mc-blue); border:2px solid var(--mc-surface-raised); }
+.gantt-bar.is-late { border-color:var(--mc-red); background:var(--mc-red-bg); color:var(--mc-red-text); }
+.gantt-bar.is-late > span, .gantt-deadline.is-late { background:var(--mc-red); }
+.gantt-bar.is-complete { border-color:var(--mc-green); background:var(--mc-green-bg); color:var(--mc-green-text); }
+.gantt-bar.is-complete > span, .gantt-deadline.is-complete { background:var(--mc-green); }
+.gantt-bar.is-cancelled, .gantt-deadline.is-cancelled { opacity:.35; }
+.gantt-bar.is-open { border-style:dashed; border-right:0; border-radius:5px 0 0 5px; }
+.gantt-description { margin:0; padding:14px 18px; color:var(--mc-text-secondary); font-size:13px; line-height:1.6; background:var(--mc-surface-muted); }
+.gantt-description a { white-space:nowrap; }
+.gantt-task { min-height:62px; }
+.gantt-task .gantt-label { padding-left:32px; }
+.gantt-task .gantt-label strong { font-size:12px; font-weight:500; }
+.gantt-task .gantt-deadline { top:26px; height:8px; width:8px; }
+.gantt-task .gantt-bar { top:20px; height:24px; }
+.gantt-no-date { position:absolute; top:32px; left:12px; font:11px var(--font-readout); color:var(--mc-text-muted); }
+.gantt-now-track { position:absolute; pointer-events:none; top:0; bottom:0; left:var(--gantt-label); right:24px; }
+.gantt-today { position:absolute; top:0; bottom:0; border-left:2px solid var(--mc-route); }
+.gantt-today > span { position:absolute; top:-15px; left:4px; font:10px var(--font-readout); color:var(--mc-route); }
+.gantt-legend { display:flex; align-items:center; flex-wrap:wrap; gap:10px; font-size:12px; color:var(--mc-text-secondary); }
+.gantt-key { width:18px; height:10px; border:1px solid var(--mc-blue); border-radius:2px; background:var(--mc-blue-bg); margin-left:10px; }
+.gantt-key.filled { background:var(--mc-blue); opacity:.5; }
+.gantt-diamond-key { color:var(--mc-blue); margin-left:10px; }
+.gantt-today-key { width:2px; height:14px; background:var(--mc-route); margin-left:10px; }
+.gantt-unscheduled .gantt-row { display:block; }
+.gantt-unscheduled .gantt-track { display:none; }
+.col-milestone { min-width:130px; }
+@media(max-width:700px) { .gantt { --gantt-label:230px; min-width:760px; } .gantt-label { padding:12px; } }
+
+.gantt-gridline { position:absolute; inset-block:0; border-left:1px solid var(--mc-border-light); opacity:.4; }

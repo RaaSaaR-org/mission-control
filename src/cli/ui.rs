@@ -8,6 +8,7 @@
 
 use colored::*;
 use dialoguer::console;
+use std::borrow::Cow;
 use std::io::IsTerminal;
 use std::sync::OnceLock;
 use std::time::SystemTime;
@@ -63,7 +64,11 @@ fn detect(choice: ColorChoice, json: bool) -> Ui {
         && match choice {
             ColorChoice::Always => true,
             ColorChoice::Never => false,
-            ColorChoice::Auto => colored::control::SHOULD_COLORIZE.should_colorize(),
+            ColorChoice::Auto => auto_color(
+                colored::control::SHOULD_COLORIZE.should_colorize(),
+                env_set("CLICOLOR_FORCE"),
+                term_dumb(),
+            ),
         };
     Ui {
         color,
@@ -74,8 +79,18 @@ fn detect(choice: ColorChoice, json: bool) -> Ui {
     }
 }
 
+/// `--color auto`: what `colored` decided (NO_COLOR, CLICOLOR, a TTY), but
+/// off for `TERM=dumb`, which `colored` ignores, unless CLICOLOR_FORCE is set.
+fn auto_color(should_colorize: bool, clicolor_force: bool, term_dumb: bool) -> bool {
+    should_colorize && (clicolor_force || !term_dumb)
+}
+
+fn term_dumb() -> bool {
+    std::env::var("TERM").is_ok_and(|t| t == "dumb")
+}
+
 fn detect_unicode() -> bool {
-    if env_set("MC_ASCII") || std::env::var("TERM").is_ok_and(|t| t == "dumb") {
+    if env_set("MC_ASCII") || term_dumb() {
         return false;
     }
     for var in ["LC_ALL", "LC_CTYPE", "LANG"] {
@@ -129,7 +144,7 @@ pub fn hyperlinks() -> bool {
         Some("1" | "true" | "yes" | "on") => return true,
         _ => {}
     }
-    if std::env::var("TERM").is_ok_and(|t| t == "dumb") {
+    if term_dumb() {
         return false;
     }
     let ui = get();
@@ -288,6 +303,7 @@ pub fn status(status: &str) -> String {
     if status.is_empty() {
         return String::new();
     }
+    let status = &*clean(status);
     let tone = status_tone(status);
     if fancy() {
         format!(
@@ -318,6 +334,87 @@ pub fn priority(p: u32) -> String {
         2 => s.yellow().bold().to_string(),
         4 => s.dimmed().to_string(),
         _ => s,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Untrusted text
+// ---------------------------------------------------------------------------
+
+/// A file value (title, owner, status, ...) made safe to print on one line:
+/// control characters are dropped and line breaks and tabs become spaces, so
+/// a file can't send escape sequences to the terminal. Apply it before styling.
+pub fn clean(s: &str) -> Cow<'_, str> {
+    if !s.chars().any(char::is_control) {
+        return Cow::Borrowed(s);
+    }
+    Cow::Owned(
+        s.chars()
+            .filter_map(|c| match c {
+                '\n' | '\r' | '\t' => Some(' '),
+                c if c.is_control() => None,
+                c => Some(c),
+            })
+            .collect(),
+    )
+}
+
+/// Safety net for text that mixes the CLI's own styling with file values:
+/// keeps SGR colour codes (`ESC [ ... m`), OSC 8 hyperlinks and newlines,
+/// and drops every other control character, so a value that slipped through
+/// unclean can't set the window title, clear the screen or write the
+/// clipboard. Tables, truncation and the message helpers apply it.
+pub fn scrub(s: &str) -> Cow<'_, str> {
+    if !s.chars().any(|c| c.is_control() && c != '\n') {
+        return Cow::Borrowed(s);
+    }
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    while let Some(c) = rest.chars().next() {
+        if c == '\x1b' {
+            if let Some(n) = allowed_escape(rest) {
+                out.push_str(&rest[..n]);
+                rest = &rest[n..];
+                continue;
+            }
+        }
+        if !c.is_control() || c == '\n' {
+            out.push(c);
+        }
+        rest = &rest[c.len_utf8()..];
+    }
+    Cow::Owned(out)
+}
+
+/// Length of the SGR sequence or OSC 8 hyperlink at the start of `s`, if any.
+fn allowed_escape(s: &str) -> Option<usize> {
+    if let Some(params) = s.strip_prefix("\x1b[") {
+        let end = params.find(|c: char| !(c.is_ascii_digit() || c == ';' || c == ':'))?;
+        return params[end..].starts_with('m').then_some(2 + end + 1);
+    }
+    // `ESC ] 8 ; params ; uri` ended by ST or BEL, with a printable payload.
+    let body = s.strip_prefix("\x1b]8;")?;
+    let end = body.find(char::is_control)?;
+    let term = if body[end..].starts_with("\x1b\\") {
+        2
+    } else if body[end..].starts_with('\x07') {
+        1
+    } else {
+        return None;
+    };
+    Some(4 + end + term)
+}
+
+/// [`scrub`] for a table cell, which must also stay on one line.
+fn scrub_cell(cell: String) -> String {
+    let cell = match scrub(&cell) {
+        Cow::Borrowed(_) => cell,
+        Cow::Owned(s) => s,
+    };
+    if cell.contains('\n') {
+        cell.replace('\n', " ")
+    } else {
+        cell
     }
 }
 
@@ -358,6 +455,7 @@ fn strip_osc(s: &str) -> String {
 
 /// Truncate to `width` display columns with an ellipsis (ANSI-safe).
 pub fn truncate(s: &str, width: usize) -> String {
+    let s = &*scrub(s);
     if width_of(s) <= width {
         return s.to_string();
     }
@@ -475,6 +573,7 @@ pub fn error_message(msg: &str) -> String {
     let mut chars = first_word.chars();
     let sentence = chars.next().is_some_and(|c| c.is_ascii_uppercase())
         && chars.all(|c| c.is_lowercase() || c == '\'' || c == '’');
+    let msg = &*scrub(msg);
     let mut out = if sentence {
         let mut c = msg.chars();
         c.next()
@@ -490,21 +589,33 @@ pub fn error_message(msg: &str) -> String {
 }
 
 pub fn success(msg: impl std::fmt::Display) {
-    println!("{} {}", glyphs().ok.green().bold(), msg);
+    println!("{} {}", glyphs().ok.green().bold(), scrub(&msg.to_string()));
 }
 
 pub fn info(msg: impl std::fmt::Display) {
-    println!("{} {}", glyphs().info.blue().bold(), msg);
+    println!(
+        "{} {}",
+        glyphs().info.blue().bold(),
+        scrub(&msg.to_string())
+    );
 }
 
 pub fn warn(msg: impl std::fmt::Display) {
-    println!("{} {}", glyphs().warn.yellow().bold(), msg);
+    println!(
+        "{} {}",
+        glyphs().warn.yellow().bold(),
+        scrub(&msg.to_string())
+    );
 }
 
 /// Next-step suggestion. Only shown on interactive terminals.
 pub fn hint(msg: impl std::fmt::Display) {
     if get().interactive {
-        println!("  {} {}", glyphs().arrow.dimmed(), msg.to_string().dimmed());
+        println!(
+            "  {} {}",
+            glyphs().arrow.dimmed(),
+            scrub(&msg.to_string()).dimmed()
+        );
     }
 }
 
@@ -620,6 +731,8 @@ impl Col {
 
 const INDENT: usize = 2;
 const GAP: usize = 2;
+/// Narrowest a flexible column gets when nothing else can give way.
+const FLEX_FLOOR: usize = 4;
 
 /// Simple adaptive table: hides empty columns, drops low-priority columns
 /// and truncates flexible ones to fit the terminal.
@@ -636,9 +749,11 @@ impl Table {
         }
     }
 
+    /// Add a row. Cells are scrubbed of control characters other than the
+    /// caller's own styling (see [`scrub`]).
     pub fn row(&mut self, cells: Vec<String>) {
         debug_assert_eq!(cells.len(), self.cols.len());
-        self.rows.push(cells);
+        self.rows.push(cells.into_iter().map(scrub_cell).collect());
     }
 
     pub fn is_empty(&self) -> bool {
@@ -739,6 +854,18 @@ impl Table {
             };
             widths[i] -= 1;
             over -= 1;
+        }
+        // Very narrow terminals: flexible columns give up their minimum too,
+        // rather than every line wrapping.
+        for &i in &visible {
+            if over == 0 {
+                break;
+            }
+            if self.cols[i].flex {
+                let take = widths[i].saturating_sub(FLEX_FLOOR).min(over);
+                widths[i] -= take;
+                over -= take;
+            }
         }
 
         visible.into_iter().map(|i| (i, widths[i])).collect()
@@ -861,6 +988,74 @@ mod tests {
             "sprint should be dropped first"
         );
         assert!(lines[0].contains("TITLE"));
+    }
+
+    #[test]
+    fn very_narrow_width_shrinks_flex_columns_below_their_minimum() {
+        // The `mc list tasks` layout: fixed ID, priority, status, flexible title.
+        let mut t = Table::new(vec![
+            Col::new("ID").fixed(),
+            Col::new("Pri"),
+            Col::new("Status"),
+            Col::new("Title").flex(18),
+            Col::new("Owner").max(16).drop(3),
+        ]);
+        t.row(vec![
+            "TASK-023".into(),
+            "P1".into(),
+            "todo".into(),
+            "AP2: Hardware-Integration und Tests".into(),
+            "alice".into(),
+        ]);
+        for width in [40, 30] {
+            let lines = t.render(Some(width));
+            for l in &lines {
+                assert!(width_of(l) <= width, "{width}: line too wide: {l:?}");
+            }
+            assert!(lines.last().unwrap().contains("TASK-023"), "{lines:?}");
+        }
+    }
+
+    #[test]
+    fn table_cells_and_truncation_drop_foreign_escapes() {
+        let evil = "Evil \x1b]0;PWNED\x07 \x1b[2Jx\x1b]52;c;aGk=\x07 \u{9b}31m";
+        let mut t = Table::new(vec![Col::new("ID"), Col::new("Title").flex(8)]);
+        t.row(vec!["\x1b[36mTASK-1\x1b[0m".into(), evil.into()]);
+        let lines = t.render(None);
+        let row = lines.last().unwrap();
+        // The caller's own colour survives; the title's escapes don't.
+        assert!(row.contains("\x1b[36mTASK-1\x1b[0m"), "{row:?}");
+        assert_eq!(
+            console::strip_ansi_codes(row).matches('\x1b').count(),
+            0,
+            "{row:?}"
+        );
+        assert!(!row.contains('\x07') && !row.contains('\u{9b}'), "{row:?}");
+        assert!(row.contains("Evil ]0;PWNED [2Jx]52;c;aGk= 31m"), "{row:?}");
+        let cut = truncate(evil, 12);
+        assert!(!cut.contains('\x1b') && !cut.contains('\x07'), "{cut:?}");
+    }
+
+    #[test]
+    fn scrub_keeps_styling_and_hyperlinks_only() {
+        let link = hyperlink("file:///tmp/a.md", "a");
+        assert_eq!(scrub(&link), link);
+        assert_eq!(scrub("\x1b[1;31mred\x1b[0m"), "\x1b[1;31mred\x1b[0m");
+        assert_eq!(scrub("a\nb"), "a\nb");
+        assert_eq!(scrub("t\x1b]0;title\x07x"), "t]0;titlex");
+        assert_eq!(scrub("\x1b]8;;x\x1b[2J"), "]8;;x[2J");
+        assert_eq!(clean("Own\x1b[2Jer\nnext\ttab"), "Own[2Jer next tab");
+        assert!(matches!(clean("plain"), Cow::Borrowed(_)));
+        assert_eq!(status("\x1b]0;x\x07done"), status("]0;xdone"));
+        assert!(!error_message("bad '\x1b]0;x\x07'").contains('\x1b'));
+    }
+
+    #[test]
+    fn dumb_terminals_get_no_color_unless_forced() {
+        assert!(auto_color(true, false, false));
+        assert!(!auto_color(true, false, true));
+        assert!(auto_color(true, true, true));
+        assert!(!auto_color(false, false, false));
     }
 
     #[test]

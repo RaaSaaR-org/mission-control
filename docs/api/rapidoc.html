@@ -5,7 +5,11 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>mc API — interactive docs</title>
     <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📋</text></svg>">
-    <script type="module" src="https://unpkg.com/rapidoc@9.3.4/dist/rapidoc-min.js"></script>
+    <!-- Pinned build with Subresource Integrity: a tampered CDN response is
+         refused instead of running on the page where tokens are entered. -->
+    <script type="module" src="https://unpkg.com/rapidoc@9.3.4/dist/rapidoc-min.js"
+      integrity="sha384-MDSxszbIJtK/9YakZ3tvi2bK6LaaHnB8+Hd2/fCfih0tLa+Mqlv6HO0bZdrICjjG"
+      crossorigin="anonymous" referrerpolicy="no-referrer"></script>
     <style>
       html, body { margin: 0; padding: 0; height: 100%; }
       rapi-doc { display: block; height: 100vh; }

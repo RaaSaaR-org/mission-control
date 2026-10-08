@@ -72,6 +72,11 @@ curl -sH "$H" -H "Content-Type: application/json" \
   -X POST "$BASE/v1/sprints" \
   -d '{"title":"2026-W05","goal":"Auth module","start_date":"2026-01-27","end_date":"2026-02-07"}' | jq .
 
+# Milestone (work package) linked to a project
+curl -sH "$H" -H "Content-Type: application/json" \
+  -X POST "$BASE/v1/milestones" \
+  -d '{"title":"Beta release","start_date":"2026-09-01","due_date":"2026-11-30","projects":"PROJ-001"}' | jq .
+
 # Meeting (today, 14:00, 1h)
 curl -sH "$H" -H "Content-Type: application/json" \
   -X POST "$BASE/v1/meetings" \
@@ -103,6 +108,22 @@ curl -sH "$H" -H "Content-Type: application/json" \
 ```
 
 The path field in the response shows whether the file moved between `todo/` and `done/`.
+
+```bash
+# Change some fields; "" clears one, lists replace the whole list
+curl -sH "$H" -H "Content-Type: application/json" \
+  -X PATCH "$BASE/v1/tasks/TASK-001" \
+  -d '{"priority":1,"owner":"alice","due_date":"2026-10-31","tags":["backend","api"]}' | jq .
+
+# Assign TASK-001 to a milestone (ID or unique title), then list its tasks
+curl -sH "$H" -H "Content-Type: application/json" \
+  -X PATCH "$BASE/v1/tasks/TASK-001" \
+  -d '{"milestone":"MS-001"}' | jq .
+curl -sH "$H" "$BASE/v1/tasks?milestone=MS-001" | jq .
+
+# What to work on next (unblocked open tasks, best first)
+curl -sH "$H" "$BASE/v1/tasks/next?owner=alice&limit=3" | jq .
+```
 
 ## Maintenance
 

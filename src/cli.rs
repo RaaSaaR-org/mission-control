@@ -15,6 +15,9 @@ const STYLES: Styles = Styles::styled()
     .invalid(AnsiColor::Yellow.on_default().effects(Effects::BOLD))
     .error(AnsiColor::Red.on_default().effects(Effects::BOLD));
 
+/// Help heading for the global flags.
+const GLOBAL: &str = "Global options";
+
 #[derive(Parser, Debug)]
 #[command(
     name = "mc",
@@ -32,6 +35,7 @@ const STYLES: Styles = Styles::styled()
   mc validate                        Check repo structure and frontmatter
   mc list tasks --json | jq '.[].id' Machine-readable output
   mc init                            Initialize a new MissionControl repo
+  mc completions zsh                 Shell completions (bash, zsh, fish, ...)
 
 \x1b[1mEnvironment:\x1b[0m
   NO_COLOR=1      Disable colors (same as --color never)
@@ -44,20 +48,21 @@ const STYLES: Styles = Styles::styled()
   0 success · 1 failure (not found, validation issues, I/O) · 2 invalid usage"
 )]
 pub struct Cli {
+    // Global flags get their own help section, after each command's options.
     /// Path to repo root (auto-detected if omitted)
-    #[arg(long, global = true, value_name = "PATH")]
+    #[arg(long, global = true, value_name = "PATH", help_heading = GLOBAL)]
     pub root: Option<String>,
 
     /// Skip interactive prompts (use defaults)
-    #[arg(short = 'y', long = "yes", global = true)]
+    #[arg(short = 'y', long = "yes", global = true, help_heading = GLOBAL)]
     pub yes: bool,
 
-    /// Print machine-readable JSON (list, show, status, validate, index, export, task, check, comment)
-    #[arg(long, global = true)]
+    /// Print machine-readable JSON (list, show, status, validate, index, export, task, check, comment, new)
+    #[arg(long, global = true, help_heading = GLOBAL)]
     pub json: bool,
 
     /// When to use colors (auto respects NO_COLOR and CLICOLOR_FORCE)
-    #[arg(long, global = true, value_enum, default_value_t = ui::ColorChoice::Auto, value_name = "WHEN")]
+    #[arg(long, global = true, value_enum, default_value_t = ui::ColorChoice::Auto, value_name = "WHEN", help_heading = GLOBAL)]
     pub color: ui::ColorChoice,
 
     #[command(subcommand)]
@@ -148,6 +153,7 @@ Piped output keeps the plain layout: fields plus the markdown as written.")]
     #[command(after_help = "\x1b[1mExamples:\x1b[0m
   mc comment TASK-069 \"Shipped, see TASK-070\"
   mc comment MTG-004 \"Follow-up booked\" --author \"Jane Doe\"
+  mc comment TASK-069                               Write it in $VISUAL / $EDITOR
   git log -1 --format=%B | mc comment TASK-069 -    Read the text from stdin
 
 Comments go into a \"## Comments\" section at the end of the entity's file,
@@ -157,8 +163,9 @@ unclosed code fence or HTML block is closed at the end of the comment.")]
     Comment {
         /// Task or meeting ID (e.g., TASK-069)
         id: String,
-        /// Comment text (Markdown); - reads it from stdin
-        text: String,
+        /// Comment text (Markdown); - reads it from stdin; omit it to write
+        /// the comment in $VISUAL / $EDITOR
+        text: Option<String>,
         /// Author name (defaults to git config user.name, else $USER)
         #[arg(long)]
         author: Option<String>,
@@ -170,7 +177,7 @@ unclosed code fence or HTML block is closed at the end of the comment.")]
     Index,
     /// Export an entity to a zip archive
     #[command(after_help = "\x1b[1mExamples:\x1b[0m
-  mc export customer CUST-001     Export customer folder to a zip file")]
+  mc export customer CUST-001     Export a customer and its linked meetings, projects, ... to a zip")]
     Export {
         #[command(subcommand)]
         entity: ExportEntity,
@@ -255,7 +262,7 @@ Press ? in the dashboard for keyboard shortcuts.")]
   mc init --force                    Reinitialize even if config exists")]
     Init {
         /// Create a lightweight project-only repo (tasks, meetings, research)
-        #[arg(long)]
+        #[arg(long, conflicts_with = "embedded")]
         project: bool,
 
         /// Create an embedded .mc/ folder inside an existing project
@@ -269,7 +276,8 @@ Press ? in the dashboard for keyboard shortcuts.")]
         /// Target directory (defaults to current directory)
         path: Option<String>,
 
-        /// Overwrite existing config
+        /// Rewrite an existing config (the old one is kept as config.yml.bak);
+        /// missing templates are restored, existing ones are left alone
         #[arg(long)]
         force: bool,
     },
@@ -285,6 +293,32 @@ Press ? in the dashboard for keyboard shortcuts.")]
         #[command(subcommand)]
         subcmd: TaskSubcommand,
     },
+    /// Print a shell completion script
+    #[command(after_help = "\x1b[1mInstall:\x1b[0m
+  bash  mc completions bash > ~/.local/share/bash-completion/completions/mc
+  zsh   mc completions zsh > ~/.zfunc/_mc   (with fpath+=~/.zfunc before compinit)
+  fish  mc completions fish > ~/.config/fish/completions/mc.fish")]
+    Completions {
+        /// Shell to generate completions for
+        shell: clap_complete::Shell,
+    },
+}
+
+/// `mc api serve --log-format` values.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, clap::ValueEnum)]
+pub enum LogFormat {
+    #[default]
+    Human,
+    Json,
+}
+
+/// `--bind` value: an IP address, or `localhost` for 127.0.0.1.
+fn parse_bind(s: &str) -> Result<std::net::IpAddr, String> {
+    if s.eq_ignore_ascii_case("localhost") {
+        return Ok(std::net::Ipv4Addr::LOCALHOST.into());
+    }
+    s.parse()
+        .map_err(|_| format!("'{s}' is not an IP address (e.g. 127.0.0.1, 0.0.0.0 or ::1)"))
 }
 
 #[derive(Subcommand, Debug)]
@@ -295,8 +329,8 @@ pub enum ApiSubcommand {
         #[arg(long, default_value_t = 5100)]
         port: u16,
         /// Bind address (default 127.0.0.1 — set to 0.0.0.0 only behind a trusted proxy)
-        #[arg(long, default_value = "127.0.0.1")]
-        bind: String,
+        #[arg(long, default_value = "127.0.0.1", value_parser = parse_bind)]
+        bind: std::net::IpAddr,
         /// Path to YAML tokens file (argon2id PHC hashes). Required unless --insecure-dev-token is set.
         #[arg(long, conflicts_with = "insecure_dev_token")]
         tokens_file: Option<String>,
@@ -308,9 +342,9 @@ pub enum ApiSubcommand {
         /// Reject every non-GET request, regardless of token capabilities
         #[arg(long)]
         read_only: bool,
-        /// Log format: human (default) or json
-        #[arg(long, default_value = "human")]
-        log_format: String,
+        /// Log format
+        #[arg(long, value_enum, default_value_t = LogFormat::Human)]
+        log_format: LogFormat,
     },
     /// Generate an argon2id PHC hash of a bearer token, for inclusion in tokens.yml.
     /// The plaintext is read from the SECRET argument or stdin (one line).
@@ -436,20 +470,51 @@ pub enum NewEntity {
         #[arg(long)]
         status: Option<String>,
         /// Priority: 1=critical, 2=high, 3=medium, 4=low (default: 3)
-        #[arg(long)]
+        #[arg(long, value_parser = clap::value_parser!(u32).range(1..=4))]
         priority: Option<u32>,
         /// Comma-separated tags
         #[arg(long)]
         tags: Option<String>,
-        /// Sprint label (e.g., 2026-W05)
+        /// Sprint ID or title (e.g., SPR-001 or 2026-W05); stored as the ID
         #[arg(long)]
         sprint: Option<String>,
+        /// Milestone ID or unique title to assign (e.g., MS-001); stored as the ID
+        #[arg(long)]
+        milestone: Option<String>,
         /// Comma-separated task IDs this depends on
         #[arg(long)]
         depends_on: Option<String>,
         /// Due date (YYYY-MM-DD)
         #[arg(long)]
         due_date: Option<String>,
+    },
+    /// Create a milestone or work package that groups tasks
+    #[command(after_help = "\x1b[1mExamples:\x1b[0m
+  mc new milestone \"Beta release\" --due-date 2026-11-30
+  mc new milestone \"AP3: Integration\" --start-date 2026-09-01 --due-date 2026-11-30 --projects PROJ-001
+  mc new milestone \"Pilot\" --description \"First customer pilot\" --owner alice --status active
+  mc task set TASK-024 --milestone MS-001")]
+    Milestone {
+        /// Milestone title (e.g., \"AP3: Integration\")
+        title: String,
+        /// What the milestone delivers
+        #[arg(long)]
+        description: Option<String>,
+        /// Planned start (YYYY-MM-DD)
+        #[arg(long)]
+        start_date: Option<String>,
+        /// Deadline (YYYY-MM-DD, not before the start date)
+        #[arg(long)]
+        due_date: Option<String>,
+        /// Owner (username or name)
+        #[arg(long)]
+        owner: Option<String>,
+        /// Status: planned, active, completed or cancelled (default: planned)
+        #[arg(long)]
+        status: Option<String>,
+        /// Linked project IDs (comma-separated)
+        #[arg(long)]
+        projects: Option<String>,
     },
     /// Create a new sprint
     #[command(after_help = "\x1b[1mExamples:\x1b[0m
@@ -592,6 +657,17 @@ pub enum ListEntity {
         #[arg(long)]
         tag: Option<String>,
     },
+    /// List milestones and work packages
+    #[command(after_help = "\x1b[1mExamples:\x1b[0m
+  mc list milestones
+  mc list milestones --status active
+  mc list tasks --milestone MS-001")]
+    #[command(alias = "milestone")]
+    Milestones {
+        /// Filter by status
+        #[arg(long)]
+        status: Option<String>,
+    },
     /// List sprints
     #[command(after_help = "\x1b[1mExamples:\x1b[0m
   mc list sprints
@@ -641,6 +717,8 @@ pub enum ListEntity {
     /// List tasks
     #[command(after_help = "\x1b[1mExamples:\x1b[0m
   mc list tasks
+  mc list tasks --open                  Hide done and cancelled tasks
+  mc list tasks --overdue --sort due    Open tasks past their due date
   mc list tasks --status in-progress --project PROJ-001
   mc list tasks --priority 1 --owner alice
   mc list tasks --sprint 2026-W05")]
@@ -652,22 +730,48 @@ pub enum ListEntity {
         /// Filter by tag
         #[arg(long)]
         tag: Option<String>,
-        /// Filter by project ID
+        /// Filter by project ID (loose forms like proj-1 work)
         #[arg(long)]
         project: Option<String>,
-        /// Filter by customer ID
+        /// Filter by customer ID (loose forms like cust-1 work)
         #[arg(long)]
         customer: Option<String>,
         /// Filter by priority (1-4)
-        #[arg(long)]
+        #[arg(long, value_parser = clap::value_parser!(u32).range(1..=4))]
         priority: Option<u32>,
-        /// Filter by sprint label
+        /// Filter by sprint ID or title
         #[arg(long)]
         sprint: Option<String>,
+        /// Filter by milestone ID or unique title (e.g., MS-001); "" lists tasks without one
+        #[arg(long)]
+        milestone: Option<String>,
         /// Filter by owner
         #[arg(long)]
         owner: Option<String>,
+        /// Only open tasks (hide done and cancelled)
+        #[arg(long)]
+        open: bool,
+        /// Only open tasks whose due date has passed
+        #[arg(long)]
+        overdue: bool,
+        /// Sort order
+        #[arg(long, value_enum, default_value_t = TaskSort::Id, value_name = "KEY")]
+        sort: TaskSort,
     },
+}
+
+/// `mc list tasks --sort` keys.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, clap::ValueEnum)]
+pub enum TaskSort {
+    /// By ID (the default)
+    #[default]
+    Id,
+    /// Most urgent first (1 = critical), then due date
+    Priority,
+    /// Earliest due date first; tasks without one last
+    Due,
+    /// Most recently updated first
+    Updated,
 }
 
 #[derive(Subcommand, Debug)]
@@ -686,9 +790,12 @@ pub enum TaskSubcommand {
         /// Filter by customer ID
         #[arg(long)]
         customer: Option<String>,
-        /// Filter by sprint label
+        /// Filter by sprint ID or title
         #[arg(long)]
         sprint: Option<String>,
+        /// Filter by milestone ID or unique title (e.g., MS-001); "" lists tasks without one
+        #[arg(long)]
+        milestone: Option<String>,
         /// Filter by owner
         #[arg(long)]
         owner: Option<String>,
@@ -711,9 +818,53 @@ pub enum TaskSubcommand {
         id: String,
         /// New status (backlog, todo, in-progress, review, done, cancelled; case-insensitive)
         status: String,
-        /// Assign to a sprint (e.g., 2026-W05)
+        /// Assign to a sprint by ID or title (e.g., SPR-001 or 2026-W05)
         #[arg(long)]
         sprint: Option<String>,
+    },
+    /// Change a task's fields (title, priority, owner, due date, sprint, ...)
+    #[command(after_help = "\x1b[1mExamples:\x1b[0m
+  mc task set TASK-001 --priority 1 --owner alice
+  mc task set 7 --due-date 2026-10-31 --sprint 2026-W05
+  mc task set 7 --tags \"backend,api\" --depends-on TASK-003
+  mc task set 7 --owner \"\" --due-date \"\"   Empty values clear a field
+  mc task set 7 --status done             Same as mc task move 7 done")]
+    Set {
+        /// Task ID (TASK-001, task-1 or just 1)
+        id: String,
+        /// New title (also replaces the note's `# Title` heading)
+        #[arg(long)]
+        title: Option<String>,
+        /// New status (case-insensitive; moves the file like `mc task move`)
+        #[arg(long)]
+        status: Option<String>,
+        /// Priority: 1=critical, 2=high, 3=medium, 4=low
+        #[arg(long, value_parser = clap::value_parser!(u32).range(1..=4))]
+        priority: Option<u32>,
+        /// Owner ("" clears)
+        #[arg(long)]
+        owner: Option<String>,
+        /// Sprint ID or title, stored as the ID ("" clears)
+        #[arg(long)]
+        sprint: Option<String>,
+        /// Milestone ID or unique title, stored as the ID ("" clears)
+        #[arg(long)]
+        milestone: Option<String>,
+        /// Due date YYYY-MM-DD ("" clears)
+        #[arg(long)]
+        due_date: Option<String>,
+        /// Comma-separated project IDs; replaces the linked projects ("" clears)
+        #[arg(long)]
+        project: Option<String>,
+        /// Comma-separated customer IDs; replaces the linked customers ("" clears)
+        #[arg(long)]
+        customer: Option<String>,
+        /// Comma-separated tags; replaces the tags ("" clears)
+        #[arg(long)]
+        tags: Option<String>,
+        /// Comma-separated task IDs this depends on; replaces them ("" clears)
+        #[arg(long)]
+        depends_on: Option<String>,
     },
     /// Show the next actionable task
     #[command(after_help = "\x1b[1mExamples:\x1b[0m
@@ -743,10 +894,16 @@ pub enum ExportEntity {
     #[command(after_help = "\x1b[1mExamples:\x1b[0m
   mc export customer CUST-001       Export by ID
   mc export customer acme-inc       Export by slug
-  mc export customer 1 --json       Print the archive path as JSON")]
+  mc export customer 1 --json       Print the archive path as JSON
+  mc export customer 1 --folder-only  Only the customer's own folder")]
     Customer {
         /// Customer ID or slug (e.g., CUST-001 or acme-inc)
         id: String,
+
+        /// Only the customer folder; leave out the meetings, tasks and the
+        /// project/research notes elsewhere that link to the customer
+        #[arg(long)]
+        folder_only: bool,
     },
 }
 
@@ -805,5 +962,14 @@ mod tests {
     #[test]
     fn cli_definition_is_valid() {
         Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn bind_accepts_ip_addresses_and_localhost() {
+        use super::parse_bind;
+        assert_eq!(parse_bind("localhost").unwrap().to_string(), "127.0.0.1");
+        assert_eq!(parse_bind("0.0.0.0").unwrap().to_string(), "0.0.0.0");
+        assert_eq!(parse_bind("::1").unwrap().to_string(), "::1");
+        assert!(parse_bind("nope").is_err());
     }
 }

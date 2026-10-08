@@ -15,6 +15,7 @@ pub mod entity;
 pub mod error;
 pub mod frontmatter;
 pub mod html;
+pub mod lock;
 pub mod mcp;
 pub mod template;
 pub mod util;

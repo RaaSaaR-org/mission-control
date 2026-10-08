@@ -40,7 +40,7 @@ pub fn run(id: &str, opts: ShowOptions, cfg: &ResolvedConfig) -> McResult<()> {
 
     if opts.open {
         if ui.json {
-            let path = entity.source_path.display().to_string();
+            let path = relative(&entity.source_path, cfg);
             println!("{}", serde_json::json!({ "id": entity.id, "path": path }));
         } else if ui.interactive {
             ui::info(format!("Opening {}", relative(&entity.source_path, cfg)));
@@ -537,21 +537,56 @@ fn is_empty(v: &Value) -> bool {
 
 fn format_value(value: &Value) -> String {
     match value {
-        Value::String(s) => frontmatter::strip_wikilink(s).to_string(),
-        Value::Sequence(seq) => seq
-            .iter()
-            .map(|v| match v {
-                Value::String(s) => frontmatter::strip_wikilink(s).to_string(),
-                Value::Mapping(_) => "{...}".to_string(),
-                other => format_value(other),
-            })
-            .collect::<Vec<_>>()
-            .join(", "),
+        Value::String(s) => link_text(s),
+        Value::Sequence(seq) => seq.iter().map(format_value).collect::<Vec<_>>().join(", "),
         Value::Bool(b) => b.to_string(),
         Value::Number(n) => n.to_string(),
         Value::Null => String::new(),
-        Value::Mapping(m) => format!("{{{} fields}}", m.len()),
+        Value::Mapping(m) => mapping_label(m),
         Value::Tagged(t) => format_value(&t.value),
+    }
+}
+
+/// A wiki-link as its readable part: `[[CONT-003-alexander-david|Alexander
+/// David]]` → `Alexander David`, `[[PROJ-001|Innovation Project]]` →
+/// `Innovation Project (PROJ-001)`, `[[PROJ-001]]` → `PROJ-001`.
+fn link_text(s: &str) -> String {
+    let inner = s.strip_prefix("[[").and_then(|s| s.strip_suffix("]]"));
+    match inner.and_then(|i| i.split_once('|')) {
+        Some((target, alias)) if !alias.trim().is_empty() => {
+            let bare_id = target.split_once('-').is_some_and(|(p, n)| {
+                p.chars().all(|c| c.is_ascii_alphanumeric())
+                    && !n.is_empty()
+                    && n.chars().all(|c| c.is_ascii_digit())
+            });
+            if bare_id {
+                format!("{} ({target})", alias.trim())
+            } else {
+                alias.trim().to_string()
+            }
+        }
+        _ => frontmatter::strip_wikilink(s).to_string(),
+    }
+}
+
+/// An object in the frontmatter (a contact, an attendee) as its name, with
+/// the role in parentheses: `Daniel Lang (CTO)`.
+fn mapping_label(m: &serde_yaml::Mapping) -> String {
+    let field = |k: &str| {
+        m.get(k)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+    };
+    let Some(name) = field("name")
+        .or_else(|| field("title"))
+        .or_else(|| field("id"))
+    else {
+        return format!("{{{} fields}}", m.len());
+    };
+    match field("role") {
+        Some(role) => format!("{} ({role})", link_text(name)),
+        None => link_text(name),
     }
 }
 
@@ -569,5 +604,22 @@ mod tests {
     fn format_value_strips_wikilinks() {
         let v: Value = serde_yaml::from_str("['[[PROJ-001]]', '[[CUST-002]]']").unwrap();
         assert_eq!(format_value(&v), "PROJ-001, CUST-002");
+    }
+
+    #[test]
+    fn format_value_shows_objects_and_link_aliases_readably() {
+        let v: Value = serde_yaml::from_str(
+            "- name: Daniel Lang\n  role: CTO\n  email: d@example.com\n- name: Bob\n- {email: x@example.com, phone: '1'}",
+        )
+        .unwrap();
+        assert_eq!(format_value(&v), "Daniel Lang (CTO), Bob, {2 fields}");
+        let v: Value = serde_yaml::from_str(
+            "[florian-fromm, '[[CONT-003-alexander-david|Alexander David]]', '[[PROJ-001|Innovation Project]]']",
+        )
+        .unwrap();
+        assert_eq!(
+            format_value(&v),
+            "florian-fromm, Alexander David, Innovation Project (PROJ-001)"
+        );
     }
 }

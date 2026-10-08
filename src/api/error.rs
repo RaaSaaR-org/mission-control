@@ -3,12 +3,21 @@
 //! Maps `McError` (and a small set of API-only errors like auth failures)
 //! onto `application/problem+json` with stable `type` URIs so callers can
 //! switch on machine-readable error categories instead of parsing prose.
+//!
+//! [`problem_responses`] turns everything else that ends in an error (axum's
+//! own rejections of a bad JSON body or query string, unknown routes, wrong
+//! methods, oversized bodies, timeouts) into problem+json too, and keeps
+//! server filesystem paths out of `detail`.
 
+use crate::api::AppState;
 use crate::error::McError;
-use axum::http::StatusCode;
+use axum::extract::{Request, State};
+use axum::http::{header, HeaderValue, StatusCode};
+use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde::Serialize;
+use std::path::Path;
 use utoipa::ToSchema;
 
 /// RFC 7807 problem details document.
@@ -44,12 +53,6 @@ impl ProblemJson {
             errors: Vec::new(),
         }
     }
-
-    #[allow(dead_code)]
-    pub fn with_field_errors(mut self, errors: Vec<FieldError>) -> Self {
-        self.errors = errors;
-        self
-    }
 }
 
 /// API-side errors that do not originate from `McError` (auth, parse failures).
@@ -57,6 +60,8 @@ impl ProblemJson {
 pub enum ApiError {
     /// Missing or malformed Authorization header.
     Unauthenticated(&'static str),
+    /// Too many requests are already waiting (e.g. new bearer verifications).
+    Unavailable(&'static str),
     /// Authenticated but lacks the required capability (e.g. write).
     Forbidden(&'static str),
     /// Request body could not be decoded.
@@ -82,6 +87,12 @@ impl IntoResponse for ApiError {
                 StatusCode::UNAUTHORIZED,
                 detail,
             ),
+            ApiError::Unavailable(detail) => ProblemJson::new(
+                "unavailable",
+                "Service unavailable",
+                StatusCode::SERVICE_UNAVAILABLE,
+                detail,
+            ),
             ApiError::Forbidden(detail) => {
                 ProblemJson::new("forbidden", "Forbidden", StatusCode::FORBIDDEN, detail)
             }
@@ -103,15 +114,148 @@ impl IntoResponse for ApiError {
             ApiError::Domain(e) => problem_from_mc_error(&e),
         };
 
-        let status =
-            StatusCode::from_u16(problem.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-        let mut response = (status, Json(problem)).into_response();
+        problem.into_response()
+    }
+}
+
+impl IntoResponse for ProblemJson {
+    fn into_response(self) -> Response {
+        let status = StatusCode::from_u16(self.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+        let mut response = (status, Json(self.clone())).into_response();
         response.headers_mut().insert(
-            axum::http::header::CONTENT_TYPE,
-            axum::http::HeaderValue::from_static("application/problem+json"),
+            header::CONTENT_TYPE,
+            HeaderValue::from_static("application/problem+json"),
         );
+        // Lets `problem_responses` recognise (and scrub) its own errors.
+        response.extensions_mut().insert(self);
         response
     }
+}
+
+/// Middleware: every error response is problem+json, and its `detail` never
+/// shows where the repo lives on the server.
+pub async fn problem_responses(
+    State(state): State<AppState>,
+    req: Request,
+    next: Next,
+) -> Response {
+    let method = req.method().clone();
+    let path = req.uri().path().to_string();
+    let response = next.run(req).await;
+    let status = response.status();
+    if !status.is_client_error() && !status.is_server_error() {
+        return response;
+    }
+    let (mut parts, body) = response.into_parts();
+    let problem = match parts.extensions.remove::<ProblemJson>() {
+        Some(problem) => {
+            let detail = scrub_paths(&problem.detail, &state.cfg.root);
+            if detail == problem.detail {
+                return Response::from_parts(parts, body);
+            }
+            ProblemJson { detail, ..problem }
+        }
+        None => {
+            // An axum rejection or fallback: plain text or an empty body.
+            let text = axum::body::to_bytes(body, 16 * 1024)
+                .await
+                .map(|b| String::from_utf8_lossy(&b).trim().to_string())
+                .unwrap_or_default();
+            rejection_problem(status, &method, &path, &scrub_paths(&text, &state.cfg.root))
+        }
+    };
+    // Keep headers such as `Allow` on a 405; the body and its type change.
+    let mut response = problem.into_response();
+    parts.headers.remove(header::CONTENT_LENGTH);
+    parts.headers.remove(header::CONTENT_TYPE);
+    for (name, value) in parts.headers.iter() {
+        response.headers_mut().insert(name.clone(), value.clone());
+    }
+    response
+}
+
+/// Problem document for an error axum produced without `ApiError`.
+fn rejection_problem(
+    status: StatusCode,
+    method: &axum::http::Method,
+    path: &str,
+    text: &str,
+) -> ProblemJson {
+    let detail = |fallback: String| {
+        if text.is_empty() {
+            fallback
+        } else {
+            text.to_string()
+        }
+    };
+    match status {
+        // A JSON body that doesn't parse or doesn't fit the schema (axum says
+        // 422 for the latter), or a query string that doesn't.
+        StatusCode::BAD_REQUEST | StatusCode::UNPROCESSABLE_ENTITY => ProblemJson::new(
+            "bad-request",
+            "Bad request",
+            StatusCode::BAD_REQUEST,
+            detail("The request could not be read.".into()),
+        ),
+        StatusCode::NOT_FOUND => ProblemJson::new(
+            "not-found",
+            "Not found",
+            status,
+            detail(format!("No endpoint at {path}. See /v1/openapi.json.")),
+        ),
+        StatusCode::METHOD_NOT_ALLOWED => ProblemJson::new(
+            "method-not-allowed",
+            "Method not allowed",
+            status,
+            detail(format!("{method} is not supported on {path}.")),
+        ),
+        StatusCode::PAYLOAD_TOO_LARGE => ProblemJson::new(
+            "payload-too-large",
+            "Payload too large",
+            status,
+            detail("The request body is over the 64 KiB limit.".into()),
+        ),
+        StatusCode::UNSUPPORTED_MEDIA_TYPE => ProblemJson::new(
+            "unsupported-media-type",
+            "Unsupported media type",
+            status,
+            detail("Send the body as JSON with Content-Type: application/json.".into()),
+        ),
+        StatusCode::REQUEST_TIMEOUT => ProblemJson::new(
+            "timeout",
+            "Request timeout",
+            status,
+            detail("The request took too long.".into()),
+        ),
+        StatusCode::SERVICE_UNAVAILABLE => ProblemJson::new(
+            "unavailable",
+            "Service unavailable",
+            status,
+            detail("The service is not ready.".into()),
+        ),
+        _ => ProblemJson::new(
+            "http",
+            status.canonical_reason().unwrap_or("Error"),
+            status,
+            detail(status.to_string()),
+        ),
+    }
+}
+
+/// Remove the repo root from paths in an error message, so details name
+/// files relative to the repo (`tasks/todo/TASK-001-x.md`).
+fn scrub_paths(text: &str, root: &Path) -> String {
+    let mut roots: Vec<String> = [Some(root.to_path_buf()), root.canonicalize().ok()]
+        .into_iter()
+        .flatten()
+        .map(|r| format!("{}/", r.display()))
+        .filter(|r| r.len() > 2)
+        .collect();
+    // Longest first: /private/tmp/x/ before /tmp/x/.
+    roots.sort_by_key(|r| std::cmp::Reverse(r.len()));
+    roots
+        .iter()
+        .fold(text.to_string(), |out, r| out.replace(r.as_str(), ""))
 }
 
 /// Map an `McError` to a `ProblemJson`. Status codes:

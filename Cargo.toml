@@ -1,6 +1,6 @@
 [package]
 name = "mc"
-version = "0.2.0"
+version = "0.3.0"
 authors = ["huhn511 <huhn.dev@gmail.com>"]
 edition = "2021"
 rust-version = "1.88"
@@ -20,10 +20,11 @@ path = "src/main.rs"
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
+clap_complete = "4"
 serde = { version = "1", features = ["derive"] }
-# TODO: serde_yaml is deprecated; migrate to serde_yml once it reaches 1.0
-# (currently v0.0.12 with docs.rs build failures — migration is a mechanical
-# rename of serde_yaml:: → serde_yml:: across ~12 files).
+# TODO: serde_yaml is deprecated; migrate to a maintained fork such as
+# serde_yaml_ng or serde_norway (not serde_yml: archived and unsound,
+# RUSTSEC-2025-0068). The migration is a mechanical rename of serde_yaml::.
 serde_yaml = "0.9"
 serde_json = "1"
 colored = "2"
@@ -45,7 +46,6 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 tower = "0.5"
 tower-http = { version = "0.6", features = ["trace", "cors", "request-id", "util", "timeout", "limit"] }
 utoipa = { version = "5", features = ["axum_extras"] }
-utoipa-axum = "0.2"
 argon2 = "0.5"
 password-hash = { version = "0.5", features = ["getrandom"] }
 uuid = { version = "1", features = ["v4"] }
@@ -54,5 +54,7 @@ fs2 = "0.4"
 
 [dev-dependencies]
 tempfile = "3"
-http-body-util = "0.1"
-mime = "0.3"
+
+# A few pedantic lints that catch real mistakes without much noise.
+[lints.clippy]
+implicit_clone = "warn"

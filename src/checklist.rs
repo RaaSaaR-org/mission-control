@@ -13,7 +13,7 @@ use crate::entity::EntityKind;
 use crate::error::{McError, McResult};
 use crate::frontmatter;
 use crate::util;
-use pulldown_cmark::{Event, Options, Parser};
+use pulldown_cmark::{Event, Options, Parser, Tag};
 use regex::Regex;
 use serde::Serialize;
 use std::ops::Range;
@@ -111,15 +111,43 @@ fn checklist_from(kind: EntityKind, content: &str, start: usize) -> Vec<CheckIte
     items
 }
 
+/// Byte ranges of inline code spans and code blocks in `text`.
+pub(crate) fn code_ranges(text: &str) -> Vec<Range<usize>> {
+    Parser::new_ext(text, markdown_options())
+        .into_offset_iter()
+        .filter(|(event, _)| matches!(event, Event::Code(_) | Event::Start(Tag::CodeBlock(_))))
+        .map(|(_, span)| span)
+        .collect()
+}
+
+/// Byte ranges of Obsidian `%% comments %%` in `text`. A `%%` inside code
+/// (`` `%%` ``) neither opens nor closes a comment.
+fn obsidian_comments(text: &str) -> Vec<Range<usize>> {
+    let code = code_ranges(text);
+    if code.is_empty() {
+        return OBSIDIAN_COMMENT_RE
+            .find_iter(text)
+            .map(|m| m.range())
+            .collect();
+    }
+    // Blank out code (same length, so offsets stay valid) before matching.
+    let mut masked = text.as_bytes().to_vec();
+    for r in &code {
+        masked[r.clone()].fill(b' ');
+    }
+    let masked = String::from_utf8_lossy(&masked);
+    OBSIDIAN_COMMENT_RE
+        .find_iter(&masked)
+        .map(|m| m.range())
+        .collect()
+}
+
 /// Task-list items whose marker lies in `range` of `content`, in document
 /// order. Line numbers and offsets are relative to all of `content`.
 pub(crate) fn items_in(content: &str, range: Range<usize>) -> Vec<CheckItem> {
     let base = range.start;
     let text = &content[range];
-    let hidden: Vec<Range<usize>> = OBSIDIAN_COMMENT_RE
-        .find_iter(text)
-        .map(|m| m.range())
-        .collect();
+    let hidden = obsidian_comments(text);
     let mut items = Vec::new();
     for (event, span) in Parser::new_ext(text, markdown_options()).into_offset_iter() {
         let Event::TaskListMarker(checked) = event else {
@@ -155,7 +183,8 @@ pub(crate) fn items_in(content: &str, range: Range<usize>) -> Vec<CheckItem> {
 ///   instead of flipping the item back. `None` makes the call idempotent.
 /// - `expect_text`: the item text the caller saw; a mismatch is a conflict.
 ///
-/// Only the state byte is written; nothing else in the file changes.
+/// Only the state byte is written; nothing else in the file changes. The
+/// read-modify-write holds the repo's write lock.
 pub fn set_checked(
     entity: &EntityRecord,
     target: Target,
@@ -181,6 +210,7 @@ fn set_checked_in(
     expect_checked: Option<bool>,
     expect_text: Option<&str>,
 ) -> McResult<CheckChange> {
+    let _lock = crate::lock::acquire_for_file(path)?;
     let content = std::fs::read_to_string(path)?;
     let all = entity_items(kind, &content);
     let found = all.iter().find(|i| match target {
@@ -421,5 +451,12 @@ mod tests {
             std::fs::read_to_string(&path).unwrap(),
             doc.replace("- [ ] Two", "- [x] Two")
         );
+    }
+
+    #[test]
+    fn percent_signs_in_code_do_not_hide_items() {
+        let doc = "---\nid: TASK-003\n---\nObsidian comments use `%%` markers.\n\n- [ ] Buy milk\n- [ ] Call Bob\n\n```\n%%\n```\n\n- [ ] After fence\n\n%%\n- [ ] really hidden\n%%\n\nProgress: 50%% done\n%% mc-links: [[SPR-001]] %%\n";
+        let texts: Vec<String> = items(doc).into_iter().map(|i| i.text).collect();
+        assert_eq!(texts, ["Buy milk", "Call Bob", "After fence"]);
     }
 }

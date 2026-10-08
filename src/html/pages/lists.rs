@@ -3,7 +3,7 @@
 use crate::data::{self, EntityRecord};
 use crate::entity::EntityKind;
 use crate::frontmatter;
-use crate::html::catalog::{display_name, split_wikilink};
+use crate::html::catalog::display_name;
 use crate::html::components::{
     clip, clip_text, data_table, date_html, due_html, empty_state, entity_name_link, id_chip,
     link_button, meeting_view_toggle, owner_html, page_header, row_filter, status_badge,
@@ -86,6 +86,8 @@ impl Col {
             Col::When => "col-when",
             Col::Summary => "col-summary",
             Col::Tags => "col-tags",
+            Col::Email => "col-email",
+            Col::Refs(..) | Col::ParentCustomer => "col-refs",
             _ => "",
         }
     }
@@ -126,6 +128,14 @@ fn columns_for(kind: EntityKind) -> Vec<Col> {
             Col::Summary,
             Col::Date("updated", "Updated"),
         ],
+        EntityKind::Milestone => vec![
+            Col::Id,
+            Col::Name("Title"),
+            Col::Status,
+            Col::Owner,
+            Col::Date("start_date", "Start"),
+            Col::Date("due_date", "Deadline"),
+        ],
         EntityKind::Sprint => vec![
             Col::Id,
             Col::Name("Title"),
@@ -161,7 +171,7 @@ fn columns_for(kind: EntityKind) -> Vec<Col> {
 }
 
 /// The customer a contact belongs to, derived from its directory.
-fn parent_customer_html(e: &EntityRecord, page: &Page) -> String {
+pub(crate) fn parent_customer_html(e: &EntityRecord, page: &Page) -> String {
     let customers_dir = &page.cfg.customers_dir;
     let dir_name = e
         .source_path
@@ -189,15 +199,7 @@ fn link_list(fm: &Value, key: &str, alt_key: &str) -> Vec<String> {
 pub(crate) fn refs_clip(page: &Page, items: &[String]) -> String {
     let names: Vec<String> = items
         .iter()
-        .map(|raw| {
-            let (target, alias) = split_wikilink(raw);
-            page.catalog
-                .canonical_id(target)
-                .and_then(|id| page.catalog.name(id))
-                .or(alias)
-                .unwrap_or(target)
-                .to_string()
-        })
+        .map(|raw| page.catalog.ref_label(raw))
         .filter(|n| !n.is_empty())
         .collect();
     clip(&page.catalog.refs_html(items), &names.join(", "))
@@ -329,25 +331,52 @@ pub fn list_page(
             )
         })
         .collect();
-    let rows: String = entities
-        .iter()
-        .map(|e| {
-            let cells: String = cols
-                .iter()
-                .map(|col| {
-                    format!(
-                        r#"<td class="{}">{}</td>"#,
-                        col.class(),
-                        cell_html(col, e, page, &list_href)
-                    )
-                })
-                .collect();
-            format!(
-                r#"<tr data-row data-id="{}">{cells}</tr>"#,
-                escape_html(&e.id)
-            )
-        })
-        .collect();
+    // Meetings by date: a "Today" rule between upcoming and past ones, and
+    // past meetings still marked as scheduled stand out.
+    let today = page.today.format("%Y-%m-%d").to_string();
+    let by_date = kind == EntityKind::Meeting && query.sort == Some("date");
+    let first_status = kind.statuses(page.cfg).first().map(String::as_str);
+    let is_past = |e: &EntityRecord| {
+        let date = frontmatter::get_str_or(&e.frontmatter, "date", "");
+        parse_date(date).is_some() && date < today.as_str()
+    };
+    let mut rows = String::new();
+    let mut prev_past: Option<bool> = None;
+    for e in entities {
+        let past = is_past(e);
+        if by_date && prev_past.is_some_and(|p| p != past) {
+            rows.push_str(&format!(
+                r#"<tr class="today-divider"><td colspan="{}"><span>Today · {}</span></td></tr>"#,
+                cols.len(),
+                page.today.format("%a %-d %b")
+            ));
+        }
+        prev_past = Some(past);
+        let status = frontmatter::get_str_or(&e.frontmatter, "status", "");
+        let overdue = kind == EntityKind::Meeting && past && Some(status) == first_status;
+        let cells: String = cols
+            .iter()
+            .map(|col| {
+                let mut html = cell_html(col, e, page, &list_href);
+                if overdue && matches!(col, Col::Status) {
+                    html = format!(
+                        r#"<span class="past-scheduled" title="This meeting is in the past but still marked {}.">{html}</span>"#,
+                        escape_html(status)
+                    );
+                }
+                format!(r#"<td class="{}">{html}</td>"#, col.class())
+            })
+            .collect();
+        rows.push_str(&format!(
+            r#"<tr data-row data-id="{}"{}>{cells}</tr>"#,
+            escape_html(&e.id),
+            if overdue {
+                r#" class="is-past-scheduled""#
+            } else {
+                ""
+            }
+        ));
+    }
     body.push_str(&data_table(&format!("list-{plural}"), &head, &rows));
     body.push_str(&table_count(entities.len(), total));
 
@@ -447,6 +476,85 @@ mod tests {
         assert!(html.contains(r#"<span class="tag-more" title="c">+1</span>"#));
         assert!(html.contains(r#"data-id="CUST-001""#));
         assert!(html.contains("Showing <span data-filter-count>1</span> of 1"));
+    }
+
+    #[test]
+    fn meetings_by_date_mark_today_and_stale_scheduled_ones() {
+        let (_d, cfg) = test_config();
+        let today = chrono::Local::now().date_naive();
+        let d = |n: i64| (today + chrono::Duration::days(n)).format("%Y-%m-%d");
+        let make = || {
+            let mut v = vec![
+                rec(
+                    EntityKind::Meeting,
+                    "MTG-001",
+                    &format!("title: Next\nstatus: scheduled\ndate: {}", d(3)),
+                ),
+                rec(
+                    EntityKind::Meeting,
+                    "MTG-002",
+                    &format!("title: Today\nstatus: scheduled\ndate: {}", d(0)),
+                ),
+                rec(
+                    EntityKind::Meeting,
+                    "MTG-003",
+                    &format!("title: Forgot\nstatus: scheduled\ndate: {}", d(-2)),
+                ),
+                rec(
+                    EntityKind::Meeting,
+                    "MTG-004",
+                    &format!("title: Held\nstatus: completed\ndate: {}", d(-9)),
+                ),
+            ];
+            sort_entities(&mut v, "date", "desc");
+            v
+        };
+        let cat = catalog(make(), &cfg);
+        let page = Page::new(&cfg, &cat, "");
+        let q = ListQuery {
+            status: None,
+            tag: None,
+            sort: Some("date"),
+            dir: "desc",
+        };
+        let html = list_page(&page, EntityKind::Meeting, &make(), &q);
+        assert_eq!(html.matches("today-divider").count(), 1);
+        let divider = html.find("today-divider").unwrap();
+        assert!(html.find(">Today<").unwrap() < divider);
+        assert!(divider < html.find(">Forgot<").unwrap());
+        assert!(html.contains(r#"<tr data-row data-id="MTG-003" class="is-past-scheduled">"#));
+        assert_eq!(html.matches("is-past-scheduled").count(), 1);
+        // Sorted otherwise: no divider.
+        let by_title = ListQuery {
+            sort: Some("name"),
+            ..q
+        };
+        assert!(
+            !list_page(&page, EntityKind::Meeting, &make(), &by_title).contains("today-divider")
+        );
+    }
+
+    #[test]
+    fn contact_columns_have_width_classes() {
+        let (_d, cfg) = test_config();
+        let make = || {
+            vec![rec(
+                EntityKind::Contact,
+                "CONT-001",
+                "name: Jane\nemail: jane@example.com",
+            )]
+        };
+        let cat = catalog(make(), &cfg);
+        let page = Page::new(&cfg, &cat, "");
+        let q = ListQuery {
+            status: None,
+            tag: None,
+            sort: None,
+            dir: "asc",
+        };
+        let html = list_page(&page, EntityKind::Contact, &make(), &q);
+        assert!(html.contains(r#"<td class="col-email">"#));
+        assert!(html.contains(r#"<td class="col-refs">"#));
     }
 
     #[test]

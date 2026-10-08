@@ -310,6 +310,12 @@ async fn invalid_input_is_rejected_with_the_field() {
         (
             Method::PATCH,
             "/api/tasks/TASK-001",
+            json!({"due_date": "2026-1-5"}),
+            "due_date",
+        ),
+        (
+            Method::PATCH,
+            "/api/tasks/TASK-001",
             json!({"sprint": "SPR-999"}),
             "sprint",
         ),
@@ -320,6 +326,18 @@ async fn invalid_input_is_rejected_with_the_field() {
             "owner",
         ),
         (Method::POST, "/api/tasks", json!({"title": "  "}), "title"),
+        (
+            Method::PATCH,
+            "/api/tasks/TASK-001",
+            json!({"title": " "}),
+            "title",
+        ),
+        (
+            Method::PATCH,
+            "/api/tasks/TASK-001",
+            json!({"project": "PROJ-404"}),
+            "project",
+        ),
         (
             Method::POST,
             "/api/tasks",
@@ -337,7 +355,7 @@ async fn invalid_input_is_rejected_with_the_field() {
     // Unknown fields, bad JSON, path traversal and missing tasks.
     let resp = send(
         &r,
-        write_req(Method::PATCH, "/api/tasks/TASK-001", json!({"title": "x"})),
+        write_req(Method::PATCH, "/api/tasks/TASK-001", json!({"tags": ["x"]})),
     )
     .await;
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
@@ -522,4 +540,114 @@ async fn version_tracks_outside_edits() {
         "---\nid: TASK-009\ntitle: From the CLI\nstatus: todo\n---\n",
     );
     assert_ne!(a, version(r.clone()).await);
+}
+
+#[tokio::test]
+async fn patch_renames_and_relinks_a_task() {
+    let tmp = repo();
+    write(
+        tmp.path(),
+        "projects/PROJ-001-apollo/PROJ-001.md",
+        "---\nid: PROJ-001\nname: Apollo\nstatus: active\n---\n",
+    );
+    let r = local(&tmp);
+    let detail = body_text(get(&r, "/entity/TASK-001").await).await;
+    let form = edit_form(&detail);
+    assert!(form.contains(r#"name="title" value="Fix the robot" required"#));
+    assert!(form.contains(r#"<select name="project">"#));
+
+    let resp = send(
+        &r,
+        write_req(
+            Method::PATCH,
+            "/api/tasks/TASK-001",
+            json!({"title": "Fix the arm", "project": "PROJ-001"}),
+        ),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(body_json(resp).await["task"]["title"], "Fix the arm");
+    let file = read(&tmp, "tasks/todo/TASK-001-fix.md");
+    assert!(file.contains("title: Fix the arm"), "{file}");
+    assert!(
+        file.contains("\n# Fix the arm\n\nNotes stay put.\n"),
+        "{file}"
+    );
+    assert!(!file.contains("Fix the robot"));
+    assert!(
+        file.contains("- '[[PROJ-001]]'") || file.contains("- \"[[PROJ-001]]\""),
+        "{file}"
+    );
+
+    // Clearing the project; a task linking several projects isn't rewritten.
+    let resp = send(
+        &r,
+        write_req(Method::PATCH, "/api/tasks/TASK-001", json!({"project": ""})),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert!(read(&tmp, "tasks/todo/TASK-001-fix.md").contains("projects: []"));
+    write(
+        tmp.path(),
+        "tasks/todo/TASK-003-two.md",
+        "---\nid: TASK-003\ntitle: Two\nstatus: todo\nprojects: ['[[PROJ-001]]', '[[PROJ-002]]']\n---\n",
+    );
+    let resp = send(
+        &r,
+        write_req(Method::PATCH, "/api/tasks/TASK-003", json!({"project": ""})),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(body_json(resp).await["field"], "project");
+    let detail = body_text(get(&r, "/entity/TASK-003").await).await;
+    assert!(!edit_form(&detail).contains(r#"<select name="project">"#));
+}
+
+/// The task edit form in a detail page.
+fn edit_form(html: &str) -> &str {
+    let start = html.find(r#"<form class="edit-panel""#).expect("edit form");
+    let end = start + html[start..].find("</form>").unwrap();
+    &html[start..end]
+}
+
+#[tokio::test]
+async fn writes_report_the_version_they_started_from() {
+    let tmp = repo();
+    let r = local(&tmp);
+    let before = body_json(get(&r, "/api/version").await).await["version"].clone();
+    // Something else edits a file just before the page writes.
+    write(
+        tmp.path(),
+        "tasks/todo/TASK-002-plan.md",
+        "---\nid: TASK-002\ntitle: Plan B\nstatus: in-progress\npriority: 3\n---\n",
+    );
+    let outside = body_json(get(&r, "/api/version").await).await["version"].clone();
+    assert_ne!(before, outside);
+    let resp = send(
+        &r,
+        write_req(
+            Method::POST,
+            "/api/tasks/TASK-001/move",
+            json!({"status": "review"}),
+        ),
+    )
+    .await;
+    let v = body_json(resp).await;
+    // The page compares prev_version with the version it knew, so the
+    // outside edit isn't mistaken for part of its own write.
+    assert_eq!(v["prev_version"], outside);
+    assert_ne!(v["version"], outside);
+    for (method, uri, body) in [
+        (Method::PATCH, "/api/tasks/TASK-001", json!({"priority": 1})),
+        (Method::POST, "/api/tasks", json!({"title": "New"})),
+        (
+            Method::POST,
+            "/api/entities/TASK-001/comments",
+            json!({"text": "Hi"}),
+        ),
+    ] {
+        let v = body_json(send(&r, write_req(method, uri, body)).await).await;
+        assert!(v["prev_version"].is_string(), "{uri}");
+        assert_ne!(v["prev_version"], v["version"], "{uri}");
+    }
 }

@@ -53,6 +53,15 @@ pub fn slug_variants(name: &str) -> Vec<String> {
 fn slugify_with(name: &str, transliterate_letters: bool) -> String {
     let mut lower = String::with_capacity(name.len());
     for c in name.to_lowercase().chars() {
+        // Decomposed (NFD) input, common on macOS, spells `ü` as `u` plus a
+        // combining diaeresis: fold it like the precomposed letter (`ue`) and
+        // drop other combining accents (`e` + U+0301 -> `e`).
+        if transliterate_letters && ('\u{300}'..='\u{36f}').contains(&c) {
+            if c == '\u{308}' && lower.ends_with(['a', 'o', 'u']) {
+                lower.push('e');
+            }
+            continue;
+        }
         match transliterate(c).filter(|_| transliterate_letters) {
             Some(ascii) => lower.push_str(ascii),
             None => lower.push(c),
@@ -85,8 +94,16 @@ pub fn parse_comma_list(s: &str) -> Vec<String> {
 /// over `path` so readers never see a partially written file. The temporary
 /// name is hidden and unique per process and call (the MCP and API servers
 /// write from several threads), and it is removed if the write fails.
+///
+/// A symlinked `path` is followed (the link's target is replaced, the link
+/// stays a link), and an existing file keeps its permissions.
 pub fn atomic_write(path: &Path, data: &[u8]) -> McResult<()> {
     static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let resolved = fs::canonicalize(path)
+        .ok()
+        .filter(|_| fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink()));
+    let path = resolved.as_deref().unwrap_or(path);
+    let permissions = fs::metadata(path).ok().map(|m| m.permissions());
     let file_name = path
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
@@ -97,7 +114,12 @@ pub fn atomic_write(path: &Path, data: &[u8]) -> McResult<()> {
         std::process::id(),
         COUNTER.fetch_add(1, Ordering::Relaxed)
     ));
-    let result = fs::write(&tmp, data).and_then(|()| fs::rename(&tmp, path));
+    let result = fs::write(&tmp, data)
+        .and_then(|()| match &permissions {
+            Some(p) => fs::set_permissions(&tmp, p.clone()),
+            None => Ok(()),
+        })
+        .and_then(|()| fs::rename(&tmp, path));
     if result.is_err() {
         let _ = fs::remove_file(&tmp);
     }
@@ -155,6 +177,39 @@ mod tests {
             .collect();
         assert_eq!(names.len(), 1);
         assert!(atomic_write(&tmp.path().join("missing").join("x.md"), b"x").is_err());
+    }
+
+    #[test]
+    fn test_slugify_decomposed_umlauts_match_precomposed() {
+        let nfd = "Gru\u{308}n Ma\u{308}rz Cafe\u{301} O\u{308}l";
+        assert_eq!(slugify(nfd), slugify("Grün März Café Öl"));
+        assert_eq!(slugify(nfd), "gruen-maerz-cafe-oel");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_atomic_write_follows_symlinks_and_keeps_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::TempDir::new().unwrap();
+        let shared = tmp.path().join("shared");
+        fs::create_dir(&shared).unwrap();
+        let target = shared.join("linked.md");
+        fs::write(&target, "old").unwrap();
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o600)).unwrap();
+        let link = tmp.path().join("TASK-020-linked.md");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        atomic_write(&link, b"new").unwrap();
+        assert!(fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(fs::read_to_string(&target).unwrap(), "new");
+        let mode = fs::metadata(&target).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+        // No temp files left next to the link or the target.
+        assert_eq!(fs::read_dir(&shared).unwrap().count(), 1);
+        assert_eq!(fs::read_dir(tmp.path()).unwrap().count(), 2);
     }
 
     #[test]

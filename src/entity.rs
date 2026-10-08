@@ -1,4 +1,4 @@
-use crate::config::{RepoMode, ResolvedConfig};
+use crate::config::ResolvedConfig;
 use crate::data;
 use crate::error::{McError, McResult};
 use crate::frontmatter;
@@ -15,19 +15,21 @@ pub enum EntityKind {
     Research,
     Task,
     Sprint,
+    Milestone,
     Proposal,
     Contact,
 }
 
 impl EntityKind {
     /// Every entity kind, in display order.
-    pub const ALL: [EntityKind; 8] = [
+    pub const ALL: [EntityKind; 9] = [
         EntityKind::Customer,
         EntityKind::Project,
         EntityKind::Meeting,
         EntityKind::Research,
         EntityKind::Task,
         EntityKind::Sprint,
+        EntityKind::Milestone,
         EntityKind::Proposal,
         EntityKind::Contact,
     ];
@@ -40,6 +42,7 @@ impl EntityKind {
             EntityKind::Research => "research",
             EntityKind::Task => "task",
             EntityKind::Sprint => "sprint",
+            EntityKind::Milestone => "milestone",
             EntityKind::Proposal => "proposal",
             EntityKind::Contact => "contact",
         }
@@ -53,6 +56,7 @@ impl EntityKind {
             EntityKind::Research => "research",
             EntityKind::Task => "tasks",
             EntityKind::Sprint => "sprints",
+            EntityKind::Milestone => "milestones",
             EntityKind::Proposal => "proposals",
             EntityKind::Contact => "contacts",
         }
@@ -66,6 +70,7 @@ impl EntityKind {
             EntityKind::Research => &cfg.id_prefixes.research,
             EntityKind::Task => &cfg.id_prefixes.task,
             EntityKind::Sprint => &cfg.id_prefixes.sprint,
+            EntityKind::Milestone => &cfg.id_prefixes.milestone,
             EntityKind::Proposal => &cfg.id_prefixes.proposal,
             EntityKind::Contact => &cfg.id_prefixes.contact,
         }
@@ -79,6 +84,7 @@ impl EntityKind {
             EntityKind::Research => &cfg.research_dir,
             EntityKind::Task => &cfg.tasks_dir,
             EntityKind::Sprint => &cfg.sprints_dir,
+            EntityKind::Milestone => &cfg.milestones_dir,
             EntityKind::Proposal => &cfg.proposals_dir,
             EntityKind::Contact => &cfg.customers_dir, // contacts live under customers/*/contacts/
         }
@@ -92,24 +98,9 @@ impl EntityKind {
             EntityKind::Research => &cfg.statuses.research,
             EntityKind::Task => &cfg.statuses.task,
             EntityKind::Sprint => &cfg.statuses.sprint,
+            EntityKind::Milestone => &cfg.statuses.milestone,
             EntityKind::Proposal => &cfg.statuses.proposal,
             EntityKind::Contact => &cfg.statuses.contact,
-        }
-    }
-
-    /// Whether this entity kind is available in the given repo mode.
-    #[allow(dead_code)]
-    pub fn available_in_mode(&self, mode: RepoMode) -> bool {
-        match mode {
-            RepoMode::Standalone => true,
-            RepoMode::Embedded => matches!(
-                self,
-                EntityKind::Task
-                    | EntityKind::Meeting
-                    | EntityKind::Research
-                    | EntityKind::Sprint
-                    | EntityKind::Proposal
-            ),
         }
     }
 
@@ -121,6 +112,7 @@ impl EntityKind {
             "research" => Ok(EntityKind::Research),
             "task" | "tasks" => Ok(EntityKind::Task),
             "sprint" | "sprints" => Ok(EntityKind::Sprint),
+            "milestone" | "milestones" => Ok(EntityKind::Milestone),
             "proposal" | "proposals" | "prop" => Ok(EntityKind::Proposal),
             "contact" | "contacts" => Ok(EntityKind::Contact),
             _ => Err(McError::usage(format!("Unknown entity kind: {s}"), None)),
@@ -200,17 +192,23 @@ fn subdirs(dir: &Path) -> Vec<PathBuf> {
     dirs
 }
 
-/// Task statuses whose files live in `todo/`; every other status (`done`,
-/// `cancelled`, custom ones) lives in `done/`.
-pub const ACTIVE_TASK_STATUSES: &[&str] = &["backlog", "todo", "in-progress", "review"];
+/// Task statuses that end a task's lifecycle; their files live in `done/`.
+/// Every other status, including custom ones from the config (`blocked`,
+/// `waiting`), is active and lives in `todo/`.
+pub const FINISHED_TASK_STATUSES: &[&str] = &["done", "cancelled"];
+
+/// Whether a task with `status` is finished (see [`FINISHED_TASK_STATUSES`]).
+pub fn is_finished_task_status(status: &str) -> bool {
+    FINISHED_TASK_STATUSES.contains(&status)
+}
 
 /// The subfolder of a `tasks/` directory (`todo` or `done`) where a task with
-/// `status` belongs. Shared by `mc new task` and `mc task move`.
+/// `status` belongs. Shared by `mc new task`, `mc task move` and `mc validate`.
 pub fn task_status_folder(status: &str) -> &'static str {
-    if ACTIVE_TASK_STATUSES.contains(&status) {
-        "todo"
-    } else {
+    if is_finished_task_status(status) {
         "done"
+    } else {
+        "todo"
     }
 }
 
@@ -261,9 +259,9 @@ pub fn collect_all_contact_dirs(cfg: &ResolvedConfig) -> Vec<ContactLocation> {
 /// identified by frontmatter only (their file names are date/slug based).
 /// Always returns max+1 (no gap-filling).
 ///
-/// Note: There is a theoretical TOCTOU race between reading the max ID and
-/// writing the new entity. This is acceptable for a single-user CLI; the REST
-/// API serializes writers with a lock.
+/// Reading the maximum and writing the new entity is a check-then-act pair:
+/// callers that allocate an ID hold [`crate::lock`]'s repo write lock across
+/// both (every `create_*` in `commands::new` does).
 pub fn next_id(kind: EntityKind, cfg: &ResolvedConfig) -> McResult<EntityId> {
     let prefix = kind.prefix(cfg);
     let id_re = Regex::new(&format!(r"^{}-(\d+)", regex::escape(prefix)))
@@ -276,12 +274,14 @@ pub fn next_id(kind: EntityKind, cfg: &ResolvedConfig) -> McResult<EntityId> {
     };
 
     let names: Vec<String> = match kind {
-        EntityKind::Customer | EntityKind::Project | EntityKind::Research | EntityKind::Sprint => {
-            subdirs(kind.base_dir(cfg))
-                .iter()
-                .map(|d| name_of(d))
-                .collect()
-        }
+        EntityKind::Customer
+        | EntityKind::Project
+        | EntityKind::Research
+        | EntityKind::Sprint
+        | EntityKind::Milestone => subdirs(kind.base_dir(cfg))
+            .iter()
+            .map(|d| name_of(d))
+            .collect(),
         EntityKind::Task => data::task_files(cfg).iter().map(|p| name_of(p)).collect(),
         EntityKind::Contact => data::contact_files(cfg)
             .iter()
@@ -416,6 +416,22 @@ mod tests {
             next_id(EntityKind::Meeting, &cfg).unwrap().to_string(),
             "MTG-042"
         );
+    }
+
+    #[test]
+    fn test_custom_task_statuses_are_active() {
+        assert_eq!(task_status_folder("done"), "done");
+        assert_eq!(task_status_folder("cancelled"), "done");
+        for status in [
+            "backlog",
+            "todo",
+            "in-progress",
+            "review",
+            "blocked",
+            "waiting",
+        ] {
+            assert_eq!(task_status_folder(status), "todo", "{status}");
+        }
     }
 
     #[test]

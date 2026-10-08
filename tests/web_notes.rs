@@ -302,3 +302,34 @@ async fn comment_fragments_carry_the_base_path() {
         .unwrap()
         .contains(r#"href="/hq/entity/TASK-001""#));
 }
+
+#[tokio::test]
+async fn long_comments_fit_and_oversized_bodies_get_a_clear_error() {
+    let tmp = repo();
+    let r = app(&tmp, ServeOptions::default());
+    let detail = page(&r, "/entity/TASK-001").await;
+    assert!(detail.contains(r#"maxlength="20000""#));
+    // Under the character limit, but 38 KB of UTF-8: must fit.
+    let umlauts = "ä".repeat(19_000);
+    let resp = send(
+        &r,
+        write_req("/api/entities/TASK-001/comments", json!({"text": umlauts})),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    assert!(read(&tmp, TASK).contains(&umlauts));
+    // Far over it: a clear message on the field, not a raw buffer error.
+    let resp = send(
+        &r,
+        write_req(
+            "/api/entities/TASK-001/comments",
+            json!({"text": "ä".repeat(70_000)}),
+        ),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    let v = body_json(resp).await;
+    assert_eq!(v["error"], "too_large");
+    assert_eq!(v["field"], "text");
+    assert_eq!(v["message"], "Keep comments under 20000 characters.");
+}

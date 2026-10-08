@@ -455,6 +455,8 @@ async fn docs_page_is_served_unauth() {
         html.contains("rapi-doc") && html.contains("/v1/openapi.json"),
         "rapidoc page must reference the spec"
     );
+    // The third-party viewer is pinned by hash (tokens are typed on this page).
+    assert!(html.contains(r#"integrity="sha384-"#) && html.contains("crossorigin"));
 }
 
 #[tokio::test]
@@ -566,6 +568,19 @@ async fn config_exposes_site_name_and_available_kinds() {
 #[tokio::test]
 async fn list_fields_accept_json_arrays() {
     let (r, _t) = router(false);
+    // Dependencies must exist; loose IDs are stored canonically.
+    for title in ["Dep"; 9] {
+        let resp = send(
+            &r,
+            authed(
+                Method::POST,
+                "/v1/tasks",
+                Some(serde_json::json!({ "title": title })),
+            ),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::CREATED);
+    }
     let resp = send(
         &r,
         authed(
@@ -574,7 +589,7 @@ async fn list_fields_accept_json_arrays() {
             Some(serde_json::json!({
                 "title": "Array tags",
                 "tags": ["alpha", "beta"],
-                "depends_on": ["TASK-009"],
+                "depends_on": ["task-9"],
             })),
         ),
     )
@@ -585,7 +600,8 @@ async fn list_fields_accept_json_arrays() {
     let tasks = tasks.as_array().unwrap();
     assert_eq!(tasks.len(), 1);
     assert_eq!(tasks[0]["tags"], serde_json::json!(["alpha", "beta"]));
-    assert_eq!(tasks[0]["depends_on"], serde_json::json!(["[[TASK-009]]"]));
+    // Wiki-link brackets are stripped, as in MCP and `mc list --json`.
+    assert_eq!(tasks[0]["depends_on"], serde_json::json!(["TASK-009"]));
 }
 
 #[tokio::test]
@@ -628,6 +644,33 @@ async fn task_scoped_to_unknown_project_is_404() {
     )
     .await;
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn moving_a_non_task_is_400_and_changes_nothing() {
+    let (r, tmp) = router(false);
+    let resp = send(
+        &r,
+        authed(
+            Method::POST,
+            "/v1/meetings",
+            Some(serde_json::json!({"title": "Kickoff", "date": "2026-01-27"})),
+        ),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let resp = send(
+        &r,
+        authed(
+            Method::POST,
+            "/v1/tasks/MTG-001/move",
+            Some(serde_json::json!({"status": "todo"})),
+        ),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    assert!(tmp.path().join("meetings/2026-01-27-kickoff.md").is_file());
+    assert!(!tmp.path().join("todo").exists());
 }
 
 #[tokio::test]
@@ -787,4 +830,612 @@ async fn read_only_rejects_checks_and_comments() {
         .await;
         assert_eq!(resp.status(), StatusCode::FORBIDDEN, "{uri}");
     }
+}
+
+// ───────────────────────── problem+json everywhere ─────────────────────────
+
+async fn assert_problem(resp: Response, status: StatusCode, kind: &str) -> Value {
+    assert_eq!(resp.status(), status);
+    let ct = resp.headers()["content-type"].to_str().unwrap().to_string();
+    assert_eq!(ct, "application/problem+json", "{status}");
+    let v = body_json(resp).await;
+    assert_eq!(v["status"], status.as_u16());
+    assert_eq!(v["type"], format!("https://docs.mc.dev/errors/{kind}"));
+    assert!(!v["detail"].as_str().unwrap().is_empty(), "{v}");
+    v
+}
+
+fn raw(method: Method, path: &str, content_type: Option<&str>, body: &str) -> Request<Body> {
+    let mut b = Request::builder()
+        .method(method)
+        .uri(path)
+        .header("Authorization", format!("Bearer {BEARER}"));
+    if let Some(ct) = content_type {
+        b = b.header("Content-Type", ct);
+    }
+    b.body(Body::from(body.to_string())).unwrap()
+}
+
+#[tokio::test]
+async fn rejections_and_unknown_routes_are_problem_json() {
+    let (r, _t) = router(false);
+    let json = Some("application/json");
+    // Unparseable JSON, a missing field, and no JSON content type.
+    for (ct, body) in [(json, "{not json"), (json, r#"{"statu":"todo"}"#)] {
+        let resp = send(&r, raw(Method::POST, "/v1/tasks/TASK-001/move", ct, body)).await;
+        assert_problem(resp, StatusCode::BAD_REQUEST, "bad-request").await;
+    }
+    let resp = send(&r, raw(Method::POST, "/v1/tasks", None, r#"{"title":"x"}"#)).await;
+    assert_problem(
+        resp,
+        StatusCode::UNSUPPORTED_MEDIA_TYPE,
+        "unsupported-media-type",
+    )
+    .await;
+    // A query parameter of the wrong type, a path segment of the wrong type.
+    let resp = send(&r, authed(Method::GET, "/v1/tasks?priority=abc", None)).await;
+    assert_problem(resp, StatusCode::BAD_REQUEST, "bad-request").await;
+    let resp = send(
+        &r,
+        authed(
+            Method::POST,
+            "/v1/entities/task/TASK-001/checklist/first",
+            Some(serde_json::json!({})),
+        ),
+    )
+    .await;
+    assert_problem(resp, StatusCode::BAD_REQUEST, "bad-request").await;
+    // Unknown routes, with or without a token, and a wrong method.
+    let resp = send(&r, authed(Method::GET, "/v1/nothing", None)).await;
+    assert_problem(resp, StatusCode::NOT_FOUND, "not-found").await;
+    let resp = send(
+        &r,
+        Request::builder()
+            .uri("/nothing")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_problem(resp, StatusCode::NOT_FOUND, "not-found").await;
+    let resp = send(&r, authed(Method::DELETE, "/v1/config", None)).await;
+    assert!(resp.headers().contains_key("allow"));
+    assert_problem(resp, StatusCode::METHOD_NOT_ALLOWED, "method-not-allowed").await;
+    // Oversized body.
+    let huge = format!(r#"{{"name":"X","tags":"{}"}}"#, "a".repeat(128 * 1024));
+    let resp = send(&r, raw(Method::POST, "/v1/customers", json, &huge)).await;
+    assert_problem(resp, StatusCode::PAYLOAD_TOO_LARGE, "payload-too-large").await;
+}
+
+// ───────────────────────── validate is a read ─────────────────────────
+
+#[tokio::test]
+async fn validate_works_for_read_only_servers_and_tokens() {
+    // Read-only server, read-write token.
+    let (r, _t) = router(true);
+    for method in [Method::GET, Method::POST] {
+        let resp = send(&r, authed(method.clone(), "/v1/validate", None)).await;
+        assert_eq!(resp.status(), StatusCode::OK, "{method}");
+        assert_eq!(body_json(resp).await["ok"], true);
+    }
+
+    // Read-only token on a writable server.
+    let tmp = TempDir::new().unwrap();
+    init::run(tmp.path(), false, false, Some("RO"), false, true).unwrap();
+    let cfg = config::load_config(tmp.path(), RepoMode::Standalone).unwrap();
+    let yaml = format!(
+        "tokens:\n  - name: ro\n    hash: \"{}\"\n    capabilities: [read]\n",
+        hash_token(BEARER)
+    );
+    let r = build_router(
+        cfg,
+        &ApiServerConfig {
+            bind: "127.0.0.1:0".parse().unwrap(),
+            tokens: TokenStore::from_yaml(&yaml).unwrap(),
+            read_only: false,
+        },
+    );
+    let resp = send(&r, authed(Method::POST, "/v1/validate", None)).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let resp = send(&r, authed(Method::POST, "/v1/index", None)).await;
+    assert_problem(resp, StatusCode::FORBIDDEN, "forbidden").await;
+}
+
+// ───────────────────────── repo-relative paths ─────────────────────────
+
+#[tokio::test]
+async fn responses_never_show_server_paths() {
+    let (r, t) = router(false);
+    let root = t.path().display().to_string();
+    let canonical = t.path().canonicalize().unwrap().display().to_string();
+    let leaks = |s: &str| s.contains(&root) || s.contains(&canonical);
+
+    // A dependency must exist, so create it first.
+    let dep = authed(
+        Method::POST,
+        "/v1/tasks",
+        Some(serde_json::json!({"title": "Dep"})),
+    );
+    assert_eq!(send(&r, dep).await.status(), StatusCode::CREATED);
+    let created = body_json(
+        send(
+            &r,
+            authed(
+                Method::POST,
+                "/v1/tasks",
+                Some(serde_json::json!({"title": "Paths", "depends_on": "task-1"})),
+            ),
+        )
+        .await,
+    )
+    .await;
+    assert!(created["path"]
+        .as_str()
+        .unwrap()
+        .starts_with("tasks/todo/TASK-002"));
+
+    for uri in [
+        "/v1/entities/task",
+        "/v1/tasks",
+        "/v1/entities/task/TASK-002",
+    ] {
+        let text = body_text(send(&r, authed(Method::GET, uri, None)).await).await;
+        assert!(!leaks(&text), "{uri}: {text}");
+    }
+    let one =
+        body_json(send(&r, authed(Method::GET, "/v1/entities/task/TASK-002", None)).await).await;
+    assert!(one["source_path"]
+        .as_str()
+        .unwrap()
+        .starts_with("tasks/todo/"));
+    assert_eq!(
+        one["frontmatter"]["depends_on"],
+        serde_json::json!(["TASK-001"])
+    );
+    let list = body_json(send(&r, authed(Method::GET, "/v1/tasks", None)).await).await;
+    assert_eq!(list[0]["_kind"], "task");
+    assert!(list[0]["_source"]
+        .as_str()
+        .unwrap()
+        .starts_with("tasks/todo/"));
+
+    let moved = body_json(
+        send(
+            &r,
+            authed(
+                Method::POST,
+                "/v1/tasks/TASK-002/move",
+                Some(serde_json::json!({"status": "done"})),
+            ),
+        )
+        .await,
+    )
+    .await;
+    assert!(
+        moved["path"].as_str().unwrap().starts_with("tasks/done/"),
+        "{moved}"
+    );
+
+    // An error detail that names the file names it relative to the repo.
+    let file = t.path().join(moved["path"].as_str().unwrap());
+    let content = std::fs::read_to_string(&file).unwrap();
+    std::fs::write(
+        &file,
+        format!("{content}\n## Comments\n\n### 2026-01-01 10:00 · A\n\n```\nopen fence\n"),
+    )
+    .unwrap();
+    let resp = send(
+        &r,
+        authed(
+            Method::POST,
+            "/v1/entities/task/TASK-002/comments",
+            Some(serde_json::json!({"text": "hi"})),
+        ),
+    )
+    .await;
+    let v = assert_problem(resp, StatusCode::BAD_REQUEST, "bad-request").await;
+    let detail = v["detail"].as_str().unwrap();
+    assert!(
+        !leaks(detail) && detail.contains("tasks/done/TASK-002"),
+        "{detail}"
+    );
+}
+
+// ───────────────────────── forgiving IDs and statuses ─────────────────────────
+
+#[tokio::test]
+async fn ids_and_statuses_are_forgiving_like_the_cli() {
+    let (r, _t) = router(false);
+    send(
+        &r,
+        authed(
+            Method::POST,
+            "/v1/tasks",
+            Some(serde_json::json!({"title": "Loose"})),
+        ),
+    )
+    .await;
+    for uri in [
+        "/v1/entities/task/task-1",
+        "/v1/entities/task/TASK-0001",
+        "/v1/entities/task/1",
+    ] {
+        let resp = send(&r, authed(Method::GET, uri, None)).await;
+        assert_eq!(resp.status(), StatusCode::OK, "{uri}");
+        assert_eq!(body_json(resp).await["id"], "TASK-001");
+    }
+    let resp = send(&r, authed(Method::GET, "/v1/entities/task/TSK-1", None)).await;
+    let v = assert_problem(resp, StatusCode::BAD_REQUEST, "invalid-id").await;
+    assert!(v["detail"].as_str().unwrap().contains("TASK-001"), "{v}");
+
+    // `doing` is in-progress (not "did you mean done"), case is ignored.
+    for (given, stored) in [("doing", "in-progress"), ("Review", "review")] {
+        let resp = send(
+            &r,
+            authed(
+                Method::POST,
+                "/v1/tasks/task-1/move",
+                Some(serde_json::json!({"status": given})),
+            ),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK, "{given}");
+        assert_eq!(body_json(resp).await["new_status"], stored);
+    }
+    let resp = send(
+        &r,
+        authed(
+            Method::POST,
+            "/v1/tasks/TASK-001/move",
+            Some(serde_json::json!({"status": "revew"})),
+        ),
+    )
+    .await;
+    let v = assert_problem(resp, StatusCode::BAD_REQUEST, "bad-request").await;
+    assert!(
+        v["detail"]
+            .as_str()
+            .unwrap()
+            .contains("did you mean 'review'"),
+        "{v}"
+    );
+
+    // Only tasks move.
+    send(
+        &r,
+        authed(
+            Method::POST,
+            "/v1/meetings",
+            Some(serde_json::json!({"title": "Sync"})),
+        ),
+    )
+    .await;
+    let resp = send(
+        &r,
+        authed(
+            Method::POST,
+            "/v1/tasks/MTG-001/move",
+            Some(serde_json::json!({"status": "done"})),
+        ),
+    )
+    .await;
+    assert_problem(resp, StatusCode::BAD_REQUEST, "bad-request").await;
+
+    // Status filters take the same spellings.
+    let tasks =
+        body_json(send(&r, authed(Method::GET, "/v1/tasks?status=REVIEW", None)).await).await;
+    assert_eq!(tasks.as_array().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn patch_task_fields_and_next_tasks() {
+    let (r, tmp) = router(false);
+    for (path, body) in [
+        ("/v1/customers", serde_json::json!({"name": "Acme"})),
+        (
+            "/v1/tasks",
+            serde_json::json!({"title": "Blocker", "status": "todo"}),
+        ),
+        ("/v1/tasks", serde_json::json!({"title": "Follow-up"})),
+    ] {
+        let resp = send(&r, authed(Method::POST, path, Some(body))).await;
+        assert_eq!(resp.status(), StatusCode::CREATED);
+    }
+
+    let resp = send(
+        &r,
+        authed(
+            Method::PATCH,
+            "/v1/tasks/task-2",
+            Some(serde_json::json!({
+                "priority": 1,
+                "owner": "alice",
+                "customer": "cust-1",
+                "tags": ["ops", "q4"],
+                "depends_on": "TASK-001",
+                "due_date": "2026-10-31",
+            })),
+        ),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let v = body_json(resp).await;
+    assert_eq!(v["id"], "TASK-002");
+    assert_eq!(
+        v["changed"],
+        serde_json::json!([
+            "priority",
+            "owner",
+            "due_date",
+            "customers",
+            "tags",
+            "depends_on"
+        ])
+    );
+    assert_eq!(v["path"], "tasks/todo/TASK-002-follow-up.md");
+    let file =
+        std::fs::read_to_string(tmp.path().join("tasks/todo/TASK-002-follow-up.md")).unwrap();
+    assert!(file.contains("\"[[CUST-001]]\""), "{file}");
+    assert!(file.contains("\"[[TASK-001]]\""), "{file}");
+
+    // TASK-002 waits on TASK-001.
+    let resp = send(&r, authed(Method::GET, "/v1/tasks/next", None)).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let v = body_json(resp).await;
+    assert_eq!(v["tasks"][0]["id"], "TASK-001");
+    assert_eq!(
+        (v["actionable"].as_u64(), v["blocked"].as_u64()),
+        (Some(1), Some(1))
+    );
+
+    let resp = send(
+        &r,
+        authed(
+            Method::PATCH,
+            "/v1/tasks/TASK-001",
+            Some(serde_json::json!({"status": "completed"})),
+        ),
+    )
+    .await;
+    let v = body_json(resp).await;
+    assert_eq!(v["new_status"], "done");
+    assert_eq!(v["path"], "tasks/done/TASK-001-blocker.md");
+    let resp = send(
+        &r,
+        authed(Method::GET, "/v1/tasks/next?owner=ALICE&limit=1", None),
+    )
+    .await;
+    let v = body_json(resp).await;
+    assert_eq!(v["tasks"][0]["id"], "TASK-002");
+    assert_eq!(v["blocked"], 0);
+
+    // Mistakes are problem+json and change nothing.
+    let before =
+        std::fs::read_to_string(tmp.path().join("tasks/todo/TASK-002-follow-up.md")).unwrap();
+    for (body, status, kind) in [
+        (
+            serde_json::json!({}),
+            StatusCode::BAD_REQUEST,
+            "bad-request",
+        ),
+        (
+            serde_json::json!({"priority": 7}),
+            StatusCode::BAD_REQUEST,
+            "bad-request",
+        ),
+        (
+            serde_json::json!({"due_date": "31.10.2026"}),
+            StatusCode::BAD_REQUEST,
+            "bad-request",
+        ),
+        (
+            serde_json::json!({"projects": "PROJ-404"}),
+            StatusCode::NOT_FOUND,
+            "not-found",
+        ),
+    ] {
+        let resp = send(
+            &r,
+            authed(Method::PATCH, "/v1/tasks/TASK-002", Some(body.clone())),
+        )
+        .await;
+        assert_problem(resp, status, kind).await;
+    }
+    let resp = send(
+        &r,
+        authed(
+            Method::PATCH,
+            "/v1/tasks/TASK-002",
+            Some(serde_json::json!({"colour": "red"})),
+        ),
+    )
+    .await;
+    // Unknown fields are refused rather than silently ignored.
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let resp = send(
+        &r,
+        authed(
+            Method::PATCH,
+            "/v1/tasks/TASK-404",
+            Some(serde_json::json!({"owner": "x"})),
+        ),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    assert_eq!(
+        std::fs::read_to_string(tmp.path().join("tasks/todo/TASK-002-follow-up.md")).unwrap(),
+        before
+    );
+}
+
+#[tokio::test]
+async fn patch_task_needs_write_and_spec_lists_it() {
+    let (r, _t) = router(true);
+    let resp = send(
+        &r,
+        authed(
+            Method::PATCH,
+            "/v1/tasks/TASK-001",
+            Some(serde_json::json!({"owner": "x"})),
+        ),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    // Reads still work on a read-only server.
+    let resp = send(&r, authed(Method::GET, "/v1/tasks/next", None)).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let resp = send(
+        &r,
+        Request::builder()
+            .uri("/v1/openapi.json")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    let spec = body_json(resp).await;
+    assert!(spec.pointer("/paths/~1v1~1tasks~1{id}/patch").is_some());
+    assert!(spec.pointer("/paths/~1v1~1tasks~1next/get").is_some());
+    // The spec's version follows the crate instead of a hard-coded string.
+    assert_eq!(spec["info"]["version"], env!("CARGO_PKG_VERSION"));
+}
+
+#[tokio::test]
+async fn milestones_can_be_created_assigned_filtered_and_cleared() {
+    let (r, _t) = router(false);
+    let response = send(&r,authed(Method::POST,"/v1/milestones",Some(serde_json::json!({"title":"Delivery", "description":"Ship it", "start_date":"2026-10-01", "due_date":"2026-10-31"})))).await;
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let created = body_json(response).await;
+    assert_eq!(created["id"], "MS-001");
+    let response = send(
+        &r,
+        authed(
+            Method::POST,
+            "/v1/tasks",
+            Some(serde_json::json!({"title":"Ship", "milestone":"ms-1"})),
+        ),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let response = send(&r, authed(Method::GET, "/v1/tasks?milestone=MS-001", None)).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let tasks = body_json(response).await;
+    assert_eq!(tasks.as_array().unwrap().len(), 1);
+    assert_eq!(tasks[0]["milestone"], "MS-001");
+    let response = send(
+        &r,
+        authed(
+            Method::PATCH,
+            "/v1/tasks/TASK-001",
+            Some(serde_json::json!({"milestone":""})),
+        ),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let tasks =
+        body_json(send(&r, authed(Method::GET, "/v1/tasks?milestone=MS-001", None)).await).await;
+    assert!(tasks.as_array().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn milestone_errors_are_typed_and_write_nothing() {
+    let (r, t) = router(false);
+    // A deadline before the start is a 400 and creates nothing.
+    let resp = send(
+        &r,
+        authed(
+            Method::POST,
+            "/v1/milestones",
+            Some(serde_json::json!({"title":"Late", "start_date":"2026-10-10", "due_date":"2026-10-01"})),
+        ),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    assert!(no_milestones(t.path()));
+    // `projects` takes a comma-separated string like every other list field.
+    let resp = send(
+        &r,
+        authed(
+            Method::POST,
+            "/v1/projects",
+            Some(serde_json::json!({"name":"Robot"})),
+        ),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let resp = send(
+        &r,
+        authed(
+            Method::POST,
+            "/v1/milestones",
+            Some(serde_json::json!({"title":"Beta", "projects":"proj-1"})),
+        ),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let resp = send(
+        &r,
+        authed(Method::GET, "/v1/entities/milestones/MS-001", None),
+    )
+    .await;
+    let ms = body_json(resp).await;
+    assert_eq!(ms["frontmatter"]["projects"][0], "PROJ-001");
+
+    let resp = send(
+        &r,
+        authed(
+            Method::POST,
+            "/v1/tasks",
+            Some(serde_json::json!({"title":"T"})),
+        ),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let path = t
+        .path()
+        .join(body_json(resp).await["path"].as_str().unwrap());
+    let before = std::fs::read(&path).unwrap();
+    let resp = send(
+        &r,
+        authed(
+            Method::PATCH,
+            "/v1/tasks/TASK-001",
+            Some(serde_json::json!({"title":"Renamed", "milestone":"MS-404"})),
+        ),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+    let resp = send(&r, authed(Method::GET, "/v1/tasks?milestone=MS-404", None)).await;
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    // By title; an empty filter lists the tasks without a milestone.
+    let resp = send(&r, authed(Method::GET, "/v1/tasks?milestone=Beta", None)).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert!(body_json(resp).await.as_array().unwrap().is_empty());
+    let resp = send(&r, authed(Method::GET, "/v1/tasks?milestone=", None)).await;
+    let tasks = body_json(resp).await;
+    assert_eq!(tasks.as_array().unwrap().len(), 1);
+    assert_eq!(tasks[0]["id"], "TASK-001");
+}
+
+#[tokio::test]
+async fn milestones_cannot_be_created_read_only() {
+    let (r, t) = router(true);
+    let resp = send(
+        &r,
+        authed(
+            Method::POST,
+            "/v1/milestones",
+            Some(serde_json::json!({"title":"Nope"})),
+        ),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    assert!(no_milestones(t.path()));
+}
+
+/// Whether `milestones/` holds no milestone folder (init leaves a `.gitkeep`).
+fn no_milestones(root: &std::path::Path) -> bool {
+    std::fs::read_dir(root.join("milestones"))
+        .unwrap()
+        .all(|e| !e.unwrap().file_name().to_string_lossy().starts_with("MS-"))
 }

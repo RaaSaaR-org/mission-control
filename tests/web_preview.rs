@@ -163,6 +163,30 @@ async fn pages_ship_the_preview_script() {
     let tmp = repo();
     let router = app(&tmp, ServeOptions::default());
     let html = text(send(&router, Method::GET, "/entity/TASK-001").await).await;
-    assert!(html.contains(r#""/api/preview/""#));
-    assert!(html.contains(".preview-pop"));
+    assert!(html.contains(r#"<script src="/assets/app.js?v="#));
+    let js = text(send(&router, Method::GET, "/assets/app.js").await).await;
+    assert!(js.contains(r#""/api/preview/""#));
+    assert!(js.contains(".preview-pop"));
+}
+
+#[tokio::test]
+async fn cached_previews_follow_edits_on_disk() {
+    let tmp = repo();
+    let router = app(&tmp, ServeOptions::default());
+    let card = text(send(&router, Method::GET, "/api/preview/TASK-002").await).await;
+    assert!(!card.contains("Renamed outside"));
+    write(
+        tmp.path(),
+        "tasks/todo/TASK-002-renamed.md",
+        "---\nid: TASK-002\ntitle: Renamed outside\nstatus: todo\n---\n",
+    );
+    for path in std::fs::read_dir(tmp.path().join("tasks/todo")).unwrap() {
+        let path = path.unwrap().path();
+        let name = path.file_name().unwrap().to_string_lossy().to_string();
+        if name.starts_with("TASK-002") && name != "TASK-002-renamed.md" {
+            std::fs::remove_file(path).unwrap();
+        }
+    }
+    let card = text(send(&router, Method::GET, "/api/preview/TASK-002").await).await;
+    assert!(card.contains("Renamed outside"), "{card}");
 }

@@ -9,6 +9,9 @@ use crate::checklist::{self, CheckItem};
 use crate::comments::{self, Comment};
 use crate::data::EntityRecord;
 
+/// Longest comment, in characters, the dashboard accepts.
+pub const MAX_COMMENT: usize = 20_000;
+
 /// An entity's body split for display.
 pub(crate) struct Notes {
     /// The body without its comments section.
@@ -137,9 +140,10 @@ pub fn comment_html(page: &Page, entity: &EntityRecord, c: &Comment, n: usize) -
 /// The comment form. It starts hidden: posting needs the dashboard script.
 fn composer(default_author: &str) -> String {
     format!(
-        r#"<form class="comment-composer" data-comment-form hidden><label class="form-label" for="comment-text">Add a comment</label><textarea id="comment-text" name="text" rows="3" placeholder="Write a comment. Markdown works, and IDs like TASK-001 link up." required></textarea><p class="form-error" role="alert" hidden></p><div class="comment-actions"><label class="comment-as"><span>As</span><input type="text" name="author" placeholder="{author}" maxlength="{max}" autocomplete="name" aria-label="Your name"></label><span class="comment-hint"><kbd data-mod-enter>⌘↵</kbd> to post</span><button type="submit" class="btn btn-primary btn-sm">Comment</button></div></form>"#,
+        r#"<form class="comment-composer" data-comment-form hidden><label class="form-label" for="comment-text">Add a comment</label><textarea id="comment-text" name="text" rows="3" maxlength="{max_text}" placeholder="Write a comment. Markdown works, and IDs like TASK-001 link up." required></textarea><p class="form-error" role="alert" hidden></p><div class="comment-actions"><label class="comment-as"><span>As</span><input type="text" name="author" placeholder="{author}" maxlength="{max}" autocomplete="name" aria-label="Your name"></label><span class="comment-hint"><kbd data-mod-enter>⌘↵</kbd> to post</span><button type="submit" class="btn btn-primary btn-sm">Comment</button></div></form>"#,
         author = escape_html(default_author),
         max = comments::MAX_AUTHOR,
+        max_text = MAX_COMMENT,
     )
 }
 

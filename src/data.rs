@@ -13,6 +13,35 @@ use walkdir::WalkDir;
 /// Matches ID-based entity filenames like `CUST-001.md`, `PROJ-002.md`.
 static ID_FILENAME_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^[A-Z]+-\d+\.md$").expect("static regex is valid"));
+/// `PREFIX-NNN` followed by anything: (prefix, number, rest).
+static ID_PARTS_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^(.*?)-(\d+)(.*)$").expect("static regex is valid"));
+
+/// Sort key for IDs: prefix, then number, so `TASK-999` < `TASK-1000`.
+/// IDs without a number sort by their text, after numbered IDs.
+pub fn id_sort_key(id: &str) -> (&str, u64, &str) {
+    match ID_PARTS_RE.captures(id) {
+        Some(c) => (
+            c.get(1).map_or("", |m| m.as_str()),
+            c[2].parse().unwrap_or(u64::MAX),
+            c.get(3).map_or("", |m| m.as_str()),
+        ),
+        None => (id, u64::MAX, ""),
+    }
+}
+
+/// Case- and padding-insensitive form of an ID (`task-1`, `TASK-001` and
+/// `task1` give the same key), for matching hand-written references.
+pub fn loose_id_key(id: &str) -> Option<(String, u64)> {
+    let id = frontmatter::strip_wikilink(id.trim());
+    let digits = id.len() - id.trim_end_matches(|c: char| c.is_ascii_digit()).len();
+    if digits == 0 {
+        return None;
+    }
+    let (prefix, number) = id.split_at(id.len() - digits);
+    let prefix = prefix.trim_end_matches(['-', '_', ' ']);
+    Some((prefix.to_ascii_uppercase(), number.parse().ok()?))
+}
 
 /// A loaded entity with frontmatter, body, and source path.
 #[derive(Clone)]
@@ -47,6 +76,7 @@ pub struct TaskFilter<'a> {
     pub customer: Option<&'a str>,
     pub priority: Option<u32>,
     pub sprint: Option<&'a str>,
+    pub milestone: Option<&'a str>,
     pub owner: Option<&'a str>,
 }
 
@@ -68,8 +98,10 @@ fn read_parts(path: &Path) -> Option<(Value, String)> {
     Some((fm, body))
 }
 
-fn is_markdown(path: &Path) -> bool {
-    path.extension().is_some_and(|e| e == "md")
+/// A `.md` file name, in any case (`Notes.MD` too).
+pub(crate) fn is_markdown(path: &Path) -> bool {
+    path.extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("md"))
 }
 
 /// `.md` files directly inside `dir`, sorted by name. Missing dirs yield nothing.
@@ -159,17 +191,56 @@ fn load_records(kind: EntityKind, cfg: &ResolvedConfig, files: Vec<PathBuf>) -> 
             if !id.starts_with(&id_prefix) || !seen_ids.insert(id.clone()) {
                 return None;
             }
-            Some(EntityRecord {
-                kind,
-                id,
-                frontmatter: fm,
-                body,
-                source_path: path,
-            })
+            Some(record(cfg, kind, id, fm, body, path))
         })
         .collect();
-    records.sort_by(|a, b| a.id.cmp(&b.id));
+    records.sort_by(|a, b| id_sort_key(&a.id).cmp(&id_sort_key(&b.id)));
     records
+}
+
+fn record(
+    cfg: &ResolvedConfig,
+    kind: EntityKind,
+    id: String,
+    mut fm: Value,
+    body: String,
+    path: PathBuf,
+) -> EntityRecord {
+    if kind == EntityKind::Contact {
+        fill_contact_customer(cfg, &mut fm, &path);
+    }
+    EntityRecord {
+        kind,
+        id,
+        frontmatter: fm,
+        body,
+        source_path: path,
+    }
+}
+
+/// Contacts live in `customers/<CUST-NNN-slug>/contacts/`, so the folder
+/// already names their customer. When the file has no `customer` field, the
+/// in-memory record gets it from the folder (`[[CUST-NNN]]`), so filters,
+/// lists, `mc show` and JSON see it. The file is not changed.
+fn fill_contact_customer(cfg: &ResolvedConfig, fm: &mut Value, path: &Path) {
+    if frontmatter::get_link_str(fm, "customer").is_some_and(|c| !c.trim().is_empty()) {
+        return;
+    }
+    let folder = path
+        .parent()
+        .filter(|d| d.file_name().is_some_and(|n| n == "contacts"))
+        .and_then(Path::parent)
+        .and_then(Path::file_name)
+        .map(|n| n.to_string_lossy().into_owned());
+    let prefix = format!("{}-", cfg.id_prefixes.customer);
+    let Some(rest) = folder.as_deref().and_then(|f| f.strip_prefix(&prefix)) else {
+        return;
+    };
+    let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+    if !digits.is_empty() && fm.is_mapping() {
+        let id = format!("{prefix}{digits}");
+        frontmatter::set_str(fm, "customer", &frontmatter::wrap_wikilink(&id));
+    }
 }
 
 /// Collect all canonical entities of a given kind, sorted by ID.
@@ -203,6 +274,15 @@ fn link_is(fm: &Value, key: &str, target: &str) -> bool {
     frontmatter::get_link_str(fm, key).is_some_and(|v| v.eq_ignore_ascii_case(target))
 }
 
+/// Whether a task belongs to milestone `id`; an empty `id` matches tasks
+/// without one (no `milestone` key, or an empty value).
+fn in_milestone(fm: &Value, id: &str) -> bool {
+    if id.trim().is_empty() {
+        return frontmatter::get_link_str(fm, "milestone").is_none_or(|v| v.trim().is_empty());
+    }
+    link_is(fm, "milestone", id)
+}
+
 impl TaskFilter<'_> {
     /// A filter that matches every task.
     pub fn all() -> Self {
@@ -214,11 +294,26 @@ impl TaskFilter<'_> {
             priority: None,
             sprint: None,
             owner: None,
+
+            milestone: None,
         }
     }
 
     /// Whether a task's frontmatter satisfies every set filter (case-insensitive).
+    /// The sprint must be named exactly as stored; see [`Self::matches_with_sprints`].
     pub fn matches(&self, fm: &Value) -> bool {
+        self.matches_with_sprints(fm, None)
+    }
+
+    /// [`Self::matches`], where a task is in the filtered sprint when its
+    /// `sprint` is any of `sprints` (from [`sprint_aliases`]: the sprint's ID
+    /// and its title, which older files store).
+    pub fn matches_with_sprints(&self, fm: &Value, sprints: Option<&[String]>) -> bool {
+        let in_sprint = |s: &str| match sprints {
+            Some(aliases) => frontmatter::get_link_str(fm, "sprint")
+                .is_some_and(|v| aliases.iter().any(|a| a.eq_ignore_ascii_case(v.trim()))),
+            None => link_is(fm, "sprint", s),
+        };
         self.status.is_none_or(|s| status_matches(fm, s))
             && self.tag.is_none_or(|t| has_tag(fm, t))
             && self.project.is_none_or(|p| links_to(fm, "projects", p))
@@ -226,7 +321,8 @@ impl TaskFilter<'_> {
             && self
                 .priority
                 .is_none_or(|p| get_number(fm, "priority") == Some(p))
-            && self.sprint.is_none_or(|s| link_is(fm, "sprint", s))
+            && self.sprint.is_none_or(in_sprint)
+            && self.milestone.is_none_or(|m| in_milestone(fm, m))
             && self.owner.is_none_or(|o| {
                 frontmatter::get_str(fm, "owner").is_some_and(|v| v.eq_ignore_ascii_case(o))
             })
@@ -248,8 +344,57 @@ pub fn collect_tasks_filtered(
     filter: &TaskFilter,
 ) -> McResult<Vec<EntityRecord>> {
     let mut tasks = collect_tasks(cfg)?;
-    tasks.retain(|e| filter.matches(&e.frontmatter));
+    let sprints = filter.sprint.map(|s| sprint_aliases(cfg, s));
+    let milestone = filter
+        .milestone
+        .map(|s| crate::commands::new::resolve_milestone(cfg, s))
+        .transpose()?;
+    let filter = TaskFilter {
+        milestone: milestone.as_deref(),
+        ..*filter
+    };
+    tasks.retain(|e| filter.matches_with_sprints(&e.frontmatter, sprints.as_deref()));
     Ok(tasks)
+}
+
+/// The values a task's `sprint` field can hold for the sprint that `input`
+/// names: `input` itself, plus the sprint's ID and title when `input` is a
+/// (loose) sprint ID or a title. New files store the ID; older ones may
+/// store the title.
+pub fn sprint_aliases(cfg: &ResolvedConfig, input: &str) -> Vec<String> {
+    let input = frontmatter::strip_wikilink(input.trim()).trim();
+    let mut aliases = vec![input.to_string()];
+    if let Some(sprint) = find_sprint(cfg, input) {
+        aliases.push(sprint.id.clone());
+        if let Some(title) = frontmatter::get_str(&sprint.frontmatter, "title") {
+            aliases.push(title.trim().to_string());
+        }
+    }
+    aliases
+}
+
+/// The sprint that `input` names: by (loose) ID first, else by title
+/// (case-insensitive).
+pub fn find_sprint(cfg: &ResolvedConfig, input: &str) -> Option<EntityRecord> {
+    if input.is_empty() || !cfg.entity_available(&EntityKind::Sprint) {
+        return None;
+    }
+    let sprints = collect_entities(EntityKind::Sprint, cfg).ok()?;
+    let id = crate::cli::suggest::normalize_id(input, cfg, Some(EntityKind::Sprint))
+        .ok()
+        .filter(|(_, kind)| *kind == EntityKind::Sprint)
+        .map(|(id, _)| id);
+    let lower = input.to_lowercase();
+    sprints
+        .iter()
+        .find(|s| id.as_deref() == Some(s.id.as_str()) || s.id.eq_ignore_ascii_case(input))
+        .or_else(|| {
+            sprints.iter().find(|s| {
+                frontmatter::get_str(&s.frontmatter, "title")
+                    .is_some_and(|t| t.trim().to_lowercase() == lower)
+            })
+        })
+        .cloned()
 }
 
 /// Find a single entity by its ID.
@@ -292,15 +437,40 @@ pub fn find_entity_by_id(id: &str, cfg: &ResolvedConfig) -> McResult<EntityRecor
         .chain(rest)
         .find_map(|path| {
             let (fm, body) = read_parts(&path)?;
-            (frontmatter::get_str(&fm, "id") == Some(id)).then(|| EntityRecord {
-                kind,
-                id: id.to_string(),
-                frontmatter: fm,
-                body,
-                source_path: path,
-            })
+            (frontmatter::get_str(&fm, "id") == Some(id))
+                .then(|| record(cfg, kind, id.to_string(), fm, body, path))
         })
         .ok_or_else(|| McError::EntityNotFound(id.to_string()))
+}
+
+/// A file named after `id` (`TASK-010-x.md`, `CUST-001/…`) whose frontmatter
+/// does not parse, with the parser's message. Collection skips such files;
+/// this explains why an ID that is on disk is "not found".
+pub fn unreadable_file_for(id: &str, cfg: &ResolvedConfig) -> Option<(PathBuf, String)> {
+    let kind = EntityKind::from_id(id, cfg).ok()?;
+    let named = |s: &std::ffi::OsStr| {
+        let s = s.to_string_lossy();
+        s.strip_prefix(id)
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with(['-', '.']))
+    };
+    entity_files(kind, cfg)
+        .into_iter()
+        .filter(|p| {
+            p.file_name().is_some_and(named)
+                || p.parent().and_then(|d| d.file_name()).is_some_and(named)
+        })
+        .find_map(|path| {
+            let content = std::fs::read_to_string(&path).ok()?;
+            let message = match frontmatter::split_frontmatter(&content) {
+                None => "no YAML frontmatter block".to_string(),
+                Some((fm, _)) => match frontmatter::parse_in_file(&content, &fm, &path) {
+                    Ok(_) => return None,
+                    Err(McError::Frontmatter { message, .. }) => message,
+                    Err(e) => e.to_string(),
+                },
+            };
+            Some((path, message))
+        })
 }
 
 /// Collect entities with optional status and tag filters, sorted by ID.
@@ -353,6 +523,7 @@ pub fn collect_contacts_filtered(
     cfg: &ResolvedConfig,
     filter: &ContactFilter,
 ) -> McResult<Vec<EntityRecord>> {
+    // Records carry the customer from their folder when the file has none.
     let mut contacts = collect_contacts(cfg)?;
     contacts.retain(|e| filter.matches(&e.frontmatter));
     Ok(contacts)
@@ -370,6 +541,7 @@ pub fn recent_activity(cfg: &ResolvedConfig, limit: usize) -> McResult<Vec<Recen
         &cfg.research_dir,
         &cfg.tasks_dir,
         &cfg.sprints_dir,
+        &cfg.milestones_dir,
         &cfg.proposals_dir,
     ];
 
@@ -578,6 +750,8 @@ mod tests {
             priority: None,
             sprint: None,
             owner: None,
+
+            milestone: None,
         };
         let filtered = collect_tasks_filtered(&cfg, &filter).unwrap();
         assert_eq!(filtered.len(), 1);
@@ -768,6 +942,25 @@ mod tests {
     }
 
     #[test]
+    fn upper_case_md_extension_is_still_markdown() {
+        let (_tmp, cfg) = setup_repo();
+        write(
+            &cfg.tasks_dir.join("todo").join("TASK-005-hand-made.MD"),
+            "---\nid: TASK-005\ntitle: Hand made\nstatus: todo\n---\n",
+        );
+        let tasks = collect_tasks(&cfg).unwrap();
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].id, "TASK-005");
+        // ID allocation sees it too, so the next task doesn't reuse its ID.
+        assert_eq!(
+            crate::entity::next_id(EntityKind::Task, &cfg)
+                .unwrap()
+                .to_string(),
+            "TASK-006"
+        );
+    }
+
+    #[test]
     fn test_collect_entities_sorted_and_deduplicated() {
         let (_tmp, cfg) = setup_repo();
         write(
@@ -910,5 +1103,110 @@ mod tests {
             counts.by_status,
             vec![("active".to_string(), 2), ("inactive".to_string(), 1)]
         );
+    }
+
+    #[test]
+    fn test_ids_sort_numerically() {
+        let mut ids = vec!["TASK-1000", "TASK-101", "TASK-001", "TASK-999", "TASK-100"];
+        ids.sort_by_key(|id| id_sort_key(id));
+        assert_eq!(
+            ids,
+            ["TASK-001", "TASK-100", "TASK-101", "TASK-999", "TASK-1000"]
+        );
+        let (_tmp, cfg) = setup_repo();
+        for id in ["TASK-1000", "TASK-999"] {
+            write(
+                &cfg.tasks_dir.join("todo").join(format!("{id}-x.md")),
+                &format!("---\nid: {id}\ntitle: x\n---\n"),
+            );
+        }
+        let ids: Vec<String> = collect_tasks(&cfg)
+            .unwrap()
+            .into_iter()
+            .map(|t| t.id)
+            .collect();
+        assert_eq!(ids, ["TASK-999", "TASK-1000"]);
+    }
+
+    #[test]
+    fn test_loose_id_keys() {
+        assert_eq!(loose_id_key("task-1"), loose_id_key("TASK-001"));
+        assert_eq!(loose_id_key("[[task1]]"), Some(("TASK".into(), 1)));
+        assert_eq!(loose_id_key("nope"), None);
+    }
+
+    #[test]
+    fn test_contacts_take_their_customer_from_the_folder() {
+        let (_tmp, cfg) = setup_repo();
+        new::create_customer_programmatic(&cfg, "Acme", None, None, None).unwrap();
+        let dir = cfg.customers_dir.join("CUST-001-acme").join("contacts");
+        write(
+            &dir.join("CONT-001-ann.md"),
+            "---\nid: CONT-001\nname: Ann\nstatus: active\n---\n",
+        );
+        let filter = ContactFilter {
+            status: None,
+            tag: None,
+            customer: Some("CUST-001"),
+        };
+        let found = collect_contacts_filtered(&cfg, &filter).unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(
+            frontmatter::get_str(&found[0].frontmatter, "customer"),
+            Some("[[CUST-001]]")
+        );
+        let one = find_entity_by_id("CONT-001", &cfg).unwrap();
+        assert_eq!(
+            frontmatter::get_link_str(&one.frontmatter, "customer"),
+            Some("CUST-001")
+        );
+        // The file itself is not changed.
+        assert!(!std::fs::read_to_string(dir.join("CONT-001-ann.md"))
+            .unwrap()
+            .contains("customer"));
+    }
+
+    #[test]
+    fn test_sprint_filter_matches_id_and_legacy_title() {
+        let (_tmp, cfg) = setup_repo();
+        new::create_sprint(&cfg, &new::SprintInput::new("Sprint 1 - Research")).unwrap();
+        let mut input = new::TaskInput::new("By ID");
+        input.sprint = Some("SPR-001".into());
+        new::create_task(&cfg, &input).unwrap();
+        write(
+            &cfg.tasks_dir.join("todo").join("TASK-002-legacy.md"),
+            "---\nid: TASK-002\ntitle: Legacy\nstatus: todo\nsprint: Sprint 1 - Research\n---\n",
+        );
+        new::create_task(&cfg, &new::TaskInput::new("No sprint")).unwrap();
+        for given in ["SPR-001", "spr-1", "sprint 1 - research"] {
+            let filter = TaskFilter {
+                sprint: Some(given),
+                ..TaskFilter::all()
+            };
+            let ids: Vec<String> = collect_tasks_filtered(&cfg, &filter)
+                .unwrap()
+                .into_iter()
+                .map(|t| t.id)
+                .collect();
+            assert_eq!(ids, ["TASK-001", "TASK-002"], "{given}");
+        }
+        // Unknown sprints still match verbatim labels.
+        assert_eq!(sprint_aliases(&cfg, "2026-W05"), ["2026-W05"]);
+    }
+
+    #[test]
+    fn test_unreadable_file_for_names_the_broken_file() {
+        let (_tmp, cfg) = setup_repo();
+        let path = cfg.tasks_dir.join("todo").join("TASK-010-broken.md");
+        write(&path, "---\nid: TASK-010\ntitle: \"unterminated\n---\n");
+        assert!(find_entity_by_id("TASK-010", &cfg).is_err());
+        let (found, message) = unreadable_file_for("TASK-010", &cfg).unwrap();
+        assert_eq!(found, path);
+        // Lines count from the top of the file, as in `mc validate`.
+        assert!(
+            message.contains("quoted scalar at line 3 column"),
+            "{message}"
+        );
+        assert!(unreadable_file_for("TASK-011", &cfg).is_none());
     }
 }

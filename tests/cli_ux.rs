@@ -313,7 +313,7 @@ fn json_errors_are_json_on_stderr() {
         .unwrap()
         .contains("not found"));
 
-    let o = run(tmp.path(), &["--json", "new", "task", "x"]);
+    let o = run(tmp.path(), &["--json", "mcp"]);
     assert_eq!(o.status.code(), Some(2));
     let v: serde_json::Value = serde_json::from_slice(&o.stderr).unwrap();
     assert!(v["error"]["message"]
@@ -723,4 +723,401 @@ fn show_open_runs_the_editor() {
     let out = stdout(&o);
     assert!(out.starts_with("opened "), "{out}");
     assert!(out.trim_end().ends_with("TASK-002-write-docs.md"), "{out}");
+}
+
+#[test]
+fn init_rejects_embedded_with_project_and_skips_prompts_when_piped() {
+    let tmp = TempDir::new().unwrap();
+    let o = Command::new(env!("CARGO_BIN_EXE_mc"))
+        .args(["-y", "init", "--embedded", "--project"])
+        .arg(tmp.path())
+        .output()
+        .unwrap();
+    assert_eq!(o.status.code(), Some(2), "{}", stderr(&o));
+    assert!(!tmp.path().join(".mc").exists());
+
+    // No -y, stdin not a terminal: defaults are taken without fake prompts.
+    let dir = tmp.path().join("acme");
+    std::fs::create_dir(&dir).unwrap();
+    let o = Command::new(env!("CARGO_BIN_EXE_mc"))
+        .arg("init")
+        .arg(&dir)
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert!(o.status.success(), "{}", stderr(&o));
+    let out = stdout(&o);
+    assert!(
+        !out.contains("[Y/n]") && !out.contains("Repository name"),
+        "{out}"
+    );
+    let config = std::fs::read_to_string(dir.join("config/config.yml")).unwrap();
+    assert!(config.contains("name: acme"), "{config}");
+}
+
+/// Frontmatter values with terminal escapes (window title, clear screen,
+/// OSC 8 link, bell) come out without control characters everywhere.
+#[test]
+fn file_values_never_reach_the_terminal_as_escape_sequences() {
+    let tmp = repo();
+    let evil = "Evil \x1b]0;PWNED\x07 \x1b[2J cleared \x1b]8;;https://evil.example\x1b\\click";
+    std::fs::write(
+        tmp.path().join("tasks/todo/TASK-009-evil.md"),
+        format!(
+            "---\nid: TASK-009\ntitle: \"{}\"\nstatus: todo\npriority: 1\nowner: \"Own\\e[31mer\"\n---\n",
+            evil.replace('\x1b', "\\e").replace('\x07', "\\a").replace("\\e\\", "\\e\\\\")
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        tmp.path().join("tasks/todo/TASK-010-bad-status.md"),
+        "---\nid: TASK-010\ntitle: Bad\nstatus: \"\\e]0;VPWN\\a\"\n---\n",
+    )
+    .unwrap();
+    // A meeting today for the "Coming up" section of `mc status`.
+    std::fs::write(
+        tmp.path().join("meetings/MTG-009-evil.md"),
+        format!(
+            "---\nid: MTG-009\ntitle: \"Mtg \\e]0;PWNED\\a\"\ndate: {}\ntime: \"10:00\\e[2J\"\nstatus: scheduled\n---\n",
+            chrono::Local::now().format("%Y-%m-%d")
+        ),
+    )
+    .unwrap();
+    let commands: [&[&str]; 6] = [
+        &["list", "tasks"],
+        &["task", "board"],
+        &["task", "next", "-n", "5"],
+        &["status"],
+        &["validate"],
+        &["-y", "task", "move", "9", "in-progress"],
+    ];
+    for args in commands {
+        let o = run(tmp.path(), &[&["--color", "never"], args].concat());
+        let out = stdout(&o);
+        assert!(
+            !out.contains('\x1b') && !out.contains('\x07'),
+            "{args:?}: {out:?}"
+        );
+        if args[0] != "validate" {
+            assert!(out.contains("Evil ]0;PWNED"), "{args:?}: {out}");
+        }
+        if args[0] == "status" {
+            assert!(out.contains("Mtg ]0;PWNED"), "{out}");
+        }
+        // With colours on, only the CLI's own SGR styling remains.
+        let o = run(tmp.path(), &[&["--color", "always"], args].concat());
+        let out = stdout(&o);
+        assert!(
+            !out.contains("\x1b]") && !out.contains("\x1b[2J") && !out.contains('\x07'),
+            "{args:?}: {out:?}"
+        );
+    }
+}
+
+#[test]
+fn id_filters_accept_loose_ids_and_reject_unknown_ones() {
+    let tmp = repo();
+    let o = run(tmp.path(), &["list", "tasks", "--project", "proj-1"]);
+    assert!(o.status.success(), "{}", stderr(&o));
+    assert!(stdout(&o).contains("Fix login bug"), "{}", stdout(&o));
+
+    let o = run(tmp.path(), &["task", "board", "--project", "1"]);
+    assert!(stdout(&o).contains("TASK-001"), "{}", stdout(&o));
+    let o = run(
+        tmp.path(),
+        &["--json", "task", "next", "--project", "Proj1"],
+    );
+    let v: serde_json::Value = serde_json::from_slice(&o.stdout).unwrap();
+    assert_eq!(v[0]["id"], "TASK-001");
+
+    // An ID that doesn't exist fails with a suggestion instead of an empty list.
+    let o = run(tmp.path(), &["list", "tasks", "--project", "PROJ-002"]);
+    assert_eq!(o.status.code(), Some(1));
+    assert!(
+        stderr(&o).contains("did you mean PROJ-001"),
+        "{}",
+        stderr(&o)
+    );
+    // So does an ID of the wrong kind.
+    let o = run(tmp.path(), &["list", "tasks", "--project", "TASK-001"]);
+    assert_eq!(o.status.code(), Some(2), "{}", stderr(&o));
+    let o = run(tmp.path(), &["list", "contacts", "--customer", "cust-1"]);
+    assert_eq!(o.status.code(), Some(1), "{}", stderr(&o));
+}
+
+#[test]
+fn list_tasks_open_overdue_and_sort() {
+    let tmp = repo();
+    for args in [
+        vec!["-y", "new", "task", "Late one", "--due-date", "2020-01-02"],
+        vec![
+            "-y",
+            "new",
+            "task",
+            "Later one",
+            "--due-date",
+            "2020-01-01",
+            "--priority",
+            "4",
+        ],
+    ] {
+        assert!(run(tmp.path(), &args).status.success());
+    }
+    assert!(run(tmp.path(), &["-y", "task", "move", "3", "done"])
+        .status
+        .success());
+    let ids = |args: &[&str]| -> Vec<String> {
+        let o = run(tmp.path(), &[&["--json", "list", "tasks"], args].concat());
+        assert!(o.status.success(), "{args:?}: {}", stderr(&o));
+        let v: serde_json::Value = serde_json::from_slice(&o.stdout).unwrap();
+        v.as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["id"].as_str().unwrap().to_string())
+            .collect()
+    };
+    // The default listing is unchanged: every task, by ID.
+    assert_eq!(
+        ids(&[]),
+        ["TASK-001", "TASK-002", "TASK-003", "TASK-004", "TASK-005"]
+    );
+    assert_eq!(
+        ids(&["--open"]),
+        ["TASK-001", "TASK-002", "TASK-004", "TASK-005"]
+    );
+    assert_eq!(ids(&["--overdue"]), ["TASK-004", "TASK-005"]);
+    assert_eq!(
+        ids(&["--overdue", "--sort", "due"]),
+        ["TASK-005", "TASK-004"]
+    );
+    assert_eq!(
+        ids(&["--open", "--sort", "priority"]),
+        ["TASK-001", "TASK-004", "TASK-002", "TASK-005"]
+    );
+    let o = run(tmp.path(), &["list", "tasks", "--sort", "size"]);
+    assert_eq!(o.status.code(), Some(2));
+}
+
+#[test]
+fn meetings_are_listed_by_date() {
+    let tmp = repo();
+    for (title, date) in [("Later", "2026-03-01"), ("Earlier", "2026-01-15")] {
+        let o = run(tmp.path(), &["-y", "new", "meeting", title, "--date", date]);
+        assert!(o.status.success(), "{}", stderr(&o));
+    }
+    let out = stdout(&run(tmp.path(), &["list", "meetings"]));
+    let earlier = out.find("Earlier").unwrap();
+    assert!(earlier < out.find("Later").unwrap(), "{out}");
+}
+
+#[test]
+fn out_of_range_priority_is_a_usage_error() {
+    let tmp = repo();
+    for args in [
+        &["list", "tasks", "--priority", "7"][..],
+        &["list", "tasks", "--priority", "0"],
+        &["-y", "new", "task", "x", "--priority", "9"],
+    ] {
+        let o = run(tmp.path(), args);
+        assert_eq!(o.status.code(), Some(2), "{args:?}: {}", stderr(&o));
+    }
+}
+
+#[test]
+fn json_mode_reports_argument_errors_as_json() {
+    let tmp = repo();
+    let o = run(tmp.path(), &["--json", "list", "tasks", "--bogus"]);
+    assert_eq!(o.status.code(), Some(2));
+    let v: serde_json::Value = serde_json::from_slice(&o.stderr).unwrap();
+    assert!(v["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("unexpected argument '--bogus'"));
+    assert_eq!(v["error"]["exit_code"], 2);
+    // Help is still help.
+    let o = run(tmp.path(), &["--json", "list", "--help"]);
+    assert!(o.status.success());
+    assert!(stdout(&o).contains("Usage:"));
+}
+
+#[test]
+fn color_flag_applies_to_help_and_argument_errors() {
+    let tmp = repo();
+    let o = run(tmp.path(), &["--color", "always", "show", "--help"]);
+    assert!(stdout(&o).contains('\x1b'));
+    let o = mc(tmp.path())
+        .env("CLICOLOR_FORCE", "1")
+        .args(["--color=never", "show", "--help"])
+        .output()
+        .unwrap();
+    assert!(!stdout(&o).contains('\x1b'), "{}", stdout(&o));
+    let o = mc(tmp.path())
+        .env("CLICOLOR_FORCE", "1")
+        .args(["--color", "never", "show", "x", "extra"])
+        .output()
+        .unwrap();
+    assert_eq!(o.status.code(), Some(2));
+    assert!(!stderr(&o).contains('\x1b'), "{}", stderr(&o));
+}
+
+#[test]
+fn help_lists_command_options_before_global_ones() {
+    let tmp = repo();
+    let out = stdout(&run(tmp.path(), &["new", "task", "--help"]));
+    let own = out.find("--project").unwrap();
+    let global = out.find("Global options:").unwrap();
+    assert!(own < global, "{out}");
+    assert!(out[global..].contains("--root") && out[global..].contains("--json"));
+    assert!(!out[..global].contains("--root"), "{out}");
+}
+
+#[test]
+fn completions_need_no_repo() {
+    let tmp = TempDir::new().unwrap();
+    for shell in ["bash", "zsh", "fish"] {
+        let o = Command::new(env!("CARGO_BIN_EXE_mc"))
+            .args(["completions", shell])
+            .current_dir(tmp.path())
+            .output()
+            .unwrap();
+        assert!(o.status.success(), "{shell}: {}", stderr(&o));
+        assert!(stdout(&o).contains("mc"), "{shell}");
+    }
+    let o = Command::new(env!("CARGO_BIN_EXE_mc"))
+        .args(["completions", "tcsh"])
+        .output()
+        .unwrap();
+    assert_eq!(o.status.code(), Some(2));
+}
+
+#[test]
+fn api_serve_usage_mistakes_exit_2() {
+    let tmp = repo();
+    for args in [
+        &["api", "serve", "--log-format", "xml"][..],
+        &["api", "serve", "--bind", "nope"],
+        &["api", "serve", "--port", "5321"],
+    ] {
+        let o = run(tmp.path(), args);
+        assert_eq!(o.status.code(), Some(2), "{args:?}: {}", stderr(&o));
+    }
+    let o = mc(tmp.path())
+        .args(["api", "hash-token"])
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert_eq!(o.status.code(), Some(2), "{}", stderr(&o));
+}
+
+#[test]
+fn comment_without_text_needs_a_terminal_for_the_editor() {
+    let tmp = repo();
+    let o = mc(tmp.path())
+        .args(["comment", "TASK-002"])
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert_eq!(o.status.code(), Some(2));
+    assert!(stderr(&o).contains("no comment text"), "{}", stderr(&o));
+}
+
+#[test]
+fn json_paths_are_repo_relative() {
+    let tmp = repo();
+    let root = tmp.path().display().to_string();
+    let o = run(
+        tmp.path(),
+        &["--json", "-y", "task", "move", "2", "in-progress"],
+    );
+    let v: serde_json::Value = serde_json::from_slice(&o.stdout).unwrap();
+    assert_eq!(v["path"], "tasks/todo/TASK-002-write-docs.md");
+    let o = run(
+        tmp.path(),
+        &["--json", "-y", "task", "move", "2", "in-progress"],
+    );
+    let v: serde_json::Value = serde_json::from_slice(&o.stdout).unwrap();
+    assert_eq!(v["path"], "tasks/todo/TASK-002-write-docs.md");
+
+    let o = mc(tmp.path())
+        .env("VISUAL", "true")
+        .args(["--json", "show", "TASK-002", "--open"])
+        .output()
+        .unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&o.stdout).unwrap();
+    assert_eq!(v["path"], "tasks/todo/TASK-002-write-docs.md");
+
+    assert!(run(tmp.path(), &["-y", "new", "customer", "Acme"])
+        .status
+        .success());
+    let o = run(tmp.path(), &["--json", "export", "customer", "1"]);
+    assert!(o.status.success(), "{}", stderr(&o));
+    let v: serde_json::Value = serde_json::from_slice(&o.stdout).unwrap();
+    assert!(!v["path"].as_str().unwrap().starts_with(&root), "{v}");
+}
+
+#[test]
+fn task_set_changes_fields_like_the_dashboard() {
+    let tmp = repo();
+    let root = tmp.path();
+    let o = run(
+        root,
+        &[
+            "--json",
+            "task",
+            "set",
+            "task-2",
+            "--priority",
+            "2",
+            "--owner",
+            "alice",
+            "--due-date",
+            "2026-10-31",
+            "--tags",
+            "docs, web",
+            "--project",
+            "proj-1",
+            "--status",
+            "done",
+        ],
+    );
+    assert!(o.status.success(), "{}", stderr(&o));
+    let v: serde_json::Value = serde_json::from_slice(&o.stdout).unwrap();
+    assert_eq!(v["id"], "TASK-002");
+    assert_eq!(
+        v["changed"],
+        serde_json::json!(["priority", "owner", "due_date", "projects", "tags", "status"])
+    );
+    assert_eq!(v["new_status"], "done");
+    assert_eq!(v["path"], "tasks/done/TASK-002-write-docs.md");
+
+    let o = run(root, &["--json", "show", "TASK-002"]);
+    let v: serde_json::Value = serde_json::from_slice(&o.stdout).unwrap();
+    assert_eq!(v["owner"], "alice");
+    assert_eq!(v["priority"], 2);
+    assert_eq!(v["projects"], serde_json::json!(["PROJ-001"]));
+    assert_eq!(v["tags"], serde_json::json!(["docs", "web"]));
+
+    // Clearing, then nothing left to change.
+    let o = run(root, &["task", "set", "2", "--owner", "", "--due-date", ""]);
+    assert!(o.status.success(), "{}", stderr(&o));
+    assert!(stdout(&o).contains("(cleared)"), "{}", stdout(&o));
+    let o = run(root, &["task", "set", "2", "--owner", ""]);
+    assert!(stdout(&o).contains("nothing changed"), "{}", stdout(&o));
+
+    // Usage mistakes exit 2 and leave the file alone.
+    let file = root.join("tasks/done/TASK-002-write-docs.md");
+    let before = std::fs::read_to_string(&file).unwrap();
+    for args in [
+        vec!["task", "set", "2"],
+        vec!["task", "set", "2", "--priority", "7"],
+        vec!["task", "set", "2", "--due-date", "2026-1-5"],
+        vec!["task", "set", "2", "--status", "doen"],
+        vec!["task", "set", "2", "--sprint", "SPR-009"],
+        vec!["task", "set", "PROJ-001", "--owner", "x"],
+    ] {
+        let o = run(root, &args);
+        assert_ne!(o.status.code(), Some(0), "{args:?}");
+        assert_ne!(o.status.code(), Some(101), "{args:?} panicked");
+    }
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), before);
 }

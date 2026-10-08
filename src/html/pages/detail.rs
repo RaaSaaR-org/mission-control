@@ -1,16 +1,21 @@
 //! Entity detail page: title block, notes, related entities and a field rail.
 
-use crate::data::{self, EntityRecord};
+use super::lists::parent_customer_html;
+use super::tasks::task_order;
+use crate::data::EntityRecord;
 use crate::entity::EntityKind;
 use crate::frontmatter;
 use crate::html::catalog::display_name;
+use crate::html::catalog::split_wikilink;
 use crate::html::components::{
     avatar, date_html, due_html, entity_name_link, icon_button, id_chip, owner_html, priority_html,
-    progress_bar, section_title, status_badge, status_badge_lg, tag_chips, task_due_html,
+    progress_bar, section_title, status_badge, status_badge_lg, status_lamp, tag_chips,
+    task_due_html,
 };
 use crate::html::edit::{edit_button, new_task_button, task_edit_form};
 use crate::html::format::{capitalize, due_phrase, escape_html, fmt_day, parse_date};
 use crate::html::layout::layout;
+use crate::html::markdown::strip_leading_h1;
 use crate::html::notes::{self, Notes};
 use crate::html::{is_cancelled, is_closed, Page};
 use serde_yaml::Value;
@@ -28,6 +33,7 @@ const RELATED_ORDER: &[EntityKind] = &[
     EntityKind::Proposal,
     EntityKind::Research,
     EntityKind::Sprint,
+    EntityKind::Milestone,
 ];
 
 /// Scalar fields that may be promoted into the title block, in order.
@@ -67,6 +73,7 @@ const LEADING_FIELDS: &[&str] = &[
     "project",
     "projects",
     "sprint",
+    "milestone",
     "depends_on",
     "attendees",
     "contacts",
@@ -82,8 +89,14 @@ fn field_label(key: &str) -> String {
     capitalize(&key.replace('_', " "))
 }
 
+/// Frontmatter keys that list tasks this one waits for or holds up.
+const DEPENDENCY_FIELDS: &[&str] = &["depends_on", "blocks", "blocked_by"];
+
 /// Render a single frontmatter value for the rail. Returns `None` for empty values.
 fn field_value_html(key: &str, value: &Value, page: &Page) -> Option<String> {
+    if DEPENDENCY_FIELDS.contains(&key) {
+        return dependency_list(value, page);
+    }
     match value {
         Value::Null => None,
         Value::Bool(b) => Some(if *b { "Yes" } else { "No" }.to_string()),
@@ -169,6 +182,47 @@ fn field_value_html(key: &str, value: &Value, page: &Page) -> Option<String> {
     }
 }
 
+/// Linked tasks one per row, with their status and ID, so a finished
+/// dependency reads as done.
+fn dependency_list(value: &Value, page: &Page) -> Option<String> {
+    let items: Vec<&str> = match value {
+        Value::String(s) => vec![s.as_str()],
+        Value::Sequence(seq) => seq.iter().filter_map(Value::as_str).collect(),
+        _ => Vec::new(),
+    };
+    let rows: String = items
+        .iter()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty() && *s != "[]")
+        .map(|raw| {
+            let (target, alias) = split_wikilink(raw);
+            let found = page
+                .catalog
+                .resolve(target, alias)
+                .id()
+                .and_then(|id| page.catalog.records.iter().find(|r| r.id == id));
+            match found {
+                Some(rec) => {
+                    let status = frontmatter::get_str_or(&rec.frontmatter, "status", "");
+                    format!(
+                        r#"<li class="dep{}" title="{}">{}<span class="dep-name">{}</span>{}</li>"#,
+                        if is_closed(status) { " is-done" } else { "" },
+                        escape_html(&crate::html::format::status_label(status)),
+                        status_lamp(status),
+                        page.catalog.ref_html(raw),
+                        id_chip(&rec.id),
+                    )
+                }
+                None => format!(
+                    r#"<li class="dep"><span class="dep-name">{}</span></li>"#,
+                    page.catalog.ref_html(raw)
+                ),
+            }
+        })
+        .collect();
+    (!rows.is_empty()).then(|| format!(r#"<ul class="value-list dep-list">{rows}</ul>"#))
+}
+
 /// A title-block value for a scalar field, or `None` if it isn't a scalar.
 fn title_value_html(key: &str, value: &Value, status: &str, page: &Page) -> Option<String> {
     let today = page.today;
@@ -232,6 +286,16 @@ fn title_block(entity: &EntityRecord, page: &Page) -> (String, Vec<&'static str>
     if !status.is_empty() {
         cells.push(cell("Status", &status_badge_lg(status)));
     }
+    // Contacts belong to the customer whose folder they live in.
+    if entity.kind == EntityKind::Contact
+        && fm.get("customer").is_none()
+        && fm.get("customers").is_none()
+    {
+        let customer = parent_customer_html(entity, page);
+        if !customer.is_empty() {
+            cells.push(cell("Customer", &customer));
+        }
+    }
     let mut shown = Vec::new();
     let is_task = entity.kind == EntityKind::Task;
     for key in TITLE_FIELDS {
@@ -256,6 +320,11 @@ fn title_block(entity: &EntityRecord, page: &Page) -> (String, Vec<&'static str>
         shown.push(*key);
     }
     if is_task && cells.len() < TITLE_CELLS_MAX {
+        let milestone = frontmatter::get_str_or(fm, "milestone", "");
+        if !milestone.trim().is_empty() {
+            cells.push(cell("Milestone", &page.catalog.ref_html(milestone)));
+            shown.push("milestone");
+        }
         let sprint = frontmatter::get_str_or(fm, "sprint", "");
         if !sprint.trim().is_empty() {
             cells.push(cell("Sprint", &page.catalog.ref_html(sprint)));
@@ -294,7 +363,9 @@ pub fn detail_page(page: &Page, entity: &EntityRecord) -> String {
     let actions = match entity.kind {
         _ if !page.editable => String::new(),
         EntityKind::Task => edit_button(),
-        EntityKind::Project | EntityKind::Customer | EntityKind::Sprint => new_task_button(false),
+        EntityKind::Project | EntityKind::Customer | EntityKind::Sprint | EntityKind::Milestone => {
+            new_task_button(false)
+        }
         _ => String::new(),
     };
     let actions = if actions.is_empty() {
@@ -324,14 +395,18 @@ pub fn detail_page(page: &Page, entity: &EntityRecord) -> String {
     let related = related_sections(entity, page).concat();
     let hub_first = matches!(
         entity.kind,
-        EntityKind::Customer | EntityKind::Project | EntityKind::Sprint
+        EntityKind::Customer | EntityKind::Project | EntityKind::Sprint | EntityKind::Milestone
     ) && !related.is_empty();
     if hub_first {
         body.push_str(&related);
     }
     let notes = Notes::of(entity);
     if let Some(notes_html) = notes::body_html(page, entity, &notes) {
-        if hub_first {
+        // Notes that open with their own heading need no second one.
+        let own_heading = strip_leading_h1(notes.md.trim())
+            .trim_start()
+            .starts_with('#');
+        if hub_first && !own_heading {
             body.push_str(r#"<h2 class="section-title notes-title">Notes</h2>"#);
         }
         body.push_str(&notes_html);
@@ -417,18 +492,37 @@ fn related_sections(entity: &EntityRecord, page: &Page) -> Vec<String> {
     let catalog = page.catalog;
     // One bucket per kind, in RELATED_ORDER.
     let mut buckets: Vec<Vec<&EntityRecord>> = vec![Vec::new(); RELATED_ORDER.len()];
+    // Tasks that only mention this entity in their text: listed apart, so
+    // they don't count towards its progress.
+    let mut mentioned: Vec<&EntityRecord> = Vec::new();
 
-    let entity_dir = entity.source_path.parent();
+    // A customer's or project's own folder holds its contacts and tasks.
+    let hub_dir = entity.source_path.parent().filter(|d| {
+        matches!(entity.kind, EntityKind::Customer | EntityKind::Project)
+            && *d != page.cfg.customers_dir
+            && *d != page.cfg.projects_dir
+    });
+    let title = display_name(entity);
     for rec in &catalog.records {
         if rec.id == entity.id {
             continue;
         }
-        let is_child_contact = entity.kind == EntityKind::Customer
-            && rec.kind == EntityKind::Contact
-            && entity_dir
-                .is_some_and(|d| d != page.cfg.customers_dir && rec.source_path.starts_with(d));
-        if is_child_contact || catalog.record_mentions(rec, &entity.id) {
-            if let Some(i) = RELATED_ORDER.iter().position(|k| *k == rec.kind) {
+        let inside = hub_dir.is_some_and(|d| rec.source_path.starts_with(d));
+        let is_child = inside && matches!(rec.kind, EntityKind::Contact | EntityKind::Task);
+        let linked = is_child
+            || catalog.record_links(rec, &entity.id)
+            || (entity.kind == EntityKind::Sprint
+                && rec.kind == EntityKind::Task
+                && sprint_named(rec, title));
+        let Some(i) = RELATED_ORDER.iter().position(|k| *k == rec.kind) else {
+            continue;
+        };
+        if linked {
+            buckets[i].push(rec);
+        } else if catalog.record_mentions(rec, &entity.id) {
+            if rec.kind == EntityKind::Task {
+                mentioned.push(rec);
+            } else {
                 buckets[i].push(rec);
             }
         }
@@ -448,22 +542,7 @@ fn related_sections(entity: &EntityRecord, page: &Page) -> Vec<String> {
             EntityKind::Meeting => html.push_str(&meeting_rows(&mut recs, page)),
             EntityKind::Task => {
                 // Open work first, finished work last.
-                recs.sort_by_key(|t| {
-                    let rank = match frontmatter::get_str_or(&t.frontmatter, "status", "") {
-                        "in-progress" => 0,
-                        "review" => 1,
-                        "todo" => 2,
-                        "backlog" => 3,
-                        "done" | "completed" => 5,
-                        "cancelled" | "canceled" => 6,
-                        _ => 4,
-                    };
-                    (
-                        rank,
-                        data::get_number(&t.frontmatter, "priority").unwrap_or(3),
-                        t.id.clone(),
-                    )
-                });
+                recs.sort_by_cached_key(|t| task_order(t));
                 let done = recs
                     .iter()
                     .filter(|e| {
@@ -494,7 +573,23 @@ fn related_sections(entity: &EntityRecord, page: &Page) -> Vec<String> {
         html.push_str("</section>");
         sections.push(html);
     }
+    if !mentioned.is_empty() {
+        mentioned.sort_by_cached_key(|t| task_order(t));
+        sections.push(format!(
+            r#"<section class="related-section related-mentions">{}{}</section>"#,
+            section_title("Mentioned in", Some(mentioned.len())),
+            related_list(&mentioned, page, "more")
+        ));
+    }
     sections
+}
+
+/// Whether a task names `sprint` by title (`sprint: Sprint 1 - Kickoff`)
+/// rather than by ID, as hand-written files sometimes do.
+fn sprint_named(task: &EntityRecord, sprint: &str) -> bool {
+    let value = frontmatter::get_link_str(&task.frontmatter, "sprint").unwrap_or("");
+    let value = value.trim();
+    !value.is_empty() && value.eq_ignore_ascii_case(sprint.trim())
 }
 
 /// Upcoming meetings first (soonest first), then past ones (newest first)
@@ -607,6 +702,148 @@ mod tests {
         // Owner is in the title block, not repeated in the rail.
         assert!(!html.contains("<dt>Owner</dt>"));
         assert!(html.contains("<dt>Tags</dt>"));
+    }
+
+    fn at(mut r: EntityRecord, path: std::path::PathBuf) -> EntityRecord {
+        r.source_path = path;
+        r
+    }
+
+    #[test]
+    fn hub_tasks_are_linked_ones_and_mentions_are_listed_apart() {
+        let (_d, cfg) = test_config();
+        let dir = cfg.projects_dir.join("PROJ-001-apollo");
+        let mut mention = rec(
+            EntityKind::Task,
+            "TASK-002",
+            "title: Elsewhere\nstatus: todo\nprojects: ['[[PROJ-009]]']",
+        );
+        mention.body = "Collides with [[PROJ-001]].".into();
+        let cat = catalog(
+            vec![
+                at(
+                    rec(EntityKind::Project, "PROJ-001", "name: Apollo"),
+                    dir.join("PROJ-001.md"),
+                ),
+                rec(
+                    EntityKind::Task,
+                    "TASK-001",
+                    "title: Linked\nstatus: done\nprojects: ['[[PROJ-001]]']",
+                ),
+                mention,
+                at(
+                    rec(EntityKind::Task, "TASK-003", "title: Scoped\nstatus: todo"),
+                    dir.join("tasks/todo/TASK-003-scoped.md"),
+                ),
+            ],
+            &cfg,
+        );
+        let page = Page::new(&cfg, &cat, "");
+        let html = related_sections(&cat.records[0], &page).concat();
+        let tasks = html.find(">Tasks <").expect("tasks section");
+        let mentioned = html.find(">Mentioned in <").expect("mentions section");
+        assert!(html.contains("1 of 2 done"), "{html}");
+        assert!(tasks < html.find(">Linked<").unwrap());
+        assert!(html.find(">Scoped<").unwrap() < mentioned);
+        assert!(html.find(">Elsewhere<").unwrap() > mentioned);
+    }
+
+    #[test]
+    fn sprint_lists_tasks_naming_it_by_title() {
+        let (_d, cfg) = test_config();
+        let cat = catalog(
+            vec![
+                rec(EntityKind::Sprint, "SPR-001", "title: Sprint 1 - Kickoff"),
+                rec(
+                    EntityKind::Task,
+                    "TASK-001",
+                    "title: By name\nsprint: sprint 1 - kickoff",
+                ),
+                rec(
+                    EntityKind::Task,
+                    "TASK-002",
+                    "title: By ID\nsprint: '[[SPR-001]]'",
+                ),
+                rec(
+                    EntityKind::Task,
+                    "TASK-003",
+                    "title: Other\nsprint: Sprint 2",
+                ),
+            ],
+            &cfg,
+        );
+        let page = Page::new(&cfg, &cat, "");
+        let html = related_sections(&cat.records[0], &page).concat();
+        assert!(html.contains(">By name<") && html.contains(">By ID<"));
+        assert!(!html.contains(">Other<"));
+    }
+
+    #[test]
+    fn contact_shows_its_customer_and_tasks_show_dependency_status() {
+        let (_d, cfg) = test_config();
+        let folder = cfg.customers_dir.join("CUST-001-acme");
+        let cat = catalog(
+            vec![
+                at(
+                    rec(EntityKind::Customer, "CUST-001", "name: Acme"),
+                    folder.join("CUST-001.md"),
+                ),
+                at(
+                    rec(
+                        EntityKind::Contact,
+                        "CONT-001",
+                        "name: Jane\nstatus: active",
+                    ),
+                    folder.join("contacts/CONT-001-jane.md"),
+                ),
+                rec(
+                    EntityKind::Task,
+                    "TASK-002",
+                    "title: Register\nstatus: done",
+                ),
+                rec(
+                    EntityKind::Task,
+                    "TASK-003",
+                    "title: Open one\nstatus: todo",
+                ),
+            ],
+            &cfg,
+        );
+        let page = Page::new(&cfg, &cat, "");
+        let (block, _) = title_block(&cat.records[1], &page);
+        assert!(block.contains(r#"<dt class="tb-label">Customer</dt><dd class="tb-value"><a class="ref" href="/entity/CUST-001""#), "{block}");
+
+        let task = rec(
+            EntityKind::Task,
+            "TASK-001",
+            "title: T\nstatus: todo\ndepends_on: ['[[TASK-002]]', '[[TASK-003]]']",
+        );
+        let html = detail_page(&page, &task);
+        assert!(
+            html.contains(
+                r#"<ul class="value-list dep-list"><li class="dep is-done" title="Done">"#
+            ),
+            "{html}"
+        );
+        assert!(html.contains(r#"<li class="dep" title="Todo">"#));
+        assert!(html.contains(r#"<span class="id-prefix">TASK-</span>002"#));
+    }
+
+    #[test]
+    fn hub_notes_get_no_second_heading_when_they_open_with_one() {
+        let (_d, cfg) = test_config();
+        let mut project = rec(EntityKind::Project, "PROJ-001", "name: Apollo");
+        let task = rec(
+            EntityKind::Task,
+            "TASK-001",
+            "title: T\nprojects: ['[[PROJ-001]]']",
+        );
+        let cat = catalog(vec![project.clone(), task], &cfg);
+        let page = Page::new(&cfg, &cat, "");
+        project.body = "# Apollo\n\n## Overview\n\nText".into();
+        assert!(!detail_page(&page, &project).contains("notes-title"));
+        project.body = "Just text".into();
+        assert!(detail_page(&page, &project).contains("notes-title"));
     }
 
     #[test]

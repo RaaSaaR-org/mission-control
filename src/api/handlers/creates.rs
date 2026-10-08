@@ -24,8 +24,8 @@ fn list(v: Option<String>) -> Vec<String> {
     v.as_deref().map(parse_comma_list).unwrap_or_default()
 }
 
-fn created(c: new_cmd::Created) -> CreateResponse {
-    Ok((StatusCode::CREATED, Json(c.into())))
+fn created(state: &AppState, c: new_cmd::Created) -> CreateResponse {
+    Ok((StatusCode::CREATED, Json(CreateResult::new(c, &state.cfg))))
 }
 
 #[utoipa::path(
@@ -50,7 +50,7 @@ pub async fn create_customer(
         status: body.status,
         tags: list(body.tags),
     };
-    created(new_cmd::create_customer(&state.cfg, &input)?)
+    created(&state, new_cmd::create_customer(&state.cfg, &input)?)
 }
 
 #[utoipa::path(
@@ -76,7 +76,7 @@ pub async fn create_project(
         customers: list(body.customers),
         tags: list(body.tags),
     };
-    created(new_cmd::create_project(&state.cfg, &input)?)
+    created(&state, new_cmd::create_project(&state.cfg, &input)?)
 }
 
 #[utoipa::path(
@@ -105,7 +105,7 @@ pub async fn create_meeting(
         projects: list(body.projects),
         attendees: list(body.attendees),
     };
-    created(new_cmd::create_meeting(&state.cfg, &input)?)
+    created(&state, new_cmd::create_meeting(&state.cfg, &input)?)
 }
 
 #[utoipa::path(
@@ -129,7 +129,7 @@ pub async fn create_research(
         agents: body.agents.as_deref().map(parse_comma_list),
         tags: list(body.tags),
     };
-    created(new_cmd::create_research(&state.cfg, &input)?)
+    created(&state, new_cmd::create_research(&state.cfg, &input)?)
 }
 
 #[utoipa::path(
@@ -156,10 +156,11 @@ pub async fn create_task(
         priority: body.priority,
         tags: list(body.tags),
         sprint: body.sprint,
+        milestone: body.milestone,
         depends_on: list(body.depends_on),
         due_date: body.due_date,
     };
-    created(new_cmd::create_task(&state.cfg, &input)?)
+    created(&state, new_cmd::create_task(&state.cfg, &input)?)
 }
 
 #[utoipa::path(
@@ -187,7 +188,7 @@ pub async fn create_sprint(
         projects: list(body.projects),
         tags: list(body.tags),
     };
-    created(new_cmd::create_sprint(&state.cfg, &input)?)
+    created(&state, new_cmd::create_sprint(&state.cfg, &input)?)
 }
 
 #[utoipa::path(
@@ -213,7 +214,7 @@ pub async fn create_proposal(
         tags: list(body.tags),
         supersedes: body.supersedes,
     };
-    created(new_cmd::create_proposal(&state.cfg, &input)?)
+    created(&state, new_cmd::create_proposal(&state.cfg, &input)?)
 }
 
 #[utoipa::path(
@@ -240,5 +241,28 @@ pub async fn create_contact(
         status: body.status,
         tags: list(body.tags),
     };
-    created(new_cmd::create_contact(&state.cfg, &input)?)
+    created(&state, new_cmd::create_contact(&state.cfg, &input)?)
+}
+
+#[utoipa::path(
+    post, path = "/v1/milestones", tag = "entities",
+    request_body = crate::api::schemas::CreateMilestone,
+    responses((status = 201, body = CreateResult), (status = 400, body = crate::api::error::ProblemJson), (status = 401, body = crate::api::error::ProblemJson)),
+    security(("bearer" = []))
+)]
+pub async fn create_milestone(
+    State(state): State<AppState>,
+    Json(body): Json<crate::api::schemas::CreateMilestone>,
+) -> CreateResponse {
+    let _w = state.write_lock.lock().await;
+    let input = new_cmd::MilestoneInput {
+        title: body.title,
+        description: body.description,
+        start_date: body.start_date,
+        due_date: body.due_date,
+        owner: body.owner,
+        status: body.status,
+        projects: list(body.projects),
+    };
+    created(&state, new_cmd::create_milestone(&state.cfg, &input)?)
 }

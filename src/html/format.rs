@@ -196,6 +196,16 @@ pub(crate) fn href_with(path: &str, pairs: &[(&str, &str)]) -> String {
     }
 }
 
+/// Link to a repo file served under `/files/`, each path segment
+/// percent-encoded; `rel` is relative to the repo root.
+pub(crate) fn files_href(rel: &std::path::Path) -> Option<String> {
+    let segments: Vec<String> = rel
+        .components()
+        .map(|c| url_encode(&c.as_os_str().to_string_lossy()))
+        .collect();
+    (!segments.is_empty()).then(|| format!("/files/{}", segments.join("/")))
+}
+
 /// Link to an entity's detail page (ID percent-encoded).
 pub(crate) fn entity_href(id: &str) -> String {
     format!("/entity/{}", url_encode(id))

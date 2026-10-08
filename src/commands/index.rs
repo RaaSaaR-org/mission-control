@@ -14,6 +14,7 @@ const WIKILINK_FIELDS: &[&str] = &[
     "projects",
     "depends_on",
     "sprint",
+    "milestone",
     "supersedes",
     "superseded_by",
     "customer",
@@ -44,19 +45,10 @@ fn strip_wikilinks_in_json(val: &mut JsonValue) {
 
 pub fn run(cfg: &ResolvedConfig) -> McResult<()> {
     let result = run_quiet(cfg)?;
-    let counts = [
-        (EntityKind::Customer, result.customers),
-        (EntityKind::Contact, result.contacts),
-        (EntityKind::Project, result.projects),
-        (EntityKind::Meeting, result.meetings),
-        (EntityKind::Research, result.research),
-        (EntityKind::Task, result.tasks),
-        (EntityKind::Sprint, result.sprints),
-        (EntityKind::Proposal, result.proposals),
-    ];
-    let available: Vec<(EntityKind, usize)> = counts
+    let available: Vec<(EntityKind, usize)> = DISPLAY_ORDER
         .into_iter()
-        .filter(|(k, _)| cfg.entity_available(k))
+        .filter(|k| cfg.entity_available(k))
+        .map(|k| (k, result.count(k)))
         .collect();
 
     if ui::get().json {
@@ -81,11 +73,24 @@ pub fn run(cfg: &ResolvedConfig) -> McResult<()> {
     let sep = format!(" {} ", ui::glyphs().sep);
     let parts: Vec<String> = available
         .iter()
-        .map(|(k, n)| format!("{} {}", n.to_string().bold(), k.label_plural()))
+        .map(|(k, n)| ui::count(*n, k.label(), k.label_plural()))
         .collect();
     println!("  {}", parts.join(&sep.dimmed().to_string()));
     Ok(())
 }
+
+/// Order of the per-kind counts in `mc index` output.
+const DISPLAY_ORDER: [EntityKind; 9] = [
+    EntityKind::Customer,
+    EntityKind::Contact,
+    EntityKind::Project,
+    EntityKind::Meeting,
+    EntityKind::Research,
+    EntityKind::Task,
+    EntityKind::Sprint,
+    EntityKind::Milestone,
+    EntityKind::Proposal,
+];
 
 fn rel_path(path: &std::path::Path, cfg: &ResolvedConfig) -> String {
     path.strip_prefix(&cfg.root)
@@ -108,6 +113,7 @@ pub fn entity_json(entity: &EntityRecord, cfg: &ResolvedConfig) -> JsonValue {
     json_val
 }
 
+/// Entities indexed per kind; kinds the repo doesn't enable count 0.
 pub struct IndexResult {
     pub customers: usize,
     pub projects: usize,
@@ -115,86 +121,68 @@ pub struct IndexResult {
     pub research: usize,
     pub tasks: usize,
     pub sprints: usize,
+    pub milestones: usize,
     pub proposals: usize,
     pub contacts: usize,
 }
 
-/// Build indexes without printing to stdout.
+impl IndexResult {
+    pub fn count(&self, kind: EntityKind) -> usize {
+        match kind {
+            EntityKind::Customer => self.customers,
+            EntityKind::Project => self.projects,
+            EntityKind::Meeting => self.meetings,
+            EntityKind::Research => self.research,
+            EntityKind::Task => self.tasks,
+            EntityKind::Sprint => self.sprints,
+            EntityKind::Milestone => self.milestones,
+            EntityKind::Proposal => self.proposals,
+            EntityKind::Contact => self.contacts,
+        }
+    }
+}
+
+/// Build indexes without printing to stdout: `index.json` with every
+/// enabled kind, plus `<kind>.json` per enabled kind (e.g. `meetings.json`).
 pub fn run_quiet(cfg: &ResolvedConfig) -> McResult<IndexResult> {
-    let customers = collect_json(EntityKind::Customer, cfg)?;
-    let projects = collect_json(EntityKind::Project, cfg)?;
-    let meetings = collect_json(EntityKind::Meeting, cfg)?;
-    let research = collect_json(EntityKind::Research, cfg)?;
-    let tasks = collect_json(EntityKind::Task, cfg)?;
-    let sprints = collect_json(EntityKind::Sprint, cfg)?;
-    let proposals = collect_json(EntityKind::Proposal, cfg)?;
-    let contacts = collect_json(EntityKind::Contact, cfg)?;
+    let mut index = serde_json::Map::new();
+    for kind in EntityKind::ALL {
+        if cfg.entity_available(&kind) {
+            index.insert(
+                kind.label_plural().to_string(),
+                JsonValue::Array(collect_json(kind, cfg)?),
+            );
+        }
+    }
 
     std::fs::create_dir_all(&cfg.data_dir)?;
 
-    // Build combined index
-    let index = serde_json::json!({
-        "customers": customers,
-        "projects": projects,
-        "meetings": meetings,
-        "research": research,
-        "tasks": tasks,
-        "sprints": sprints,
-        "proposals": proposals,
-        "contacts": contacts,
-    });
-
-    let index_path = cfg.data_dir.join("index.json");
-    let data = serde_json::to_string_pretty(&index)? + "\n";
-    util::atomic_write(&index_path, data.as_bytes())?;
-
-    // Individual files
-    let customers_data = serde_json::to_string_pretty(&customers)? + "\n";
-    util::atomic_write(
-        &cfg.data_dir.join("customers.json"),
-        customers_data.as_bytes(),
-    )?;
-
-    let projects_data = serde_json::to_string_pretty(&projects)? + "\n";
-    util::atomic_write(
-        &cfg.data_dir.join("projects.json"),
-        projects_data.as_bytes(),
-    )?;
-
-    let research_data = serde_json::to_string_pretty(&research)? + "\n";
-    util::atomic_write(
-        &cfg.data_dir.join("research.json"),
-        research_data.as_bytes(),
-    )?;
-
-    let tasks_data = serde_json::to_string_pretty(&tasks)? + "\n";
-    util::atomic_write(&cfg.data_dir.join("tasks.json"), tasks_data.as_bytes())?;
-
-    let sprints_data = serde_json::to_string_pretty(&sprints)? + "\n";
-    util::atomic_write(&cfg.data_dir.join("sprints.json"), sprints_data.as_bytes())?;
-
-    let proposals_data = serde_json::to_string_pretty(&proposals)? + "\n";
-    util::atomic_write(
-        &cfg.data_dir.join("proposals.json"),
-        proposals_data.as_bytes(),
-    )?;
-
-    let contacts_data = serde_json::to_string_pretty(&contacts)? + "\n";
-    util::atomic_write(
-        &cfg.data_dir.join("contacts.json"),
-        contacts_data.as_bytes(),
-    )?;
-
-    Ok(IndexResult {
-        customers: customers.len(),
-        projects: projects.len(),
-        meetings: meetings.len(),
-        research: research.len(),
-        tasks: tasks.len(),
-        sprints: sprints.len(),
-        proposals: proposals.len(),
-        contacts: contacts.len(),
-    })
+    let write = |name: &str, value: &JsonValue| -> McResult<()> {
+        let data = serde_json::to_string_pretty(value)? + "\n";
+        util::atomic_write(&cfg.data_dir.join(name), data.as_bytes())
+    };
+    for (key, entries) in &index {
+        write(&format!("{key}.json"), entries)?;
+    }
+    let count = |kind: EntityKind| {
+        index
+            .get(kind.label_plural())
+            .and_then(|v| v.as_array())
+            .map_or(0, |a| a.len())
+    };
+    let result = IndexResult {
+        customers: count(EntityKind::Customer),
+        projects: count(EntityKind::Project),
+        meetings: count(EntityKind::Meeting),
+        research: count(EntityKind::Research),
+        tasks: count(EntityKind::Task),
+        sprints: count(EntityKind::Sprint),
+        milestones: count(EntityKind::Milestone),
+        proposals: count(EntityKind::Proposal),
+        contacts: count(EntityKind::Contact),
+    };
+    write("index.json", &JsonValue::Object(index))?;
+    Ok(result)
 }
 
 fn collect_json(kind: EntityKind, cfg: &ResolvedConfig) -> McResult<Vec<JsonValue>> {
@@ -205,8 +193,43 @@ fn collect_json(kind: EntityKind, cfg: &ResolvedConfig) -> McResult<Vec<JsonValu
     json_entries.sort_by(|a, b| {
         let aid = a.get("id").and_then(|v| v.as_str()).unwrap_or("");
         let bid = b.get("id").and_then(|v| v.as_str()).unwrap_or("");
-        aid.cmp(bid)
+        data::id_sort_key(aid).cmp(&data::id_sort_key(bid))
     });
 
     Ok(json_entries)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::commands::{init, new};
+    use crate::config::{self, RepoMode};
+
+    #[test]
+    fn writes_a_file_per_enabled_kind_including_meetings() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        init::run(tmp.path(), false, true, Some("E"), false, true).unwrap();
+        let cfg = config::load_config(tmp.path(), RepoMode::Embedded).unwrap();
+        new::create_meeting(&cfg, &new::MeetingInput::new("Kickoff")).unwrap();
+
+        let result = run_quiet(&cfg).unwrap();
+        assert_eq!(result.meetings, 1);
+        let meetings: Vec<JsonValue> = serde_json::from_str(
+            &std::fs::read_to_string(cfg.data_dir.join("meetings.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(meetings[0]["id"], "MTG-001");
+
+        // Embedded repos have no customers, projects or contacts.
+        for name in ["customers.json", "projects.json", "contacts.json"] {
+            assert!(!cfg.data_dir.join(name).exists(), "{name} written");
+        }
+        let index: JsonValue = serde_json::from_str(
+            &std::fs::read_to_string(cfg.data_dir.join("index.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(index["meetings"][0]["id"], "MTG-001");
+        assert!(index.get("customers").is_none());
+        assert!(index["tasks"].as_array().unwrap().is_empty());
+    }
 }

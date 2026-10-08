@@ -1,8 +1,8 @@
 use crate::cli::ui;
 use crate::error::{McError, McResult};
 use colored::*;
-use std::io::Write;
-use std::path::Path;
+use std::io::{IsTerminal, Write};
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 // ---------------------------------------------------------------------------
@@ -162,6 +162,7 @@ projects: []                  # e.g., ["[[PROJ-001]]"]
 customers: []                 # e.g., ["[[CUST-001]]"]
 tags: []
 sprint: ""                    # e.g., "[[SPR-001]]"
+milestone: ""                 # e.g., "[[MS-001]]"
 depends_on: []                # e.g., ["[[TASK-001]]"]
 due_date: ""                  # YYYY-MM-DD
 created: "YYYY-MM-DD"
@@ -175,6 +176,25 @@ updated: "YYYY-MM-DD"
 
 ## Acceptance Criteria
 - [ ] Criterion 1
+
+## Notes
+"#;
+
+const TEMPLATE_MILESTONE: &str = r#"---
+id: "MS-NNN"
+aliases: []
+title: ""
+status: "planned"         # planned | active | completed | cancelled
+description: ""
+start_date: "YYYY-MM-DD"
+due_date: "YYYY-MM-DD"
+owner: ""
+projects: []              # e.g., ["[[PROJ-001]]"]
+created: "YYYY-MM-DD"
+updated: "YYYY-MM-DD"
+---
+
+# {{ title }}
 
 ## Notes
 "#;
@@ -303,8 +323,9 @@ tools/mc/target/
 # Generated indexes (rebuilt by `mc index`)
 data/*.json
 
-# Lock file held by a running `mc api serve`
+# Lock files: a running `mc api serve`, and writes without a .git/ dir
 .mc-api.lock
+.mc-write.lock
 
 # Temp files
 tmp/
@@ -344,6 +365,7 @@ paths:
   meetings: meetings/
   research: research/
   tasks: tasks/
+  milestones: milestones/
   sprints: sprints/
   proposals: proposals/
   notes: notes/
@@ -358,6 +380,7 @@ id_prefixes:
   meeting: MTG
   research: RES
   task: TASK
+  milestone: MS
   sprint: SPR
   proposal: PROP
   contact: CONT
@@ -388,6 +411,11 @@ statuses:
     - in-progress
     - review
     - done
+    - cancelled
+  milestone:
+    - planned
+    - active
+    - completed
     - cancelled
   sprint:
     - planning
@@ -478,6 +506,7 @@ paths:
   meetings: meetings/
   research: research/
   tasks: tasks/
+  milestones: milestones/
   sprints: sprints/
   proposals: proposals/
   data: data/
@@ -488,6 +517,7 @@ id_prefixes:
   meeting: MTG
   research: RES
   task: TASK
+  milestone: MS
   sprint: SPR
   proposal: PROP
 
@@ -507,6 +537,11 @@ statuses:
     - in-progress
     - review
     - done
+    - cancelled
+  milestone:
+    - planned
+    - active
+    - completed
     - cancelled
   sprint:
     - planning
@@ -542,6 +577,7 @@ const FULL_DIRS: &[&str] = &[
     "tasks/todo",
     "tasks/done",
     "sprints",
+    "milestones",
     "proposals",
     "notes/how-tos",
     "notes/playbooks",
@@ -569,6 +605,7 @@ const EMBEDDED_DIRS: &[&str] = &[
     "meetings",
     "research",
     "sprints",
+    "milestones",
     "proposals",
     "templates",
     "data",
@@ -587,8 +624,10 @@ pub fn run(
     force: bool,
     yes: bool,
 ) -> McResult<()> {
+    // Prompts need someone to answer them; piped runs take the defaults.
+    let interactive = !yes && std::io::stdin().is_terminal();
     if embedded {
-        return run_embedded(target, name, force, yes);
+        return run_embedded(target, name, force, interactive);
     }
 
     let config_path = target.join("config").join("config.yml");
@@ -599,22 +638,12 @@ pub fn run(
     }
 
     let mode_label = if project_mode { "project" } else { "full" };
-    let default_name = if project_mode {
-        "Project"
-    } else {
-        "MissionControl"
-    };
 
     // Determine name
     let repo_name = match name {
         Some(n) => n.to_string(),
-        None => {
-            if yes {
-                default_name.to_string()
-            } else {
-                prompt_name(default_name)?
-            }
-        }
+        None if interactive => prompt_name(&default_name(target))?,
+        None => default_name(target),
     };
 
     // Print summary
@@ -628,7 +657,7 @@ pub fn run(
     println!();
 
     // Confirm
-    if !yes && !confirm("Initialize repository?")? {
+    if interactive && !confirm("Initialize repository?")? {
         println!("Aborted.");
         return Ok(());
     }
@@ -656,33 +685,78 @@ pub fn run(
         FULL_CONFIG.replace("{name}", &yaml_scalar(&repo_name))
     };
     std::fs::create_dir_all(target.join("config"))?;
-    std::fs::write(&config_path, config_content)?;
+    let backup = write_config(&config_path, &config_content)?;
 
     // Write templates
     let templates_dir = target.join("templates");
     std::fs::create_dir_all(&templates_dir)?;
+    let mut kept = Vec::new();
 
     if project_mode {
         // Project-only: meeting, research, task, proposal
-        write_if_missing_or_force(&templates_dir.join("meeting.md"), TEMPLATE_MEETING, force)?;
-        write_if_missing_or_force(&templates_dir.join("research.md"), TEMPLATE_RESEARCH, force)?;
-        write_if_missing_or_force(&templates_dir.join("task.md"), TEMPLATE_TASK, force)?;
-        write_if_missing_or_force(&templates_dir.join("proposal.md"), TEMPLATE_PROPOSAL, force)?;
+        write_if_missing(
+            &templates_dir.join("meeting.md"),
+            TEMPLATE_MEETING,
+            &mut kept,
+        )?;
+        write_if_missing(
+            &templates_dir.join("research.md"),
+            TEMPLATE_RESEARCH,
+            &mut kept,
+        )?;
+        write_if_missing(&templates_dir.join("task.md"), TEMPLATE_TASK, &mut kept)?;
+        write_if_missing(
+            &templates_dir.join("proposal.md"),
+            TEMPLATE_PROPOSAL,
+            &mut kept,
+        )?;
     } else {
         // Full: all templates
-        write_if_missing_or_force(&templates_dir.join("customer.md"), TEMPLATE_CUSTOMER, force)?;
-        write_if_missing_or_force(&templates_dir.join("project.md"), TEMPLATE_PROJECT, force)?;
-        write_if_missing_or_force(&templates_dir.join("meeting.md"), TEMPLATE_MEETING, force)?;
-        write_if_missing_or_force(&templates_dir.join("research.md"), TEMPLATE_RESEARCH, force)?;
-        write_if_missing_or_force(&templates_dir.join("task.md"), TEMPLATE_TASK, force)?;
-        write_if_missing_or_force(&templates_dir.join("sprint.md"), TEMPLATE_SPRINT, force)?;
-        write_if_missing_or_force(&templates_dir.join("proposal.md"), TEMPLATE_PROPOSAL, force)?;
-        write_if_missing_or_force(&templates_dir.join("contact.md"), TEMPLATE_CONTACT, force)?;
+        write_if_missing(
+            &templates_dir.join("customer.md"),
+            TEMPLATE_CUSTOMER,
+            &mut kept,
+        )?;
+        write_if_missing(
+            &templates_dir.join("project.md"),
+            TEMPLATE_PROJECT,
+            &mut kept,
+        )?;
+        write_if_missing(
+            &templates_dir.join("meeting.md"),
+            TEMPLATE_MEETING,
+            &mut kept,
+        )?;
+        write_if_missing(
+            &templates_dir.join("research.md"),
+            TEMPLATE_RESEARCH,
+            &mut kept,
+        )?;
+        write_if_missing(&templates_dir.join("task.md"), TEMPLATE_TASK, &mut kept)?;
+        write_if_missing(&templates_dir.join("sprint.md"), TEMPLATE_SPRINT, &mut kept)?;
+        write_if_missing(
+            &templates_dir.join("milestone.md"),
+            TEMPLATE_MILESTONE,
+            &mut kept,
+        )?;
+        write_if_missing(
+            &templates_dir.join("proposal.md"),
+            TEMPLATE_PROPOSAL,
+            &mut kept,
+        )?;
+        write_if_missing(
+            &templates_dir.join("contact.md"),
+            TEMPLATE_CONTACT,
+            &mut kept,
+        )?;
     }
 
     // Write .gitignore and .gitattributes
-    write_if_missing_or_force(&target.join(".gitignore"), GITIGNORE, force)?;
-    write_if_missing_or_force(&target.join(".gitattributes"), GITATTRIBUTES, force)?;
+    write_if_missing(&target.join(".gitignore"), GITIGNORE, &mut kept)?;
+    write_if_missing(&target.join(".gitattributes"), GITATTRIBUTES, &mut kept)?;
+    if force {
+        report_reinit(target, backup.as_deref(), &kept);
+    }
 
     // Remove .gitkeep from directories that now have content
     remove_gitkeep_if_nonempty(&target.join("config"))?;
@@ -691,11 +765,7 @@ pub fn run(
     // Git init
     let git_dir = target.join(".git");
     if !git_dir.exists() {
-        let should_init = if yes {
-            true
-        } else {
-            confirm("Run 'git init'?")?
-        };
+        let should_init = !interactive || confirm("Run 'git init'?")?;
         if should_init {
             let status = Command::new("git").arg("init").current_dir(target).status();
             match status {
@@ -746,7 +816,7 @@ pub fn run(
     Ok(())
 }
 
-fn run_embedded(target: &Path, name: Option<&str>, force: bool, yes: bool) -> McResult<()> {
+fn run_embedded(target: &Path, name: Option<&str>, force: bool, interactive: bool) -> McResult<()> {
     let mc_dir = target.join(".mc");
     let config_path = mc_dir.join("config.yml");
 
@@ -755,20 +825,10 @@ fn run_embedded(target: &Path, name: Option<&str>, force: bool, yes: bool) -> Mc
         return Err(McError::AlreadyInitialized(config_path));
     }
 
-    let default_name = target
-        .file_name()
-        .map(|n| n.to_string_lossy().to_string())
-        .unwrap_or_else(|| "Project".to_string());
-
     let repo_name = match name {
         Some(n) => n.to_string(),
-        None => {
-            if yes {
-                default_name.clone()
-            } else {
-                prompt_name(&default_name)?
-            }
-        }
+        None if interactive => prompt_name(&default_name(target))?,
+        None => default_name(target),
     };
 
     // Print summary
@@ -782,7 +842,7 @@ fn run_embedded(target: &Path, name: Option<&str>, force: bool, yes: bool) -> Mc
     println!();
 
     // Confirm
-    if !yes && !confirm("Initialize embedded .mc/ folder?")? {
+    if interactive && !confirm("Initialize embedded .mc/ folder?")? {
         println!("Aborted.");
         return Ok(());
     }
@@ -800,23 +860,44 @@ fn run_embedded(target: &Path, name: Option<&str>, force: bool, yes: bool) -> Mc
     // Write config (flat, not in config/ subdirectory)
     std::fs::create_dir_all(&mc_dir)?;
     let config_content = EMBEDDED_CONFIG.replace("{name}", &yaml_scalar(&repo_name));
-    std::fs::write(&config_path, config_content)?;
+    let backup = write_config(&config_path, &config_content)?;
 
     // Write templates
     let templates_dir = mc_dir.join("templates");
     std::fs::create_dir_all(&templates_dir)?;
-    write_if_missing_or_force(&templates_dir.join("meeting.md"), TEMPLATE_MEETING, force)?;
-    write_if_missing_or_force(&templates_dir.join("research.md"), TEMPLATE_RESEARCH, force)?;
-    write_if_missing_or_force(&templates_dir.join("task.md"), TEMPLATE_TASK, force)?;
-    write_if_missing_or_force(&templates_dir.join("sprint.md"), TEMPLATE_SPRINT, force)?;
-    write_if_missing_or_force(&templates_dir.join("proposal.md"), TEMPLATE_PROPOSAL, force)?;
+    let mut kept = Vec::new();
+    write_if_missing(
+        &templates_dir.join("meeting.md"),
+        TEMPLATE_MEETING,
+        &mut kept,
+    )?;
+    write_if_missing(
+        &templates_dir.join("research.md"),
+        TEMPLATE_RESEARCH,
+        &mut kept,
+    )?;
+    write_if_missing(&templates_dir.join("task.md"), TEMPLATE_TASK, &mut kept)?;
+    write_if_missing(&templates_dir.join("sprint.md"), TEMPLATE_SPRINT, &mut kept)?;
+    write_if_missing(
+        &templates_dir.join("milestone.md"),
+        TEMPLATE_MILESTONE,
+        &mut kept,
+    )?;
+    write_if_missing(
+        &templates_dir.join("proposal.md"),
+        TEMPLATE_PROPOSAL,
+        &mut kept,
+    )?;
 
     // Create .mc/.gitignore (generated index files and the API lock)
-    write_if_missing_or_force(
+    write_if_missing(
         &mc_dir.join(".gitignore"),
-        "data/*.json\n.mc-api.lock\n",
-        force,
+        "data/*.json\n.mc-api.lock\n.mc-write.lock\n",
+        &mut kept,
     )?;
+    if force {
+        report_reinit(target, backup.as_deref(), &kept);
+    }
 
     // Remove .gitkeep from directories that now have content
     remove_gitkeep_if_nonempty(&templates_dir)?;
@@ -873,11 +954,68 @@ fn confirm(question: &str) -> McResult<bool> {
     Ok(trimmed.is_empty() || trimmed == "y" || trimmed == "yes")
 }
 
-fn write_if_missing_or_force(path: &Path, content: &str, force: bool) -> McResult<()> {
-    if !path.exists() || force {
+/// The name used when `--name` isn't given: the target directory's name.
+fn default_name(target: &Path) -> String {
+    let dir = target
+        .canonicalize()
+        .unwrap_or_else(|_| target.to_path_buf());
+    dir.file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .filter(|n| !n.trim().is_empty())
+        .unwrap_or_else(|| "MissionControl".to_string())
+}
+
+/// Write the config. An existing config that differs (`--force`) is first
+/// copied to `config.yml.bak`, whose path is returned.
+fn write_config(path: &Path, content: &str) -> McResult<Option<PathBuf>> {
+    let backup = match std::fs::read_to_string(path) {
+        Ok(old) if old != content => {
+            let bak = path.with_extension("yml.bak");
+            std::fs::copy(path, &bak)?;
+            Some(bak)
+        }
+        _ => None,
+    };
+    std::fs::write(path, content)?;
+    Ok(backup)
+}
+
+/// Write a default file unless it exists. Existing files that differ from
+/// the default (customised templates, a project's own `.gitignore`) are
+/// left alone and added to `kept`.
+fn write_if_missing(path: &Path, content: &str, kept: &mut Vec<PathBuf>) -> McResult<()> {
+    if !path.exists() {
         std::fs::write(path, content)?;
+    } else if std::fs::read_to_string(path).map_or(true, |old| old != content) {
+        kept.push(path.to_path_buf());
     }
     Ok(())
+}
+
+/// Tell the user what `--force` did and didn't change.
+fn report_reinit(target: &Path, backup: Option<&Path>, kept: &[PathBuf]) {
+    let rel = |p: &Path| p.strip_prefix(target).unwrap_or(p).display().to_string();
+    let g = ui::glyphs();
+    if let Some(bak) = backup {
+        println!(
+            "  {} config rewritten; the previous one is in {}",
+            g.warn.yellow(),
+            rel(bak).bold()
+        );
+    }
+    if !kept.is_empty() {
+        let names: Vec<String> = kept.iter().map(|p| rel(p)).collect();
+        println!(
+            "  {} kept your customised {}: {}",
+            g.sep.dimmed(),
+            if kept.len() == 1 { "file" } else { "files" },
+            names.join(", ")
+        );
+        println!(
+            "    {}",
+            "delete one and re-run `mc init --force` to restore its default".dimmed()
+        );
+    }
 }
 
 fn is_empty_dir(path: &Path) -> McResult<bool> {
@@ -1017,11 +1155,48 @@ mod tests {
         let root = tmp.path();
         run_init(root, false, Some("First"), false).unwrap();
 
+        let task_template = root.join("templates/task.md");
+        std::fs::write(&task_template, "---\nid: TASK-NNN\n---\nMy own layout\n").unwrap();
+        std::fs::write(root.join(".gitignore"), "target/\n").unwrap();
+        std::fs::remove_file(root.join("templates/sprint.md")).unwrap();
+
         // Force reinit should succeed
         run_init(root, false, Some("Second"), true).unwrap();
 
         let config = std::fs::read_to_string(root.join("config/config.yml")).unwrap();
         assert!(config.contains("name: Second"));
+        // The old config is backed up, customised files survive, missing ones return.
+        let bak = std::fs::read_to_string(root.join("config/config.yml.bak")).unwrap();
+        assert!(bak.contains("name: First"));
+        assert!(std::fs::read_to_string(&task_template)
+            .unwrap()
+            .contains("My own layout"));
+        assert_eq!(
+            std::fs::read_to_string(root.join(".gitignore")).unwrap(),
+            "target/\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("templates/sprint.md")).unwrap(),
+            TEMPLATE_SPRINT
+        );
+    }
+
+    #[test]
+    fn test_default_name_is_the_directory_name_in_every_mode() {
+        for (project_mode, embedded) in [(false, false), (true, false), (false, true)] {
+            let tmp = TempDir::new().unwrap();
+            let root = tmp.path().join("acme-hq");
+            std::fs::create_dir(&root).unwrap();
+            run(&root, project_mode, embedded, None, false, true).unwrap();
+            let config = if embedded {
+                ".mc/config.yml"
+            } else {
+                "config/config.yml"
+            };
+            let config = std::fs::read_to_string(root.join(config)).unwrap();
+            assert!(config.contains("name: acme-hq"), "{config}");
+        }
+        assert_eq!(default_name(Path::new("/")), "MissionControl");
     }
 
     #[test]
@@ -1212,10 +1387,14 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let root = tmp.path();
         run_embedded_init(root, Some("First"), false).unwrap();
+        let template = root.join(".mc/templates/task.md");
+        std::fs::write(&template, "custom\n").unwrap();
         run_embedded_init(root, Some("Second"), true).unwrap();
 
         let config = std::fs::read_to_string(root.join(".mc/config.yml")).unwrap();
         assert!(config.contains("name: Second"));
+        assert!(root.join(".mc/config.yml.bak").is_file());
+        assert_eq!(std::fs::read_to_string(&template).unwrap(), "custom\n");
     }
 
     #[test]

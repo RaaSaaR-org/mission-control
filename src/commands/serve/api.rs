@@ -6,14 +6,15 @@
 //! - `GET  /api/tasks/{id}`      one task
 //! - `POST /api/tasks`           create a task (same logic as `mc new task`)
 //! - `POST /api/tasks/{id}/move` change a task's status (same logic as `mc task move`)
-//! - `PATCH /api/tasks/{id}`     change status, priority, owner, sprint or due date
+//! - `PATCH /api/tasks/{id}`     change title, status, priority, owner, sprint, due date, project or customer
 //! - `POST /api/entities/{id}/checks`   tick or untick a checklist item
 //! - `POST /api/entities/{id}/comments` comment on a task or meeting
 //!
 //! Write responses carry the updated task, freshly rendered HTML fragments
 //! (board card, title block, field rail) so the page can update in place, and
-//! the new repo version so the page doesn't mistake its own write for an
-//! outside change. Errors are `{"error": code, "message": text, "field"?}`.
+//! the repo version before and after the write, so the page doesn't mistake
+//! its own write for an outside change but still notices one that landed
+//! just before it. Errors are `{"error": code, "message": text, "field"?}`.
 
 use super::AppState;
 use crate::checklist::{self, Target};
@@ -25,7 +26,6 @@ use crate::entity::EntityKind;
 use crate::error::{McError, McResult};
 use crate::frontmatter;
 use crate::html::{self, Catalog};
-use crate::util;
 use axum::extract::rejection::JsonRejection;
 use axum::extract::{Path, State};
 use axum::http::{header, StatusCode};
@@ -41,7 +41,7 @@ use walkdir::WalkDir;
 
 const MAX_TITLE: usize = 200;
 const MAX_OWNER: usize = 80;
-const MAX_COMMENT: usize = 20_000;
+use crate::html::MAX_COMMENT;
 
 // ── Errors ──────────────────────────────────────────────────────────────
 
@@ -89,7 +89,13 @@ impl From<McError> for ApiError {
             McError::InvalidId(_) => {
                 Self::new(StatusCode::BAD_REQUEST, "invalid_id", e.to_string())
             }
-            McError::Usage { .. } => Self::new(StatusCode::BAD_REQUEST, "invalid", e.to_string()),
+            McError::Usage { .. } => {
+                let message = match e.hint() {
+                    Some(hint) => format!("{e} {hint}"),
+                    None => e.to_string(),
+                };
+                Self::new(StatusCode::BAD_REQUEST, "invalid", message)
+            }
             McError::NotFound { .. } => {
                 Self::new(StatusCode::NOT_FOUND, "not_found", e.to_string())
             }
@@ -114,6 +120,13 @@ impl From<McError> for ApiError {
 
 impl From<JsonRejection> for ApiError {
     fn from(e: JsonRejection) -> Self {
+        if e.status() == StatusCode::PAYLOAD_TOO_LARGE {
+            return Self::new(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "too_large",
+                "That's too much text for one request.",
+            );
+        }
         Self::new(StatusCode::BAD_REQUEST, "bad_request", e.body_text())
     }
 }
@@ -153,7 +166,7 @@ pub(super) async fn method_not_allowed() -> ApiError {
 // ── Reads ───────────────────────────────────────────────────────────────
 
 pub(super) async fn palette(State(state): State<Arc<AppState>>) -> Response {
-    let catalog = Catalog::load(&state.cfg);
+    let catalog = state.cached_catalog();
     let body = html::palette_json(&state.page(&catalog));
     (
         no_store(),
@@ -176,7 +189,8 @@ pub(super) async fn preview(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Response {
-    let catalog = Catalog::load(&state.cfg);
+    // Cards are fetched on every hover: reuse the catalog until files change.
+    let catalog = state.cached_catalog();
     let page = state.page(&catalog);
     let (status, card) = match html::preview_card(&page, &id) {
         Some(card) => (StatusCode::OK, card),
@@ -212,6 +226,7 @@ pub(super) fn content_version(cfg: &ResolvedConfig) -> String {
         &cfg.research_dir,
         &cfg.tasks_dir,
         &cfg.sprints_dir,
+        &cfg.milestones_dir,
         &cfg.proposals_dir,
     ];
     dirs.sort();
@@ -223,7 +238,7 @@ pub(super) fn content_version(cfg: &ResolvedConfig) -> String {
             .filter_entry(|e| e.depth() == 0 || !e.file_name().to_string_lossy().starts_with('.'));
         for entry in walker.filter_map(Result::ok) {
             let path = entry.path();
-            if !entry.file_type().is_file() || path.extension().is_none_or(|e| e != "md") {
+            if !entry.file_type().is_file() || !data::is_markdown(path) {
                 continue;
             }
             let Ok(meta) = entry.metadata() else { continue };
@@ -307,7 +322,8 @@ fn check_text(field: &'static str, s: &str, max: usize) -> Result<String, ApiErr
 /// Empty clears the date; anything else must be `YYYY-MM-DD`.
 fn check_date(s: &str) -> Result<String, ApiError> {
     let s = s.trim();
-    if s.is_empty() || chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d").is_ok() {
+    // Same strict check as `mc new` (no unpadded `2026-1-5`).
+    if s.is_empty() || crate::commands::new::validate_date(s, "due date").is_ok() {
         Ok(s.to_string())
     } else {
         Err(ApiError::invalid("due_date", "Use a date like 2026-10-31."))
@@ -391,6 +407,7 @@ fn task_json(rec: &EntityRecord, cfg: &ResolvedConfig) -> JsonValue {
         "priority": data::get_number(fm, "priority").unwrap_or(3),
         "owner": frontmatter::get_str_or(fm, "owner", ""),
         "sprint": frontmatter::get_link_str(fm, "sprint").unwrap_or(""),
+        "milestone": frontmatter::get_link_str(fm, "milestone").unwrap_or(""),
         "due_date": frontmatter::get_str_or(fm, "due_date", ""),
         "projects": frontmatter::get_link_list(fm, "projects"),
         "customers": frontmatter::get_link_list(fm, "customers"),
@@ -450,40 +467,68 @@ pub(super) async fn move_task(
     let cfg = &state.cfg;
     let status = check_status(cfg, body.status.trim())?;
     let _write = state.write_lock.lock().await;
+    let prev = content_version(cfg);
     let task = find_task(cfg, &id)?;
     let old = frontmatter::get_str_or(&task.frontmatter, "status", "").to_string();
     if old != status {
         move_status(cfg, &task, &status)?;
     }
-    task_response(&state, &id, json!({"old_status": old}), StatusCode::OK)
+    task_response(
+        &state,
+        &id,
+        json!({"old_status": old, "prev_version": prev}),
+        StatusCode::OK,
+    )
 }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct UpdateBody {
+    title: Option<String>,
     status: Option<String>,
     priority: Option<u32>,
     owner: Option<String>,
     sprint: Option<String>,
+    milestone: Option<String>,
     due_date: Option<String>,
+    /// One project ID, or empty for none.
+    project: Option<String>,
+    /// One customer ID, or empty for none.
+    customer: Option<String>,
 }
 
-/// Validated field changes; `None` leaves a field as it is.
-#[derive(Default)]
-struct FieldChanges {
-    priority: Option<u32>,
-    owner: Option<String>,
-    sprint: Option<String>,
-    due_date: Option<String>,
-}
-
-impl FieldChanges {
-    fn is_empty(&self) -> bool {
-        self.priority.is_none()
-            && self.owner.is_none()
-            && self.sprint.is_none()
-            && self.due_date.is_none()
+/// A new single project or customer link, or `None` if it's unchanged. A
+/// task linking several is edited in its file, not replaced from here.
+fn check_single_ref(
+    catalog: &Catalog,
+    cfg: &ResolvedConfig,
+    fm: &Value,
+    kind: EntityKind,
+    field: &'static str,
+    value: Option<&str>,
+) -> Result<Option<String>, ApiError> {
+    let Some(value) = value.map(str::trim) else {
+        return Ok(None);
+    };
+    let current = frontmatter::get_link_list(fm, kind.label_plural());
+    let current: Vec<&str> = current
+        .iter()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .collect();
+    if current.len() <= 1 && current.first().copied().unwrap_or("") == value {
+        return Ok(None);
     }
+    if current.len() > 1 {
+        return Err(ApiError::invalid(
+            field,
+            format!(
+                "This task links several {}. Edit them in its file.",
+                kind.label_plural()
+            ),
+        ));
+    }
+    check_ref(catalog, cfg, kind, field, value).map(Some)
 }
 
 pub(super) async fn update_task(
@@ -493,11 +538,15 @@ pub(super) async fn update_task(
 ) -> ApiResult {
     let Json(body) = body?;
     let cfg = &state.cfg;
-    if body.status.is_none()
+    if body.title.is_none()
+        && body.status.is_none()
         && body.priority.is_none()
         && body.owner.is_none()
         && body.sprint.is_none()
+        && body.milestone.is_none()
         && body.due_date.is_none()
+        && body.project.is_none()
+        && body.customer.is_none()
     {
         return Err(ApiError::new(
             StatusCode::BAD_REQUEST,
@@ -505,71 +554,75 @@ pub(super) async fn update_task(
             "Nothing to change.",
         ));
     }
+    // Checked here first so the form can point at the offending field;
+    // `task::update_task` validates again and does the write.
     let status = body
         .status
         .as_deref()
         .map(|s| check_status(cfg, s.trim()))
         .transpose()?;
 
+    let title = body
+        .title
+        .as_deref()
+        .map(|t| check_text("title", t, MAX_TITLE))
+        .transpose()?;
+    if title.as_deref() == Some("") {
+        return Err(ApiError::invalid("title", "Give the task a title."));
+    }
+
     let _write = state.write_lock.lock().await;
+    let prev = content_version(cfg);
     let task = find_task(cfg, &id)?;
     let fm = &task.frontmatter;
     let catalog = Catalog::load(cfg);
     let current_sprint = frontmatter::get_link_str(fm, "sprint").unwrap_or("").trim();
-    let changes = FieldChanges {
+    // A one-element list, or an empty one to clear the link.
+    let single = |kind, field, value: &Option<String>| {
+        check_single_ref(&catalog, cfg, fm, kind, field, value.as_deref())
+            .map(|id| id.map(|id| Some(id).filter(|i| !i.is_empty()).into_iter().collect()))
+    };
+    let changes = task_cmd::TaskUpdate {
+        title,
+        status,
         priority: body.priority.map(check_priority).transpose()?,
         owner: body
             .owner
             .as_deref()
             .map(|o| check_text("owner", o, MAX_OWNER))
             .transpose()?,
+        // The form sends every field; an unchanged sprint may be a legacy
+        // title, which is left as it is.
         sprint: match body.sprint.as_deref().map(str::trim) {
             None => None,
             Some(s) if s == current_sprint => None,
             Some(s) => Some(check_ref(&catalog, cfg, EntityKind::Sprint, "sprint", s)?),
         },
+        milestone: body
+            .milestone
+            .as_deref()
+            .map(|s| check_ref(&catalog, cfg, EntityKind::Milestone, "milestone", s))
+            .transpose()?,
         due_date: body.due_date.as_deref().map(check_date).transpose()?,
+        projects: single(EntityKind::Project, "project", &body.project)?,
+        customers: single(EntityKind::Customer, "customer", &body.customer)?,
+        ..Default::default()
     };
-    // Fields first, then the status: a status change may move the file
-    // between todo/ and done/ and re-reads it, keeping the new fields.
-    if !changes.is_empty() {
-        write_fields(&task, &changes)?;
-    }
     let old = frontmatter::get_str_or(fm, "status", "").to_string();
-    if let Some(status) = status.filter(|s| *s != old) {
-        move_status(cfg, &task, &status)?;
+    if !changes.is_empty() {
+        task_cmd::update_task(cfg, &task.id, &changes)?;
     }
-    task_response(&state, &id, json!({"old_status": old}), StatusCode::OK)
+    task_response(
+        &state,
+        &id,
+        json!({"old_status": old, "prev_version": prev}),
+        StatusCode::OK,
+    )
 }
 
 /// Change a task's status with the same logic as `mc task move`.
 fn move_status(cfg: &ResolvedConfig, task: &EntityRecord, status: &str) -> McResult<()> {
     task_cmd::move_task_programmatic(cfg, &task.id, status, None).map(drop)
-}
-
-/// Rewrite a task's frontmatter with `changes`, keeping its body and the
-/// order of its other fields.
-fn write_fields(task: &EntityRecord, changes: &FieldChanges) -> McResult<()> {
-    frontmatter::update_file(&task.source_path, |fm| {
-        if let Some(p) = changes.priority {
-            if let Some(map) = fm.as_mapping_mut() {
-                map.insert(
-                    Value::String("priority".into()),
-                    Value::Number(serde_yaml::Number::from(p as u64)),
-                );
-            }
-        }
-        if let Some(owner) = &changes.owner {
-            frontmatter::set_str(fm, "owner", owner);
-        }
-        if let Some(sprint) = &changes.sprint {
-            frontmatter::set_str(fm, "sprint", &frontmatter::wrap_wikilink(sprint));
-        }
-        if let Some(due) = &changes.due_date {
-            frontmatter::set_str(fm, "due_date", due);
-        }
-        frontmatter::set_str(fm, "updated", &util::today_str());
-    })
 }
 
 #[derive(Deserialize)]
@@ -582,6 +635,7 @@ pub(super) struct CreateBody {
     project: Option<String>,
     customer: Option<String>,
     sprint: Option<String>,
+    milestone: Option<String>,
     due_date: Option<String>,
 }
 
@@ -607,6 +661,7 @@ pub(super) async fn create_task(
     let due_date = check_date(body.due_date.as_deref().unwrap_or(""))?;
 
     let _write = state.write_lock.lock().await;
+    let prev = content_version(cfg);
     let catalog = Catalog::load(cfg);
     let reference = |kind, field, value: &Option<String>| {
         check_ref(&catalog, cfg, kind, field, value.as_deref().unwrap_or(""))
@@ -616,24 +671,28 @@ pub(super) async fn create_task(
     let sprint = reference(EntityKind::Sprint, "sprint", &body.sprint)?;
     let some = |s: &str| (!s.is_empty()).then(|| s.to_string());
 
-    let created = new_cmd::create_task_programmatic(
+    let milestone = reference(EntityKind::Milestone, "milestone", &body.milestone)?;
+    let created = new_cmd::create_task(
         cfg,
-        &title,
-        some(&project).as_deref(),
-        some(&customer).as_deref(),
-        some(&owner).as_deref(),
-        status.as_deref(),
-        priority,
-        None,
-        some(&sprint).as_deref(),
-        None,
-        some(&due_date).as_deref(),
-    )?;
+        &new_cmd::TaskInput {
+            title,
+            project: some(&project),
+            customer: some(&customer),
+            owner: some(&owner),
+            status,
+            priority,
+            sprint: some(&sprint),
+            milestone: some(&milestone),
+            due_date: some(&due_date),
+            ..Default::default()
+        },
+    )?
+    .to_json();
     let id = created["id"].as_str().unwrap_or_default().to_string();
     task_response(
         &state,
         &id,
-        json!({"href": format!("/entity/{id}")}),
+        json!({"href": format!("/entity/{id}"), "prev_version": prev}),
         StatusCode::CREATED,
     )
 }
@@ -659,6 +718,7 @@ pub(super) async fn check_item(
     let Json(body) = body?;
     let cfg = &state.cfg;
     let _write = state.write_lock.lock().await;
+    let prev = content_version(cfg);
     let rec = find_entity(cfg, &id)?;
     let change = checklist::set_checked(
         &rec,
@@ -675,6 +735,7 @@ pub(super) async fn check_item(
             "changed": change.changed,
             "done": change.done,
             "total": change.total,
+            "prev_version": prev,
             "version": content_version(cfg),
         }),
     )
@@ -695,16 +756,22 @@ pub(super) async fn add_comment(
     Path(id): Path<String>,
     body: Result<Json<CommentBody>, JsonRejection>,
 ) -> ApiResult {
-    let Json(body) = body?;
+    let Json(body) = body.map_err(|e| {
+        if e.status() == StatusCode::PAYLOAD_TOO_LARGE {
+            ApiError {
+                field: Some("text"),
+                ..ApiError::new(e.status(), "too_large", too_long_comment())
+            }
+        } else {
+            e.into()
+        }
+    })?;
     let cfg = &state.cfg;
     if body.text.trim().is_empty() {
         return Err(ApiError::invalid("text", "Write something first."));
     }
     if body.text.chars().count() > MAX_COMMENT {
-        return Err(ApiError::invalid(
-            "text",
-            format!("Keep comments under {MAX_COMMENT} characters."),
-        ));
+        return Err(ApiError::invalid("text", too_long_comment()));
     }
     let author = body
         .author
@@ -714,6 +781,7 @@ pub(super) async fn add_comment(
         .filter(|a| !a.is_empty());
 
     let _write = state.write_lock.lock().await;
+    let prev = content_version(cfg);
     let rec = find_entity(cfg, &id)?;
     if !comments::is_commentable(rec.kind) {
         return Err(ApiError::new(
@@ -733,7 +801,12 @@ pub(super) async fn add_comment(
             "comment": added.comment,
             "count": added.count,
             "html": html::prefix_base_path(&item, &state.base_path),
+            "prev_version": prev,
             "version": content_version(cfg),
         }),
     )
+}
+
+fn too_long_comment() -> String {
+    format!("Keep comments under {MAX_COMMENT} characters.")
 }

@@ -10,3 +10,5 @@ pub(crate) mod lists;
 pub(crate) mod preview;
 pub(crate) mod search;
 pub(crate) mod tasks;
+
+pub(crate) mod milestones;

@@ -57,6 +57,8 @@ Useful URLs once the server is running:
 
 Every authenticated request carries `Authorization: Bearer <secret>`. Tokens are compared against argon2id hashes loaded once at startup from `--tokens-file`.
 
+A bearer is verified with argon2 only the first time it is seen; after that its result (match or failure) is cached in memory. First-sight verifications run off the async workers, at most two at a time, so a flood of random bearers can't stall other requests; if a request waits more than 5 s for a slot it gets `503 unavailable` and may retry.
+
 ### Token file format (YAML)
 
 ```yaml
@@ -106,51 +108,56 @@ Default `127.0.0.1`. Only set `--bind 0.0.0.0` behind a trusted reverse proxy th
 | GET | `/v1/openapi.json` | none | OpenAPI 3.1 spec, generated from the typed handlers. |
 | GET | `/v1/config` | read | Repo `name` (`brand.name`, else `site.name`), mode, prefixes, valid statuses, configured path keys, `available_kinds`. |
 | GET | `/v1/status` | read | Counts by status per kind + recent activity. |
-| GET | `/v1/entities/{kind}` | read | List with optional `?status=&tag=`. |
-| GET | `/v1/entities/{kind}/{id}` | read | Parsed entity (frontmatter as JSON + body preview). |
+| GET | `/v1/entities/{kind}` | read | List with optional `?status=&tag=`. Each entry is the frontmatter plus `_kind` and `_source` (file path relative to the repo root). |
+| GET | `/v1/entities/{kind}/{id}` | read | Parsed entity: `{kind, id, source_path, frontmatter, body_preview}`, `source_path` relative to the repo root. |
 | GET | `/v1/entities/{kind}/{id}/raw` | read | Raw markdown (`text/markdown`). |
-| GET | `/v1/tasks` | read | List with full filter set: `status`, `tag`, `project`, `customer`, `priority`, `sprint`, `owner`. |
+| GET | `/v1/tasks` | read | List with full filter set: `status`, `tag`, `project`, `customer`, `priority`, `sprint`, `milestone`, `owner`. `milestone` takes an ID or unique title; an empty value (`?milestone=`) lists tasks without a milestone, and an unknown milestone is a `404`. Entries are shaped like `/v1/entities/task`. |
+| GET | `/v1/tasks/next` | read | What to work on next, like `mc task next`: open tasks (`todo`, `backlog`) whose dependencies are done or cancelled, best first (todo before backlog, then priority, due date, ID). Optional `?project=&customer=&owner=&limit=` (default 5). Returns `{tasks, actionable, blocked}`: the tasks shaped like `/v1/tasks`, the number of actionable tasks before `limit`, and the number of open tasks waiting on dependencies. |
 | POST | `/v1/customers` | write | Create. Body: `{name, owner?, status?, tags?}`. |
 | POST | `/v1/projects` | write | `{name, owner?, status?, customers?, tags?}` |
 | POST | `/v1/meetings` | write | `{title, date?, time?, duration?, status?, tags?, customers?, projects?, attendees?}` |
 | POST | `/v1/research` | write | `{title, owner?, agents?, tags?}` |
-| POST | `/v1/tasks` | write | `{title, project?, customer?, owner?, status?, priority?, tags?, sprint?, depends_on?, due_date?}` |
+| POST | `/v1/tasks` | write | `{title, project?, customer?, owner?, status?, priority?, tags?, sprint?, milestone?, depends_on?, due_date?}` |
 | POST | `/v1/sprints` | write | `{title, owner?, status?, goal?, start_date?, end_date?, projects?, tags?}` |
+| POST | `/v1/milestones` | write | `{title, description?, start_date?, due_date?, owner?, status?, projects?}` — a milestone (work package) that groups tasks. Status defaults to `planned`; `due_date` may not be before `start_date`. Assign tasks with `milestone` on `POST /v1/tasks` or `PATCH /v1/tasks/{id}`; list milestones with `GET /v1/entities/milestones`. |
 | POST | `/v1/proposals` | write | `{title, author?, status?, type?, tags?, supersedes?}` |
 | POST | `/v1/contacts` | write | `{name, customer, role?, email?, phone?, status?, tags?}` |
-| POST | `/v1/tasks/{id}/move` | write | `{status, sprint?}` — also moves the file between `todo/` and `done/` if the status crosses the active boundary. |
+| PATCH | `/v1/tasks/{id}` | write | `{title?, status?, priority?, owner?, sprint?, milestone?, due_date?, projects?, customers?, tags?, depends_on?}` — change only the given fields (same as `mc task set` and the MCP `update_task` tool). Empty values clear (`""`, `[]`); list fields replace the whole list; `project`/`customer` are accepted for `projects`/`customers`. Validated like a create (references must exist, `404` otherwise) and nothing is written if a value is invalid; unknown fields are a `400`. A status change moves the file like `move`. Returns `{id, changed, old_status, new_status, path}`, `changed` listing the fields whose value actually changed. |
+| POST | `/v1/tasks/{id}/move` | write | `{status, sprint?}` — also moves the file between `todo/` and `done/` if the status crosses the active boundary. Returns `{id, old_status, new_status, path}`. Only tasks can be moved. |
 | GET | `/v1/entities/{kind}/{id}/checklist` | read | `- [ ]` checklist items `{id, items: [{index, line, checked, text}], done, total}` (code blocks and task/meeting comments excluded). |
 | POST | `/v1/entities/{kind}/{id}/checklist/{item}` | write | `{checked?, expect_text?}` — tick (default) or untick item `item` (1-based). Only the box character changes. A stale `expect_text` is `409 conflict`. |
 | POST | `/v1/entities/{kind}/{id}/comments` | write | `{text, author?}` — comment on a task or meeting; appended under `## Comments` as `### YYYY-MM-DD HH:MM · Author`. `201` with `{id, comment, count, path}`. |
 | POST | `/v1/index` | write | Rebuild the JSON index files under `data/`. |
-| POST | `/v1/validate` | read | Run `mc validate`; returns issues as JSON. |
+| GET, POST | `/v1/validate` | read | Run `mc validate`; returns issues as JSON. Read-only tokens and `--read-only` servers may call it with either method. |
 
-`kind` accepts singular or plural forms (`customer`/`customers`, `task`/`tasks`, etc.). List fields (`tags`, `customers`, `projects`, `attendees`, `agents`, `depends_on`) accept either a comma-separated string (`"a,b"`, the CLI convention) or a JSON array of strings (`["a", "b"]`). Both forms are split on commas, so items cannot contain a comma.
+`kind` accepts singular or plural forms (`customer`/`customers`, `task`/`tasks`, etc.). IDs in paths are forgiving like the CLI's: case and zero-padding don't matter and a bare number takes the path's kind (`/v1/entities/task/task-7`, `/v1/entities/task/7` and `/v1/tasks/TASK-0007/move` all mean `TASK-007`). Statuses in `move` and in `?status=` filters ignore case and `_`/space for `-`, and accept the CLI's aliases (`doing`/`wip` → `in-progress`, `completed` → `done`, `canceled` → `cancelled`). References in create and PATCH bodies (`project`, `customer(s)`, `projects`, `depends_on`, `supersedes`, `sprint`, `milestone`) are just as forgiving and are stored canonically (`task-1` → `TASK-001`; a sprint or milestone may be given by ID or unique title and is stored as its ID); they must name an existing entity.
+
+Every `path`, `source_path` and `_source` in a response is relative to the repo root (`tasks/todo/TASK-001-x.md`), so responses don't reveal where the repo lives on the server; error details name files the same way. Cross-reference fields (`customers`, `projects`, `depends_on`, `sprint`, `milestone`, …) come without wiki-link brackets (`PROJ-001`, not `[[PROJ-001]]`). List fields (`tags`, `customers`, `projects`, `attendees`, `agents`, `depends_on`) accept either a comma-separated string (`"a,b"`, the CLI convention) or a JSON array of strings (`["a", "b"]`). Both forms are split on commas, so items cannot contain a comma.
 
 Create bodies are validated before anything is written:
 
 - Omitted or blank `status` falls back to the kind's first configured status; any other value must be one of the configured statuses.
-- Dates (`date`, `start_date`, `end_date`, `due_date`) must be `YYYY-MM-DD`; a sprint's `end_date` may not be before its `start_date`.
+- Dates (`date`, `start_date`, `end_date`, `due_date`) must be `YYYY-MM-DD`; a sprint's `end_date` and a milestone's `due_date` may not be before its `start_date`.
 - `priority` must be 1-4.
 - Referenced scopes (`project`/`customer` on tasks, `customer` on contacts) must exist. IDs may be given plain (`CUST-001`) or wiki-linked (`[[CUST-001]]`).
 - Two meetings with the same date and title get distinct files (`…-standup.md`, `…-standup-2.md`) instead of overwriting each other.
 
 Violations return `400 bad-request` with a message starting with `Invalid …` (or `404` for a missing scope).
 
-A successful create returns `201 Created` and `{id, name, path}`. For kinds whose primary field is `title` (meetings, research, tasks, sprints, proposals), the `name` field of the response carries the title — the server normalizes the payload so consumers always see `name`.
+A successful create returns `201 Created` and `{id, name, path}` (`path` relative to the repo root). For kinds whose primary field is `title` (meetings, research, tasks, sprints, milestones, proposals), the `name` field of the response carries the title — the server normalizes the payload so consumers always see `name`.
 
 ---
 
 ## 4. Error model (RFC 7807)
 
-Every error is `application/problem+json`:
+Every error is `application/problem+json` — including a body that isn't valid JSON or misses a field, a query parameter of the wrong type, an unknown path, a wrong method (with an `Allow` header), an oversized body and a timeout:
 
 ```json
 {
   "type": "https://docs.mc.dev/errors/bad-request",
   "title": "Bad request",
   "status": 400,
-  "detail": "Invalid task status 'frob'. Valid statuses: backlog, todo, in-progress, review, done, cancelled"
+  "detail": "'frob' is not a valid task status (valid statuses: backlog, todo, in-progress, review, done, cancelled)"
 }
 ```
 
@@ -160,10 +167,15 @@ Stable `type` URIs:
 |---|---|---|
 | `unauthenticated` | 401 | Missing or invalid bearer token. |
 | `forbidden` | 403 | Read-only mode, missing write capability, kind unavailable in repo mode. |
-| `bad-request` | 400 | Invalid status, priority or date, invalid JSON body, unknown entity kind, empty name. |
-| `invalid-id` | 400 | ID prefix doesn't match any configured kind. |
+| `bad-request` | 400 | Invalid status, priority or date, a body or query string that can't be read (bad JSON, missing or mistyped field), unknown entity kind, empty name. |
+| `invalid-id` | 400 | ID prefix doesn't match any configured kind (the detail suggests the closest one). |
+| `method-not-allowed` | 405 | The path exists but not for this method. |
+| `payload-too-large` | 413 | Body over 64 KiB. |
+| `unsupported-media-type` | 415 | A body sent without `Content-Type: application/json`. |
+| `timeout` | 408 | The request took longer than 30 s. |
+| `unavailable` | 503 | Too many first-sight token verifications waiting, or `/readyz` found the repo unreachable. |
 | `entity-not-found` | 404 | No entity with that ID. |
-| `not-found` | 404 | Another requested thing does not exist (e.g. a research report file). |
+| `not-found` | 404 | Another requested thing does not exist (e.g. a research report file, or a `project`/`customer`/`sprint`/`milestone`/`depends_on` reference in a create, `PATCH` or task filter), or no endpoint at that path. |
 | `frontmatter` | 400 | Frontmatter parse error during read-modify-write. |
 | `validation` | 422 | `mc validate` found issues (used by CLI; the `/v1/validate` endpoint returns 200 with `ok: false` instead). |
 | `not-available` | 403 | Kind not enabled in this repo (customer in embedded mode, or a kind missing from `paths:` in a standalone config). |
@@ -180,17 +192,19 @@ Some validation messages are reported as `bad-request` instead of `validation` b
 ## 5. Concurrency
 
 - **Reads** run unsynchronised. `util::atomic_write` makes each individual file's write atomic; readers tolerate the few-millisecond window where a concurrent writer has created a directory but the markdown file inside hasn't landed yet.
-- **Writes** acquire a per-server `tokio::sync::Mutex`. One writer at a time. The mutex is held around the full read-modify-write sequence so ID allocation cannot race.
+- **Writes** acquire a per-server `tokio::sync::Mutex`. One writer at a time. The mutex is held around the full read-modify-write sequence so ID allocation cannot race; the repo-wide write lock below covers writers in other processes.
 
 At the rate this API will see (humans + a small fleet of agents), a single mutex is correct and trivially auditable. If contention ever shows up in profiling, the next step is sharding by entity kind. Don't pre-optimise.
 
 ### Cross-process safety
 
-At startup, `mc api serve` acquires an exclusive `flock` on `<repo>/.mc-api.lock` (`<repo>/.mc/.mc-api.lock` in embedded repos; `mc init` git-ignores it). A second instance against the same repo fails fast with a clear error. Without this, two processes would each have an independent mutex and hand out duplicate IDs.
+At startup, `mc api serve` acquires an exclusive `flock` on `<repo>/.mc-api.lock` (`<repo>/.mc/.mc-api.lock` in embedded repos; `mc init` git-ignores it). A second instance against the same repo fails fast with a clear error.
+
+Writes from other processes (the CLI, `mc mcp`, the dashboard) are serialized by the repo-wide write lock in `src/lock.rs`: every shared write function (`create_*` from ID allocation until the file lands, task moves, comments, checklist ticks, frontmatter updates) holds an exclusive `flock` on `.git/mc-write.lock` (or `.mc-write.lock` / `.mc/.mc-write.lock` without a `.git` directory), so no two writers hand out the same ID.
 
 ### Bearer-token verification cost
 
-Argon2id verification is intentionally slow (≈30–100 ms each). On every request the server SHA-256-hashes the bearer and looks it up in a small in-memory cache; only never-before-seen bearers pay the argon2 cost. Failed verifications are not cached, so the cache stays bounded by the number of legitimate tokens and an attacker hammering with random bearers cannot grow it.
+Argon2id verification is intentionally slow (≈30–100 ms each). On every request the server SHA-256-hashes the bearer and looks it up in a small in-memory cache; only never-before-seen bearers pay the argon2 cost. That cost runs off the async runtime (`spawn_blocking`) behind a 2-permit semaphore; a request that waits more than 5 s for a permit gets `503 unavailable`. Failed bearers go into a bounded negative cache (4096 entries, then cleared), so repeating a bad token skips argon2 and random bearers cannot grow memory.
 
 ### Body and timeout limits
 
@@ -291,7 +305,7 @@ Don't reuse the user's bearer when forwarding upstream — replace it with the g
 ## 8. Intentionally not in the API
 
 - **DELETE.** mc has no delete operation today. Removing a markdown file by hand still works; if you need automated removal, do it in your repo tooling (and commit it).
-- **General PATCH on frontmatter.** Editing arbitrary fields without going through `mc` opens too many invariants (status/folder sync, ID stability, link integrity). The CLI doesn't do it; the API doesn't do it.
+- **General PATCH on frontmatter.** Editing arbitrary fields without going through `mc` opens too many invariants (status/folder sync, ID stability, link integrity). Only the typed, validated task fields of `PATCH /v1/tasks/{id}` can be changed (the same set as `mc task set`); IDs, slugs and other kinds' fields are edited in the files.
 - **WebSocket / SSE.** Polling `/v1/status` is enough at today's scale. Live updates can be added later with a `tokio::sync::broadcast` channel.
 - **Tenant scoping.** Lives in a gateway. See §7.
 - **Git commits.** Writes are pure FS, just like the CLI. Wire commits into your operator/cron — mc doesn't touch git after `init`.

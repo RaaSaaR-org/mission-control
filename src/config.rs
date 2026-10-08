@@ -51,6 +51,7 @@ pub struct ResolvedConfig {
     pub research_dir: PathBuf,
     pub tasks_dir: PathBuf,
     pub sprints_dir: PathBuf,
+    pub milestones_dir: PathBuf,
     pub proposals_dir: PathBuf,
     pub data_dir: PathBuf,
     pub templates_dir: PathBuf,
@@ -91,6 +92,7 @@ pub struct IdPrefixes {
     pub research: String,
     pub task: String,
     pub sprint: String,
+    pub milestone: String,
     pub proposal: String,
     pub contact: String,
 }
@@ -103,16 +105,18 @@ pub struct StatusConfig {
     pub research: Vec<String>,
     pub task: Vec<String>,
     pub sprint: Vec<String>,
+    pub milestone: Vec<String>,
     pub proposal: Vec<String>,
     pub contact: Vec<String>,
 }
 
 impl ResolvedConfig {
     /// Check if an entity kind is available in this config.
-    /// In embedded mode, only task/meeting/research/sprint/proposal are available.
+    /// In embedded mode, only task/milestone/meeting/research/sprint/proposal are available.
     /// In standalone mode, if `paths` is configured, only explicitly listed entity types
-    /// are shown (plus their singular/plural variants). If no paths are configured,
-    /// all entity types are available (backwards compatible).
+    /// are shown (plus their singular/plural variants); milestones also come with
+    /// `tasks`, so configs from before milestones need no migration. If no paths
+    /// are configured, all entity types are available (backwards compatible).
     pub fn entity_available(&self, kind: &crate::entity::EntityKind) -> bool {
         use crate::entity::EntityKind;
         // Embedded mode filter
@@ -123,6 +127,7 @@ impl ResolvedConfig {
                     | EntityKind::Meeting
                     | EntityKind::Research
                     | EntityKind::Sprint
+                    | EntityKind::Milestone
                     | EntityKind::Proposal
             );
         }
@@ -137,6 +142,10 @@ impl ResolvedConfig {
         if self.configured_entities.contains(plural) || self.configured_entities.contains(singular)
         {
             return true;
+        }
+        if *kind == EntityKind::Milestone {
+            return self.configured_entities.contains("tasks")
+                || self.configured_entities.contains("task");
         }
         // Contacts are a sub-entity of customers — they don't have their own path key
         // but are available whenever customers are configured.
@@ -227,6 +236,7 @@ pub fn load_config(root: &Path, mode: RepoMode) -> McResult<ResolvedConfig> {
         research_dir: resolve("research", "research/"),
         tasks_dir: resolve("tasks", "tasks/"),
         sprints_dir: resolve("sprints", "sprints/"),
+        milestones_dir: resolve("milestones", "milestones/"),
         proposals_dir: resolve("proposals", "proposals/"),
         data_dir: resolve("data", "data/"),
         templates_dir: resolve("templates", "templates/"),
@@ -238,6 +248,7 @@ pub fn load_config(root: &Path, mode: RepoMode) -> McResult<ResolvedConfig> {
             research: prefix("research", "RES"),
             task: prefix("task", "TASK"),
             sprint: prefix("sprint", "SPR"),
+            milestone: prefix("milestone", "MS"),
             proposal: prefix("proposal", "PROP"),
             contact: prefix("contact", "CONT"),
         },
@@ -256,6 +267,10 @@ pub fn load_config(root: &Path, mode: RepoMode) -> McResult<ResolvedConfig> {
                     "done",
                     "cancelled",
                 ],
+            ),
+            milestone: status_list(
+                "milestone",
+                &["planned", "active", "completed", "cancelled"],
             ),
             sprint: status_list(
                 "sprint",
@@ -296,6 +311,7 @@ fn validate_status_config(statuses: &StatusConfig) -> McResult<()> {
         ("research", &statuses.research),
         ("task", &statuses.task),
         ("sprint", &statuses.sprint),
+        ("milestone", &statuses.milestone),
         ("proposal", &statuses.proposal),
         ("contact", &statuses.contact),
     ];
@@ -356,6 +372,7 @@ mod tests {
             research: vec!["draft".into()],
             task: vec!["todo".into()],
             sprint: vec!["planning".into()],
+            milestone: vec!["planned".into()],
             proposal: vec!["draft".into()],
             contact: vec!["active".into()],
         }

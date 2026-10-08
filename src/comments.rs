@@ -231,6 +231,23 @@ pub fn check_author(author: &str) -> McResult<String> {
     Ok(author)
 }
 
+/// `author` with the characters Markdown would treat as markup (code,
+/// emphasis, links, HTML, entities, closing `#`s, strikethrough) escaped, so
+/// the heading reads back as the literal name (`Jane <jane@x.org>`).
+fn escape_author(author: &str) -> String {
+    let mut out = String::with_capacity(author.len());
+    for c in author.chars() {
+        if matches!(
+            c,
+            '\\' | '`' | '*' | '_' | '[' | ']' | '<' | '>' | '&' | '#' | '~'
+        ) {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out
+}
+
 /// Demote headings of level 1-3 in a comment to level 4, so a comment can't
 /// end its own comment or the comments section.
 fn demote_headings(text: &str) -> String {
@@ -365,7 +382,7 @@ pub fn append(content: &str, stamp: &str, author: &str, text: &str) -> String {
     let heading = if author.is_empty() {
         format!("### {stamp}")
     } else {
-        format!("### {stamp} · {author}")
+        format!("### {stamp} · {}", escape_author(author))
     };
     block.push_str(&heading);
     block.push_str(nl);
@@ -412,6 +429,15 @@ pub fn add(
         _ => default_author(&cfg.root),
     };
     let stamp = chrono::Local::now().format("%Y-%m-%d %H:%M").to_string();
+    let path = entity
+        .source_path
+        .strip_prefix(&cfg.root)
+        .unwrap_or(&entity.source_path)
+        .display()
+        .to_string();
+    // Read, check and write under the repo's write lock, so a tick or another
+    // comment written at the same time is not lost.
+    let _lock = crate::lock::acquire(cfg)?;
     let content = std::fs::read_to_string(&entity.source_path)?;
     let before = comments(&content[body_start(&content)..]).len();
     let updated = append(&content, &stamp, &author, &text);
@@ -424,21 +450,19 @@ pub fn add(
         .filter(|c| all.len() == before + 1 && c.heading == format!("{stamp} · {author}"))
         .cloned()
         .ok_or_else(|| {
+            // Blame the file only when a plain comment would not fit either.
+            let probe = append(&content, &stamp, "probe", "x");
+            let plain = comments(&probe[body_start(&probe)..]);
+            let file_is_open = plain.len() != before + 1
+                || plain.last().is_none_or(|c| c.heading != format!("{stamp} · probe"));
             McError::usage(
-                format!(
-                    "The comment would not read back as a separate comment in {}.",
-                    entity.source_path.display()
-                ),
-                Some("An earlier comment leaves a code block or HTML block open; close it in the file.".into()),
+                format!("The comment would not read back as a separate comment in {path}."),
+                file_is_open.then(|| {
+                    "An earlier comment leaves a code block or HTML block open; close it in the file.".into()
+                }),
             )
         })?;
     util::atomic_write(&entity.source_path, updated.as_bytes())?;
-    let path = entity
-        .source_path
-        .strip_prefix(&cfg.root)
-        .unwrap_or(&entity.source_path)
-        .display()
-        .to_string();
     Ok(Added {
         id: entity.id.clone(),
         comment,
@@ -605,5 +629,43 @@ mod tests {
         assert_eq!(check_author("  Jane   Doe ").unwrap(), "Jane Doe");
         assert_eq!(check_author("a\nb").unwrap(), "a b");
         assert!(check_author(&"x".repeat(81)).is_err());
+    }
+
+    #[test]
+    fn authors_with_markup_characters_read_back_literally() {
+        let doc = "---\nid: X\n---\nBody\n";
+        for author in [
+            "Jane Doe <jane@example.com>",
+            "a `b`",
+            "**bold**",
+            "x #",
+            "a &amp; b",
+            "~~x~~",
+            "Ann_ [x] \\ y",
+            "O'Brien",
+        ] {
+            let out = append(doc, STAMP, author, "hi");
+            let parsed = comments(&out);
+            assert_eq!(parsed.len(), 1, "{author}");
+            assert_eq!(parsed[0].heading, format!("{STAMP} · {author}"), "{out}");
+            assert_eq!(parsed[0].author.as_deref(), Some(author));
+        }
+    }
+
+    #[test]
+    fn add_accepts_markup_authors_and_reports_relative_paths() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        crate::commands::init::run(tmp.path(), false, false, Some("T"), false, true).unwrap();
+        let cfg =
+            crate::config::load_config(tmp.path(), crate::config::RepoMode::Standalone).unwrap();
+        let created = crate::commands::new::create_task(
+            &cfg,
+            &crate::commands::new::TaskInput::new("Commented"),
+        )
+        .unwrap();
+        let rec = crate::data::find_entity_by_id(&created.id, &cfg).unwrap();
+        let added = add(&cfg, &rec, "hi", Some("Jane <j@x.org>")).unwrap();
+        assert_eq!(added.comment.author.as_deref(), Some("Jane <j@x.org>"));
+        assert!(!added.path.starts_with('/'), "{}", added.path);
     }
 }

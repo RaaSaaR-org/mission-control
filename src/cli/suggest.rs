@@ -7,7 +7,7 @@ use crate::entity::EntityKind;
 use crate::error::{McError, McResult};
 use crate::frontmatter;
 
-const ALL_KINDS: [EntityKind; 8] = [
+const ALL_KINDS: [EntityKind; 9] = [
     EntityKind::Customer,
     EntityKind::Contact,
     EntityKind::Project,
@@ -15,6 +15,7 @@ const ALL_KINDS: [EntityKind; 8] = [
     EntityKind::Research,
     EntityKind::Task,
     EntityKind::Sprint,
+    EntityKind::Milestone,
     EntityKind::Proposal,
 ];
 
@@ -238,6 +239,14 @@ pub fn find_entity(
                 if let Ok(e) = data::find_entity_by_id(raw, cfg) {
                     return Ok(e);
                 }
+            }
+            // The file may be there but unreadable; say so instead of "not found".
+            if let Some((path, message)) = data::unreadable_file_for(&id, cfg) {
+                let shown = path.strip_prefix(&cfg.root).unwrap_or(&path).display();
+                return Err(McError::usage(
+                    format!("{shown} has invalid frontmatter: {message}"),
+                    Some("Fix the YAML between the --- lines; 'mc validate' lists every broken file.".into()),
+                ));
             }
             Err(not_found(&id, kind, cfg))
         }

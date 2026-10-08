@@ -4,7 +4,7 @@
 
 use super::catalog::display_name;
 use super::components::{icon, kbd, priority_label, status_lamp};
-use super::format::{escape_html, parse_date, status_label};
+use super::format::{capitalize, escape_html, parse_date, status_label};
 use super::{is_closed, Page};
 use crate::data::{self, EntityRecord};
 use crate::entity::EntityKind;
@@ -20,6 +20,7 @@ pub(crate) struct EditOptions {
     pub projects: Vec<(String, String)>,
     pub customers: Vec<(String, String)>,
     pub sprints: Vec<(String, String)>,
+    pub milestones: Vec<(String, String)>,
 }
 
 impl EditOptions {
@@ -64,6 +65,7 @@ impl EditOptions {
             owners: owners.into_iter().collect(),
             projects: named(EntityKind::Project),
             customers: named(EntityKind::Customer),
+            milestones: named(EntityKind::Milestone),
             sprints: sprints
                 .iter()
                 .map(|r| (r.id.clone(), display_name(r).to_string()))
@@ -191,6 +193,13 @@ pub(crate) fn new_task_dialog(page: &Page) -> String {
             "",
         ));
     }
+    if page.cfg.entity_available(&EntityKind::Milestone) {
+        grid.push_str(&field(
+            "Milestone",
+            &select("milestone", &opts.milestones, "", Some("No milestone")),
+            "",
+        ));
+    }
     if page.cfg.entity_available(&EntityKind::Sprint) {
         grid.push_str(&field(
             "Sprint",
@@ -226,6 +235,14 @@ pub(crate) fn task_edit_form(page: &Page, task: &EntityRecord) -> String {
     let status = frontmatter::get_str_or(fm, "status", "");
     let priority = data::get_number(fm, "priority").unwrap_or(3).to_string();
     let sprint = frontmatter::strip_wikilink(frontmatter::get_str_or(fm, "sprint", "").trim());
+    let title = field(
+        "Title",
+        &format!(
+            r#"<input type="text" name="title" value="{}" required maxlength="200" autocomplete="off">"#,
+            escape_html(display_name(task))
+        ),
+        " form-field-wide",
+    );
     let mut grid = String::new();
     grid.push_str(&field(
         "Status",
@@ -242,6 +259,18 @@ pub(crate) fn task_edit_form(page: &Page, task: &EntityRecord) -> String {
         &owner_input(frontmatter::get_str_or(fm, "owner", "").trim()),
         "",
     ));
+    if page.cfg.entity_available(&EntityKind::Milestone) {
+        grid.push_str(&field(
+            "Milestone",
+            &select(
+                "milestone",
+                &opts.milestones,
+                frontmatter::get_link_str(fm, "milestone").unwrap_or(""),
+                Some("No milestone"),
+            ),
+            "",
+        ));
+    }
     if page.cfg.entity_available(&EntityKind::Sprint) {
         grid.push_str(&field(
             "Sprint",
@@ -254,9 +283,39 @@ pub(crate) fn task_edit_form(page: &Page, task: &EntityRecord) -> String {
         &due_input(frontmatter::get_str_or(fm, "due_date", "").trim()),
         "",
     ));
+    // One project and customer can be picked here; a task linking several
+    // is edited in its file.
+    for (kind, name, key, options, none) in [
+        (
+            EntityKind::Project,
+            "project",
+            "projects",
+            &opts.projects,
+            "No project",
+        ),
+        (
+            EntityKind::Customer,
+            "customer",
+            "customers",
+            &opts.customers,
+            "No customer",
+        ),
+    ] {
+        let current = frontmatter::get_link_list(fm, key);
+        if !page.cfg.entity_available(&kind) || current.len() > 1 {
+            continue;
+        }
+        let selected = current.first().map_or("", |s| s.trim());
+        grid.push_str(&field(
+            &capitalize(name),
+            &select(name, options, selected, Some(none)),
+            "",
+        ));
+    }
     format!(
         r#"<form class="edit-panel" id="task-edit" data-edit-task="{id}" aria-labelledby="task-edit-title" hidden>
   <h2 class="section-title" id="task-edit-title">Edit task</h2>
+  {title}
   <div class="form-grid form-grid-edit">{grid}</div>
   <p class="form-error" role="alert" hidden></p>
   <div class="form-actions"><button type="button" class="btn btn-ghost" data-cancel>Cancel</button><button type="submit" class="btn btn-primary">Save changes {kbd}</button></div>

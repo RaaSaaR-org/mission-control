@@ -3,7 +3,8 @@
 //! Pages are server-rendered HTML. The JSON endpoints under `/api/` back the
 //! interactive features (command palette, live refresh, task edits,
 //! checklists, comments); see
-//! `serve/api.rs`. Writes are guarded by `serve/guard.rs`.
+//! `serve/api.rs`. Every request passes `serve/guard.rs` (Host check,
+//! security headers, write protection).
 
 mod api;
 mod guard;
@@ -23,6 +24,9 @@ use std::sync::Arc;
 
 /// Largest JSON body the write endpoints accept.
 const MAX_BODY_BYTES: usize = 32 * 1024;
+/// Largest comment body: [`html::MAX_COMMENT`] characters of up to four
+/// UTF-8 bytes each, plus JSON escaping and the author.
+const MAX_COMMENT_BODY_BYTES: usize = 128 * 1024;
 
 /// How the dashboard is served.
 #[derive(Debug, Clone, Default)]
@@ -52,6 +56,9 @@ struct AppState {
     editable: bool,
     /// Serialises writes so ID allocation and file moves don't race.
     write_lock: tokio::sync::Mutex<()>,
+    /// The catalog for hover previews and the palette, with the repo version
+    /// it was loaded at.
+    catalog_cache: std::sync::Mutex<Option<(String, Arc<Catalog>)>>,
 }
 
 impl AppState {
@@ -61,18 +68,31 @@ impl AppState {
 
     /// Render a page with a freshly loaded catalog and apply the base path.
     fn render(&self, f: impl FnOnce(&Page) -> String) -> Html<String> {
-        let catalog = Catalog::load(&self.cfg);
+        self.render_with(&Catalog::load(&self.cfg), f)
+    }
+
+    /// Render a page with an already loaded catalog and apply the base path.
+    fn render_with(&self, catalog: &Catalog, f: impl FnOnce(&Page) -> String) -> Html<String> {
         Html(html::prefix_base_path(
-            &f(&self.page(&catalog)),
+            &f(&self.page(catalog)),
             &self.base_path,
         ))
     }
 
-    fn error(&self, message: &str) -> (StatusCode, Html<String>) {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            self.render(|page| html::error_page(page, message)),
-        )
+    /// The catalog, reloaded only when a Markdown file changed since the last
+    /// call (checked with a cheap metadata walk). For frequent reads such as
+    /// hover previews; pages load their own.
+    fn cached_catalog(&self) -> Arc<Catalog> {
+        let version = api::content_version(&self.cfg);
+        let lock = || self.catalog_cache.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((v, catalog)) = lock().as_ref() {
+            if *v == version {
+                return catalog.clone();
+            }
+        }
+        let catalog = Arc::new(Catalog::load(&self.cfg));
+        *lock() = Some((version, catalog.clone()));
+        catalog
     }
 }
 
@@ -144,6 +164,7 @@ pub fn router(cfg: &ResolvedConfig, opts: &ServeOptions) -> Router {
         base_path: base_path.clone(),
         editable: opts.editable(),
         write_lock: tokio::sync::Mutex::new(()),
+        catalog_cache: std::sync::Mutex::new(None),
     });
 
     let api = Router::new()
@@ -154,7 +175,10 @@ pub fn router(cfg: &ResolvedConfig, opts: &ServeOptions) -> Router {
         .route("/tasks/{id}", get(api::get_task).patch(api::update_task))
         .route("/tasks/{id}/move", post(api::move_task))
         .route("/entities/{id}/checks", post(api::check_item))
-        .route("/entities/{id}/comments", post(api::add_comment))
+        .route(
+            "/entities/{id}/comments",
+            post(api::add_comment).layer(DefaultBodyLimit::max(MAX_COMMENT_BODY_BYTES)),
+        )
         .fallback(api::not_found)
         .method_not_allowed_fallback(api::method_not_allowed)
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES));
@@ -169,6 +193,7 @@ pub fn router(cfg: &ResolvedConfig, opts: &ServeOptions) -> Router {
         .route("/meetings/calendar", get(handle_calendar))
         .route("/research", list(EntityKind::Research))
         .route("/sprints", list(EntityKind::Sprint))
+        .route("/milestones", get(handle_milestones))
         .route("/proposals", list(EntityKind::Proposal))
         .route("/contacts", list(EntityKind::Contact))
         .route("/tasks", get(handle_tasks_board))
@@ -178,6 +203,8 @@ pub fn router(cfg: &ResolvedConfig, opts: &ServeOptions) -> Router {
         .route("/search", get(handle_search))
         .route("/index.json", get(handle_index_json))
         .route("/assets/archivo.woff2", get(handle_font))
+        .route("/assets/app.css", get(handle_app_css))
+        .route("/assets/app.js", get(handle_app_js))
         .route("/brand/logo", get(handle_brand_logo))
         .route("/brand/fonts/{filename}", get(handle_brand_fonts))
         .route("/brand/asset/{*path}", get(handle_brand_asset))
@@ -185,7 +212,7 @@ pub fn router(cfg: &ResolvedConfig, opts: &ServeOptions) -> Router {
         .fallback(handle_404)
         .layer(middleware::from_fn_with_state(
             state.clone(),
-            guard::protect_writes,
+            guard::protect,
         ))
         .with_state(state);
 
@@ -214,6 +241,16 @@ async fn handle_dashboard(State(state): State<Arc<AppState>>) -> Html<String> {
     state.render(|page| html::dashboard_page(page, &recent))
 }
 
+/// The 404 page for a kind the repo doesn't enable, saying how to enable it.
+fn not_available(state: &AppState, kind: EntityKind, path: &str) -> (StatusCode, Html<String>) {
+    let err = McError::not_available(kind, &state.cfg);
+    let hint = err.hint().unwrap_or_default();
+    (
+        StatusCode::NOT_FOUND,
+        state.render(|page| html::not_available_page(page, path, &err.to_string(), &hint)),
+    )
+}
+
 async fn handle_list(
     kind: EntityKind,
     State(state): State<Arc<AppState>>,
@@ -221,10 +258,10 @@ async fn handle_list(
 ) -> Result<Html<String>, (StatusCode, Html<String>)> {
     let cfg = &state.cfg;
     if !cfg.entity_available(&kind) {
-        let path = format!("/{}", kind.label_plural());
-        return Err((
-            StatusCode::NOT_FOUND,
-            state.render(|page| html::not_found_page(page, &path)),
+        return Err(not_available(
+            &state,
+            kind,
+            &format!("/{}", kind.label_plural()),
         ));
     }
 
@@ -237,10 +274,18 @@ async fn handle_list(
         (None, _) => (None, "asc"),
     };
 
-    let mut entities = data::collect_filtered(kind, cfg, status, tag).map_err(|e| {
-        eprintln!("serve: error loading {}: {}", kind.label_plural(), e);
-        state.error(&e.to_string())
-    })?;
+    // One catalog per request: the list is filtered from it in memory.
+    let catalog = Catalog::load(cfg);
+    let filter = TaskFilter {
+        status,
+        tag,
+        ..TaskFilter::all()
+    };
+    let mut entities: Vec<data::EntityRecord> = catalog
+        .of_kind(kind)
+        .filter(|e| filter.matches(&e.frontmatter))
+        .cloned()
+        .collect();
     if let Some(field) = sort {
         html::sort_entities(&mut entities, field, dir);
     }
@@ -251,7 +296,9 @@ async fn handle_list(
         sort,
         dir,
     };
-    Ok(state.render(|page| html::list_page(page, kind, &entities, &query)))
+    Ok(state.render_with(&catalog, |page| {
+        html::list_page(page, kind, &entities, &query)
+    }))
 }
 
 /// The meeting calendar for `?month=YYYY-MM` (this month by default);
@@ -261,10 +308,7 @@ async fn handle_calendar(
     Query(params): Params,
 ) -> (StatusCode, Html<String>) {
     if !state.cfg.entity_available(&EntityKind::Meeting) {
-        return (
-            StatusCode::NOT_FOUND,
-            state.render(|page| html::not_found_page(page, "/meetings/calendar")),
-        );
+        return not_available(&state, EntityKind::Meeting, "/meetings/calendar");
     }
     let query = html::CalendarQuery {
         month: param(&params, "month"),
@@ -284,53 +328,54 @@ fn task_query(params: &HashMap<String, String>) -> TaskQuery<'_> {
         project: param(params, "project"),
         customer: param(params, "customer"),
         sprint: param(params, "sprint"),
+        milestone: param(params, "milestone"),
         sort: param(params, "sort"),
         dir: param(params, "dir").unwrap_or("asc"),
     }
 }
 
+/// The tasks matching `q`, and the filter options, from one catalog.
 fn load_tasks(
-    state: &AppState,
+    catalog: &Catalog,
     q: &TaskQuery,
-) -> Result<(Vec<data::EntityRecord>, html::TaskFilterOptions), (StatusCode, Html<String>)> {
-    let cfg = &state.cfg;
-    let tasks = data::collect_tasks_filtered(
-        cfg,
-        &TaskFilter {
-            status: q.status,
-            tag: None,
-            project: q.project,
-            customer: q.customer,
-            priority: q.priority,
-            sprint: q.sprint,
-            owner: q.owner,
-        },
-    )
-    .map_err(|e| {
-        eprintln!("serve: error loading tasks: {}", e);
-        state.error(&e.to_string())
-    })?;
+) -> (Vec<data::EntityRecord>, html::TaskFilterOptions) {
+    let filter = TaskFilter {
+        status: q.status,
+        tag: None,
+        project: q.project,
+        customer: q.customer,
+        priority: q.priority,
+        sprint: q.sprint,
+        owner: q.owner,
+
+        milestone: q.milestone,
+    };
+    let tasks = catalog
+        .of_kind(EntityKind::Task)
+        .filter(|t| filter.matches(&t.frontmatter))
+        .cloned()
+        .collect();
     // Dropdown options come from all tasks so filters can be switched freely.
-    let all = data::collect_tasks(cfg).unwrap_or_default();
-    Ok((tasks, html::TaskFilterOptions::from_tasks(&all)))
+    let options = html::TaskFilterOptions::from_records(catalog.of_kind(EntityKind::Task));
+    (tasks, options)
 }
 
-async fn handle_tasks(
-    State(state): State<Arc<AppState>>,
-    Query(params): Params,
-) -> Result<Html<String>, (StatusCode, Html<String>)> {
+async fn handle_tasks(State(state): State<Arc<AppState>>, Query(params): Params) -> Html<String> {
     let query = task_query(&params);
-    let (mut tasks, options) = load_tasks(&state, &query)?;
+    let catalog = Catalog::load(&state.cfg);
+    let (mut tasks, options) = load_tasks(&catalog, &query);
     if let Some(field) = query.sort {
         html::sort_entities(&mut tasks, field, query.dir);
     }
-    Ok(state.render(|page| html::tasks_list_page(page, &tasks, &query, &options)))
+    state.render_with(&catalog, |page| {
+        html::tasks_list_page(page, &tasks, &query, &options)
+    })
 }
 
 async fn handle_tasks_board(
     State(state): State<Arc<AppState>>,
     Query(params): Params,
-) -> Result<Html<String>, (StatusCode, Html<String>)> {
+) -> Html<String> {
     // The board groups by status and orders lanes itself, so status,
     // priority and sort parameters don't apply.
     let query = TaskQuery {
@@ -339,14 +384,17 @@ async fn handle_tasks_board(
         sort: None,
         ..task_query(&params)
     };
-    let (tasks, options) = load_tasks(&state, &query)?;
-    Ok(state.render(|page| html::board_page(page, &tasks, &query, &options)))
+    let catalog = Catalog::load(&state.cfg);
+    let (tasks, options) = load_tasks(&catalog, &query);
+    state.render_with(&catalog, |page| {
+        html::board_page(page, &tasks, &query, &options)
+    })
 }
 
 async fn handle_detail(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
-) -> (StatusCode, Html<String>) {
+) -> axum::response::Response {
     let catalog = Catalog::load(&state.cfg);
     let page = state.page(&catalog);
     let html = match catalog.records.iter().find(|r| r.id == id) {
@@ -354,18 +402,26 @@ async fn handle_detail(
         None => match data::find_entity_by_id(&id, &state.cfg) {
             Ok(entity) => html::detail_page(&page, &entity),
             Err(_) => {
+                // IDs typed the way the CLI takes them (`task-37`) go to
+                // the entity they mean.
+                let loose = crate::cli::suggest::normalize_id(&id, &state.cfg, None)
+                    .ok()
+                    .map(|(canonical, _)| canonical)
+                    .filter(|canonical| *canonical != id && catalog.name(canonical).is_some());
+                if let Some(canonical) = loose {
+                    let href = format!("{}/entity/{}", state.base_path, canonical);
+                    return axum::response::Redirect::permanent(&href).into_response();
+                }
                 let page_html = html::not_found_page(&page, &format!("/entity/{id}"));
                 return (
                     StatusCode::NOT_FOUND,
                     Html(html::prefix_base_path(&page_html, &state.base_path)),
-                );
+                )
+                    .into_response();
             }
         },
     };
-    (
-        StatusCode::OK,
-        Html(html::prefix_base_path(&html, &state.base_path)),
-    )
+    Html(html::prefix_base_path(&html, &state.base_path)).into_response()
 }
 
 /// Repo files linked from notes: Markdown is rendered as a page, images and
@@ -384,16 +440,23 @@ async fn handle_file(
             .into_response()
     };
     let rel = std::path::Path::new(&path);
-    let visible = rel.components().enumerate().all(|(i, c)| match c {
-        std::path::Component::Normal(s) => {
-            let s = s.to_string_lossy();
-            !s.starts_with('.') || (i == 0 && s == ".mc" && cfg.mode == RepoMode::Embedded)
-        }
-        _ => false,
-    });
+    let visible = |rel: &std::path::Path| {
+        rel.components().enumerate().all(|(i, c)| match c {
+            std::path::Component::Normal(s) => {
+                let s = s.to_string_lossy();
+                !s.starts_with('.') || (i == 0 && s == ".mc" && cfg.mode == RepoMode::Embedded)
+            }
+            _ => false,
+        })
+    };
     let file = cfg.root.join(rel);
     let inside = cfg.root.canonicalize().ok().zip(file.canonicalize().ok());
-    if !visible || !inside.is_some_and(|(root, f)| f.starts_with(root) && f.is_file()) {
+    // The resolved path must be visible too: a symlink must not lead into
+    // .git/ or another hidden folder.
+    let resolved_ok = |(root, f): (std::path::PathBuf, std::path::PathBuf)| {
+        f.is_file() && f.strip_prefix(&root).is_ok_and(visible)
+    };
+    if !visible(rel) || !inside.is_some_and(resolved_ok) {
         return not_found();
     }
     let ext = file
@@ -447,7 +510,7 @@ async fn handle_search(State(state): State<Arc<AppState>>, Query(params): Params
 
 /// Every entity's ID, title, kind, status and date, for client-side jump-to.
 async fn handle_index_json(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let catalog = Catalog::load(&state.cfg);
+    let catalog = state.cached_catalog();
     (
         [
             (header::CONTENT_TYPE, "application/json"),
@@ -464,6 +527,28 @@ async fn handle_font() -> impl IntoResponse {
             (header::CACHE_CONTROL, "public, max-age=31536000, immutable"),
         ],
         html::ARCHIVO_WOFF2,
+    )
+}
+
+/// The bundled stylesheet and script. Pages link them with a content hash
+/// (`?v=…`), so they can be cached for good.
+async fn handle_app_css() -> impl IntoResponse {
+    (
+        [
+            (header::CONTENT_TYPE, "text/css; charset=utf-8"),
+            (header::CACHE_CONTROL, "public, max-age=31536000, immutable"),
+        ],
+        html::APP_CSS,
+    )
+}
+
+async fn handle_app_js() -> impl IntoResponse {
+    (
+        [
+            (header::CONTENT_TYPE, "text/javascript; charset=utf-8"),
+            (header::CACHE_CONTROL, "public, max-age=31536000, immutable"),
+        ],
+        html::APP_JS,
     )
 }
 
@@ -580,4 +665,14 @@ fn content_type_for(ext: &str) -> Option<&'static str> {
         "css" => "text/css",
         _ => return None,
     })
+}
+
+async fn handle_milestones(
+    State(state): State<Arc<AppState>>,
+    Query(params): Params,
+) -> Result<Html<String>, (StatusCode, Html<String>)> {
+    if !state.cfg.entity_available(&EntityKind::Milestone) {
+        return Err(not_available(&state, EntityKind::Milestone, "/milestones"));
+    }
+    Ok(state.render(|page| html::milestones_page(page, param(&params, "project"))))
 }

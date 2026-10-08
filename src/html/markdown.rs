@@ -1,7 +1,7 @@
 //! Markdown rendering with wikilinks, entity auto-links and sanitised raw HTML.
 
-use super::catalog::Catalog;
-use super::format::{entity_href, escape_html, url_encode};
+use super::catalog::{Catalog, Resolved};
+use super::format::{entity_href, escape_html, files_href};
 use crate::checklist::{markdown_options, CheckItem};
 use pulldown_cmark::{CowStr, Event, Parser, Tag, TagEnd};
 use regex::Regex;
@@ -56,15 +56,30 @@ pub(crate) fn render_markdown_checks(
     let md = WIKILINK_RE.replace_all(&md, |caps: &regex::Captures| {
         let target = caps[1].trim();
         let alias = caps.get(2).map(|m| m.as_str().trim());
-        match catalog
-            .canonical_id(target)
-            .filter(|id| catalog.name(id).is_some())
-        {
-            Some(id) => {
-                let text = alias.or_else(|| catalog.name(id)).unwrap_or(id);
-                format!("[{}]({})", text.replace(['[', ']'], ""), entity_href(id))
-            }
-            None => alias.unwrap_or(target).to_string(),
+        let resolved = catalog.resolve(target, alias);
+        let text = |id: &str| {
+            alias
+                .or_else(|| catalog.name(id))
+                .unwrap_or(id)
+                .replace(['[', ']'], "")
+        };
+        // Stale links get a marker (see `mark_stale_links`); the note rides
+        // along as the link title.
+        let note = || catalog.stale_note(&resolved).replace(['"', '\\'], "'");
+        match resolved {
+            Resolved::Entity(id) => format!("[{}]({})", text(id), entity_href(id)),
+            Resolved::Moved { id, .. } => format!(
+                "[{}]({}{STALE_FRAGMENT} \"{}\")",
+                text(id),
+                entity_href(id),
+                note()
+            ),
+            Resolved::Stale { .. } => format!(
+                "[{}]({STALE_FRAGMENT} \"{}\")",
+                alias.unwrap_or(target).replace(['[', ']'], ""),
+                note()
+            ),
+            Resolved::Unknown => alias.unwrap_or(target).to_string(),
         }
     });
 
@@ -161,7 +176,39 @@ pub(crate) fn render_markdown_checks(
 
     let mut html_output = String::new();
     pulldown_cmark::html::push_html(&mut html_output, out.into_iter());
-    auto_link_entity_ids(&html_output, catalog)
+    mark_stale_links(&auto_link_entity_ids(&html_output, catalog))
+}
+
+/// Marks a wikilink as stale on its way through the Markdown renderer.
+const STALE_FRAGMENT: &str = "#mc-stale";
+
+/// Give stale wikilinks their warning marker: a link to the entity the
+/// reference names, or plain text when nothing matches.
+fn mark_stale_links(html: &str) -> String {
+    static STALE_RE: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r##"(?s)<a href="([^"]*)#mc-stale" title="([^"]*)">(.*?)</a>"##)
+            .expect("static regex")
+    });
+    if !html.contains(STALE_FRAGMENT) {
+        return html.to_string();
+    }
+    STALE_RE
+        .replace_all(html, |caps: &regex::Captures| {
+            // The title is already escaped by the renderer.
+            let marker = format!(
+                r#"<span class="ref-warn" role="img" aria-label="{0}" title="{0}"></span>"#,
+                &caps[2]
+            );
+            if caps[1].is_empty() {
+                format!(
+                    r#"<span class="ref-plain ref-stale">{}</span>{marker}"#,
+                    &caps[3]
+                )
+            } else {
+                format!(r#"<a href="{}">{}</a>{marker}"#, &caps[1], &caps[3])
+            }
+        })
+        .into_owned()
 }
 
 /// Replace URLs with a scripting scheme (`javascript:`, `data:`, ...) by `#`.
@@ -213,16 +260,10 @@ fn resolve_relative<'a>(url: CowStr<'a>, doc: &DocContext, catalog: &Catalog) ->
     };
     let href = match catalog.id_for_path(&target) {
         Some(id) => entity_href(id),
-        None => {
-            let segments: Vec<String> = rel
-                .components()
-                .map(|c| url_encode(&c.as_os_str().to_string_lossy()))
-                .collect();
-            if segments.is_empty() {
-                return url;
-            }
-            format!("/files/{}", segments.join("/"))
-        }
+        None => match files_href(rel) {
+            Some(href) => href,
+            None => return url,
+        },
     };
     CowStr::from(format!("{href}{fragment}"))
 }
@@ -377,6 +418,38 @@ mod tests {
             &cfg,
         );
         render_markdown(md, &cat)
+    }
+
+    #[test]
+    fn stale_wikilinks_point_at_the_named_entity_with_a_marker() {
+        let (_d, cfg) = test_config();
+        let contact = |id: &str, slug: &str, name: &str| {
+            let mut r = rec(EntityKind::Contact, id, &format!("name: {name}"));
+            r.source_path = std::path::PathBuf::from(format!("/x/{id}-{slug}.md"));
+            r
+        };
+        let cat = catalog(
+            vec![
+                contact("CONT-001", "daniel-lang", "Daniel Lang"),
+                contact("CONT-008", "christian-becker", "Christian \"CB\" Becker"),
+            ],
+            &cfg,
+        );
+        let html = render_markdown(
+            "With [[CONT-001-christian-becker|Christian]], [[CONT-001-ghost|Ghost]] and [[CONT-001|Daniel]].",
+            &cat,
+        );
+        assert!(
+            html.contains(
+                r#"<a href="/entity/CONT-008">Christian</a><span class="ref-warn" role="img""#
+            ),
+            "{html}"
+        );
+        assert!(html.contains("CONT-001 is now Daniel Lang"));
+        assert!(html
+            .contains(r#"<span class="ref-plain ref-stale">Ghost</span><span class="ref-warn""#));
+        assert!(html.contains(r#"<a href="/entity/CONT-001">Daniel</a>."#));
+        assert!(!html.contains("mc-stale"));
     }
 
     #[test]

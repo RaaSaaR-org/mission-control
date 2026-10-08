@@ -7,6 +7,7 @@
 //! them.
 
 use crate::checklist;
+use crate::cli::suggest;
 use crate::commands;
 use crate::commands::new as new_cmd;
 use crate::comments;
@@ -27,6 +28,7 @@ use rmcp::service::RequestContext;
 use rmcp::{tool, tool_handler, tool_router, ErrorData as McpError, RoleServer, ServerHandler};
 use serde::Deserialize;
 use serde_json::Value as JsonValue;
+use std::path::Path;
 
 /// Fields that may contain wiki-link brackets and should be stripped for JSON output.
 const WIKILINK_FIELDS: &[&str] = &[
@@ -34,6 +36,7 @@ const WIKILINK_FIELDS: &[&str] = &[
     "projects",
     "depends_on",
     "sprint",
+    "milestone",
     "supersedes",
     "superseded_by",
     "customer",
@@ -62,20 +65,148 @@ fn strip_wikilinks_in_json(val: &mut JsonValue) {
     }
 }
 
-/// Helper: convert an EntityRecord's frontmatter to JSON, adding _source.
-fn entity_to_json(rec: &data::EntityRecord, cfg: &ResolvedConfig) -> JsonValue {
+// ---------------------------------------------------------------------------
+// Shared with the REST API (`api/handlers`), so both surfaces return the
+// same entity shapes and resolve IDs and statuses the same way.
+
+/// `path` relative to the repo root, as all JSON output shows paths; absolute
+/// only when it lies outside the repo.
+pub(crate) fn repo_relative(cfg: &ResolvedConfig, path: &Path) -> String {
+    if let Ok(rel) = path.strip_prefix(&cfg.root) {
+        return rel.display().to_string();
+    }
+    // Paths that went through canonicalize (e.g. /private/tmp on macOS).
+    if let Some(rel) = cfg
+        .root
+        .canonicalize()
+        .ok()
+        .and_then(|root| path.strip_prefix(root).ok().map(Path::to_path_buf))
+    {
+        return rel.display().to_string();
+    }
+    path.display().to_string()
+}
+
+/// Make the string field `key` of a JSON object repo-relative.
+pub(crate) fn relativize_field(cfg: &ResolvedConfig, val: &mut JsonValue, key: &str) {
+    if let Some(JsonValue::String(p)) = val.get_mut(key) {
+        *p = repo_relative(cfg, Path::new(p.as_str()));
+    }
+}
+
+/// An entity as JSON: its frontmatter with wiki-link brackets stripped, plus
+/// `_kind` and `_source` (the repo-relative file path).
+pub(crate) fn entity_json(rec: &data::EntityRecord, cfg: &ResolvedConfig) -> JsonValue {
     let mut val = data::yaml_to_json(&rec.frontmatter);
     strip_wikilinks_in_json(&mut val);
     if let Some(obj) = val.as_object_mut() {
-        let rel = rec
-            .source_path
-            .strip_prefix(&cfg.root)
-            .unwrap_or(&rec.source_path)
-            .to_string_lossy()
-            .to_string();
-        obj.insert("_source".into(), JsonValue::String(rel));
+        obj.insert("_kind".into(), JsonValue::String(rec.kind.label().into()));
+        obj.insert(
+            "_source".into(),
+            JsonValue::String(repo_relative(cfg, &rec.source_path)),
+        );
     }
     val
+}
+
+/// Find an entity from loose input (`task-7`, `TASK-0007` → `TASK-007`), as
+/// the CLI does. With `kind`, a bare number is read as that kind and an ID
+/// of another kind is not found. Malformed input is a usage error with a
+/// suggestion; a well-formed but unknown ID is `EntityNotFound`.
+pub(crate) fn resolve_entity(
+    cfg: &ResolvedConfig,
+    input: &str,
+    kind: Option<EntityKind>,
+) -> Result<data::EntityRecord, McError> {
+    let raw = input.trim();
+    let (id, id_kind) = suggest::normalize_id(raw, cfg, kind)?;
+    if let Some(k) = kind.filter(|k| *k != id_kind) {
+        return Err(McError::EntityNotFound(format!(
+            "{id} (not a {})",
+            k.label()
+        )));
+    }
+    if !cfg.entity_available(&id_kind) {
+        return Err(McError::not_available(id_kind, cfg));
+    }
+    match data::find_entity_by_id(&id, cfg) {
+        // Hand-written IDs may use other padding (TASK-0001); try verbatim.
+        Err(McError::EntityNotFound(_)) if raw != id => {
+            data::find_entity_by_id(raw, cfg).map_err(|_| McError::EntityNotFound(id))
+        }
+        other => other,
+    }
+}
+
+/// The existing entity whose ID is closest to the unknown `id`, as
+/// `"TASK-001 (Title)"`.
+pub(crate) fn closest_id(cfg: &ResolvedConfig, id: &str) -> Option<String> {
+    let kind = EntityKind::from_id(id, cfg).ok()?;
+    let existing = data::collect_entities(kind, cfg).ok()?;
+    existing
+        .iter()
+        .map(|e| (suggest::levenshtein(id, &e.id), e))
+        .filter(|(d, _)| *d <= 2)
+        .min_by_key(|(d, e)| (*d, e.id.clone()))
+        .map(|(_, e)| {
+            let name = frontmatter::get_str(&e.frontmatter, "title")
+                .or_else(|| frontmatter::get_str(&e.frontmatter, "name"))
+                .unwrap_or("");
+            format!("{} ({name})", e.id)
+        })
+}
+
+/// Canonical form of a loose ID reference (`proj-1` → `PROJ-001`), or the
+/// input unchanged when it doesn't parse as one of `kind`.
+pub(crate) fn loose_ref(cfg: &ResolvedConfig, input: &str, kind: EntityKind) -> String {
+    match suggest::normalize_id(input, cfg, Some(kind)) {
+        Ok((id, k)) if k == kind => id,
+        _ => input.to_string(),
+    }
+}
+
+/// A status filter in the configured spelling (`In_Progress`, `wip` →
+/// `in-progress`); unknown values pass through and simply match nothing.
+pub(crate) fn status_filter(cfg: &ResolvedConfig, kind: EntityKind, input: &str) -> String {
+    suggest::match_status(input, kind.statuses(cfg))
+        .unwrap_or(input)
+        .to_string()
+}
+
+/// The actionable task queue as `{tasks, actionable, blocked}`, like `mc
+/// task next`: at most `limit` tasks (default 5). Project and customer may
+/// be loose IDs. Shared by the MCP `next_tasks` tool and `GET /v1/tasks/next`.
+pub(crate) fn next_tasks_json(
+    cfg: &ResolvedConfig,
+    project: Option<&str>,
+    customer: Option<&str>,
+    owner: Option<&str>,
+    limit: Option<usize>,
+) -> Result<JsonValue, McError> {
+    let project = project.map(|v| loose_ref(cfg, v, EntityKind::Project));
+    let customer = customer.map(|v| loose_ref(cfg, v, EntityKind::Customer));
+    let filter = data::TaskFilter {
+        status: None,
+        tag: None,
+        project: project.as_deref(),
+        customer: customer.as_deref(),
+        priority: None,
+        sprint: None,
+        owner,
+
+        milestone: None,
+    };
+    let (queue, blocked) = commands::task::actionable(cfg, &filter)?;
+    let tasks: Vec<JsonValue> = queue
+        .iter()
+        .take(limit.unwrap_or(5).max(1))
+        .map(|t| entity_json(t, cfg))
+        .collect();
+    Ok(serde_json::json!({
+        "tasks": tasks,
+        "actionable": queue.len(),
+        "blocked": blocked,
+    }))
 }
 
 /// Helper: convert any error into an internal rmcp error.
@@ -118,7 +249,14 @@ fn tool_err(e: McError) -> McpError {
         }
         _ => Class::Internal,
     };
-    let message = match e.hint() {
+    // The generic hint names a CLI command; agents should use the tools.
+    let hint = match &e {
+        McError::EntityNotFound(_) => {
+            Some("use list_entities or list_tasks to see valid IDs".to_string())
+        }
+        _ => e.hint(),
+    };
+    let message = match hint {
         Some(hint) => format!("{e} ({hint})"),
         None => e.to_string(),
     };
@@ -166,7 +304,7 @@ fn require_available(kind: EntityKind, cfg: &ResolvedConfig) -> Result<(), McpEr
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct ListEntitiesParams {
     #[schemars(
-        description = "Entity kind: customers, contacts, projects, meetings, research, tasks, sprints, or proposals (singular forms also accepted). Kinds not enabled in this repo are rejected; read mc://config for the list."
+        description = "Entity kind: customers, contacts, projects, meetings, research, tasks, milestones, sprints, or proposals (singular forms also accepted). Kinds not enabled in this repo are rejected; read mc://config for the list."
     )]
     pub kind: String,
     #[schemars(
@@ -180,7 +318,7 @@ pub struct ListEntitiesParams {
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct GetEntityParams {
     #[schemars(
-        description = "Entity ID with the repo's prefix, e.g. CUST-001, CONT-001, PROJ-001, MTG-001, RES-001, TASK-001, SPR-001, PROP-001 (prefixes are in mc://config)"
+        description = "Entity ID with the repo's prefix, e.g. CUST-001, CONT-001, PROJ-001, MTG-001, RES-001, TASK-001, SPR-001, PROP-001 (prefixes are in mc://config). Case and zero-padding are forgiven: task-7 means TASK-007."
     )]
     pub id: String,
 }
@@ -283,10 +421,34 @@ pub struct CreateTaskParams {
     pub tags: Option<String>,
     #[schemars(description = "Sprint ID to assign, e.g. SPR-001")]
     pub sprint: Option<String>,
+    #[schemars(
+        description = "Milestone ID or unique title to assign, e.g. MS-001 (must exist; stored as the ID)"
+    )]
+    pub milestone: Option<String>,
     #[schemars(description = "Comma-separated task IDs this depends on (e.g. TASK-001,TASK-002)")]
     pub depends_on: Option<String>,
     #[schemars(description = "Due date YYYY-MM-DD (validated)")]
     pub due_date: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct CreateMilestoneParams {
+    #[schemars(description = "Milestone title, e.g. 'AP3: Integration' (required, non-empty)")]
+    pub title: String,
+    #[schemars(description = "What the milestone delivers (stored in the frontmatter)")]
+    pub description: Option<String>,
+    #[schemars(description = "Planned start date YYYY-MM-DD (validated)")]
+    pub start_date: Option<String>,
+    #[schemars(description = "Deadline YYYY-MM-DD (validated; must not be before start_date)")]
+    pub due_date: Option<String>,
+    #[schemars(description = "Owner (username or name)")]
+    pub owner: Option<String>,
+    #[schemars(
+        description = "Initial status; valid values in mc://config statuses.milestone (default: the first, planned)"
+    )]
+    pub status: Option<String>,
+    #[schemars(description = "Comma-separated project IDs to link (must exist), e.g. PROJ-001")]
+    pub projects: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -358,11 +520,67 @@ pub struct MoveTaskParams {
     #[schemars(description = "Task ID, e.g. TASK-001")]
     pub id: String,
     #[schemars(
-        description = "Target status (valid values in mc://config statuses.task, e.g. backlog, todo, in-progress, review, done, cancelled). Moving to done/cancelled moves the file to done/."
+        description = "Target status (valid values in mc://config statuses.task, e.g. backlog, todo, in-progress, review, done, cancelled). Case-insensitive; aliases like doing/wip (in-progress) and completed (done) are accepted. Moving to done/cancelled moves the file to done/."
     )]
     pub status: String,
     #[schemars(description = "Sprint ID to assign, e.g. SPR-001")]
     pub sprint: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct UpdateTaskParams {
+    #[schemars(description = "Task ID, e.g. TASK-001 (task-1 works too)")]
+    pub id: String,
+    #[schemars(
+        description = "New title (single line; also replaces the note's leading '# Title' heading)"
+    )]
+    pub title: Option<String>,
+    #[schemars(
+        description = "New status (valid values in mc://config statuses.task; case-insensitive, aliases like doing/wip accepted). Same as move_task: done/cancelled move the file to done/."
+    )]
+    pub status: Option<String>,
+    #[schemars(description = "Priority 1-4 (1=critical, 2=high, 3=medium, 4=low)")]
+    pub priority: Option<u32>,
+    #[schemars(description = "Owner (username or name); empty string clears it")]
+    pub owner: Option<String>,
+    #[schemars(
+        description = "Sprint ID or title, e.g. SPR-001 (must exist; stored as the ID); empty string clears it"
+    )]
+    pub sprint: Option<String>,
+    #[schemars(
+        description = "Milestone ID or unique title, e.g. MS-001 (must exist; stored as the ID); empty string clears it"
+    )]
+    pub milestone: Option<String>,
+    #[schemars(description = "Due date YYYY-MM-DD (validated); empty string clears it")]
+    pub due_date: Option<String>,
+    #[schemars(
+        description = "Comma-separated project IDs that replace the linked projects (must exist); empty string clears them. The task file stays where it is."
+    )]
+    pub projects: Option<String>,
+    #[schemars(
+        description = "Comma-separated customer IDs that replace the linked customers (must exist); empty string clears them"
+    )]
+    pub customers: Option<String>,
+    #[schemars(
+        description = "Comma-separated tags that replace the task's tags; empty string clears them"
+    )]
+    pub tags: Option<String>,
+    #[schemars(
+        description = "Comma-separated task IDs that replace the dependencies (must exist); empty string clears them"
+    )]
+    pub depends_on: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct NextTasksParams {
+    #[schemars(description = "Only tasks linked to this project ID, e.g. PROJ-001")]
+    pub project: Option<String>,
+    #[schemars(description = "Only tasks linked to this customer ID, e.g. CUST-001")]
+    pub customer: Option<String>,
+    #[schemars(description = "Only tasks of this owner (case-insensitive)")]
+    pub owner: Option<String>,
+    #[schemars(description = "How many tasks to return (default 5)")]
+    pub limit: Option<usize>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -421,6 +639,10 @@ pub struct ListTasksParams {
     pub priority: Option<u32>,
     #[schemars(description = "Filter by sprint ID, e.g. SPR-001")]
     pub sprint: Option<String>,
+    #[schemars(
+        description = "Filter by milestone ID or unique title, e.g. MS-001; an empty string lists tasks without a milestone. An unknown milestone is an error."
+    )]
+    pub milestone: Option<String>,
     #[schemars(description = "Filter by owner (case-insensitive)")]
     pub owner: Option<String>,
 }
@@ -430,7 +652,7 @@ pub struct PrintMeetingParams {
     #[schemars(description = "Meeting ID, e.g. MTG-001")]
     pub id: String,
     #[schemars(
-        description = "Output PDF path (defaults to {id}.pdf in the server's working directory)"
+        description = "Output .pdf path relative to the repo root, inside the repo (defaults to {id}.pdf at the repo root)"
     )]
     pub output: Option<String>,
 }
@@ -440,7 +662,7 @@ pub struct PrintResearchParams {
     #[schemars(description = "Research ID, e.g. RES-001")]
     pub id: String,
     #[schemars(
-        description = "Output PDF path (defaults to {id}-final-report.pdf in the server's working directory)"
+        description = "Output .pdf path relative to the repo root, inside the repo (defaults to {id}-final-report.pdf at the repo root)"
     )]
     pub output: Option<String>,
     #[schemars(
@@ -451,10 +673,10 @@ pub struct PrintResearchParams {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct PrintFileParams {
-    #[schemars(description = "Path to a markdown file (absolute, or relative to the repo root)")]
+    #[schemars(description = "Path to a .md file inside the repo, relative to the repo root")]
     pub path: String,
     #[schemars(
-        description = "Output PDF path (defaults to <filename>.pdf in the server's working directory)"
+        description = "Output .pdf path relative to the repo root, inside the repo (defaults to <filename>.pdf at the repo root)"
     )]
     pub output: Option<String>,
     #[schemars(
@@ -483,6 +705,43 @@ impl McServer {
             cfg,
             tool_router: Self::tool_router(),
         }
+    }
+
+    /// Look up an entity from loose input (see [`resolve_entity`]); an
+    /// unknown ID suggests the closest existing one and the tool to list them.
+    fn find(&self, id: &str, kind: Option<EntityKind>) -> Result<data::EntityRecord, McpError> {
+        resolve_entity(&self.cfg, id, kind).map_err(|e| match &e {
+            McError::EntityNotFound(missing) => {
+                let missing_kind = kind.or_else(|| EntityKind::from_id(missing, &self.cfg).ok());
+                let tool = match missing_kind {
+                    Some(EntityKind::Task) => "list_tasks",
+                    _ => "list_entities",
+                };
+                let hint = match closest_id(&self.cfg, missing) {
+                    Some(close) => format!("did you mean {close}? Use {tool} to see valid IDs"),
+                    None => format!("use {tool} to see valid IDs"),
+                };
+                McpError::invalid_params(format!("{e} ({hint})"), None)
+            }
+            _ => tool_err(e),
+        })
+    }
+
+    /// Where a print tool writes its PDF: `output` (default `default_name`)
+    /// relative to the repo root, never the server's working directory,
+    /// which MCP clients set to anything (often `/`).
+    fn pdf_output(&self, output: Option<&str>, default_name: &str) -> String {
+        let out = output
+            .map(str::trim)
+            .filter(|o| !o.is_empty())
+            .unwrap_or(default_name);
+        self.cfg.root.join(out).display().to_string()
+    }
+
+    /// Tool result with its `path` made repo-relative.
+    fn with_relative_path(&self, mut result: JsonValue) -> Result<CallToolResult, McpError> {
+        relativize_field(&self.cfg, &mut result, "path");
+        json_result(&result)
     }
 
     /// JSON for the `mc://config` resource.
@@ -514,6 +773,7 @@ impl McServer {
                 "research": cfg.research_dir.display().to_string(),
                 "tasks": cfg.tasks_dir.display().to_string(),
                 "sprints": cfg.sprints_dir.display().to_string(),
+                "milestones": cfg.milestones_dir.display().to_string(),
                 "proposals": cfg.proposals_dir.display().to_string(),
             },
         })
@@ -523,7 +783,7 @@ impl McServer {
 #[tool_router]
 impl McServer {
     #[tool(
-        description = "List entities of a given kind with optional status/tag filters. Returns a JSON array of entity objects (frontmatter fields with wiki-link brackets stripped, plus _source = repo-relative file path), sorted by ID. For tasks, prefer list_tasks which supports richer filters."
+        description = "List entities of a given kind with optional status/tag filters. Returns a JSON array of entity objects (frontmatter fields with wiki-link brackets stripped, plus _kind and _source = repo-relative file path), sorted by ID. For tasks, prefer list_tasks which supports richer filters."
     )]
     async fn list_entities(
         &self,
@@ -531,17 +791,14 @@ impl McServer {
     ) -> Result<CallToolResult, McpError> {
         let kind = EntityKind::from_str_loose(&params.kind).map_err(tool_err)?;
         require_available(kind, &self.cfg)?;
-        let entities = data::collect_filtered(
-            kind,
-            &self.cfg,
-            params.status.as_deref(),
-            params.tag.as_deref(),
-        )
-        .map_err(tool_err)?;
-        let json: Vec<JsonValue> = entities
-            .iter()
-            .map(|e| entity_to_json(e, &self.cfg))
-            .collect();
+        let status = params
+            .status
+            .as_deref()
+            .map(|s| status_filter(&self.cfg, kind, s));
+        let entities =
+            data::collect_filtered(kind, &self.cfg, status.as_deref(), params.tag.as_deref())
+                .map_err(tool_err)?;
+        let json: Vec<JsonValue> = entities.iter().map(|e| entity_json(e, &self.cfg)).collect();
         json_result(&json)
     }
 
@@ -552,8 +809,8 @@ impl McServer {
         &self,
         Parameters(params): Parameters<GetEntityParams>,
     ) -> Result<CallToolResult, McpError> {
-        let rec = data::find_entity_by_id(&params.id, &self.cfg).map_err(tool_err)?;
-        let mut json = entity_to_json(&rec, &self.cfg);
+        let rec = self.find(&params.id, None)?;
+        let mut json = entity_json(&rec, &self.cfg);
         if let Some(obj) = json.as_object_mut() {
             let preview: String = rec.body.chars().take(500).collect();
             obj.insert("_body_preview".into(), JsonValue::String(preview));
@@ -568,7 +825,7 @@ impl McServer {
         &self,
         Parameters(params): Parameters<ReadEntityFileParams>,
     ) -> Result<CallToolResult, McpError> {
-        let rec = data::find_entity_by_id(&params.id, &self.cfg).map_err(tool_err)?;
+        let rec = self.find(&params.id, None)?;
         let content = std::fs::read_to_string(&rec.source_path).map_err(mc_err)?;
         Ok(CallToolResult::success(vec![Content::text(content)]))
     }
@@ -587,7 +844,7 @@ impl McServer {
             tags: csv(p.tags),
         };
         let created = new_cmd::create_customer(&self.cfg, &input).map_err(tool_err)?;
-        json_result(&created.to_json())
+        self.with_relative_path(created.to_json())
     }
 
     #[tool(
@@ -605,7 +862,7 @@ impl McServer {
             tags: csv(p.tags),
         };
         let created = new_cmd::create_project(&self.cfg, &input).map_err(tool_err)?;
-        json_result(&created.to_json())
+        self.with_relative_path(created.to_json())
     }
 
     #[tool(
@@ -627,7 +884,7 @@ impl McServer {
             attendees: csv(p.attendees),
         };
         let created = new_cmd::create_meeting(&self.cfg, &input).map_err(tool_err)?;
-        json_result(&created.to_json())
+        self.with_relative_path(created.to_json())
     }
 
     #[tool(
@@ -644,11 +901,11 @@ impl McServer {
             tags: csv(p.tags),
         };
         let created = new_cmd::create_research(&self.cfg, &input).map_err(tool_err)?;
-        json_result(&created.to_json())
+        self.with_relative_path(created.to_json())
     }
 
     #[tool(
-        description = "Create a new task in a todo/ folder (global, or scoped to a project/customer). Returns JSON {id, title, path}."
+        description = "Create a new task (global, or scoped to a project/customer), in its todo/ or done/ folder depending on status. Optionally assign a sprint and a milestone. Returns JSON {id, title, path}."
     )]
     async fn create_task(
         &self,
@@ -663,11 +920,32 @@ impl McServer {
             priority: p.priority,
             tags: csv(p.tags),
             sprint: p.sprint,
+            milestone: p.milestone,
             depends_on: csv(p.depends_on),
             due_date: p.due_date,
         };
         let created = new_cmd::create_task(&self.cfg, &input).map_err(tool_err)?;
-        json_result(&created.to_json())
+        self.with_relative_path(created.to_json())
+    }
+
+    #[tool(
+        description = "Create a milestone (work package) that groups tasks, in milestones/MS-NNN-<slug>/. Optional description, start_date and due_date (YYYY-MM-DD; due_date not before start_date), owner, status (see mc://config statuses.milestone; default planned) and projects. Returns JSON {id, title, path}. Assign tasks with create_task's or update_task's milestone field; filter with list_tasks' milestone."
+    )]
+    async fn create_milestone(
+        &self,
+        Parameters(p): Parameters<CreateMilestoneParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let input = new_cmd::MilestoneInput {
+            title: p.title,
+            description: p.description,
+            start_date: p.start_date,
+            due_date: p.due_date,
+            owner: p.owner,
+            status: p.status,
+            projects: csv(p.projects),
+        };
+        let created = new_cmd::create_milestone(&self.cfg, &input).map_err(tool_err)?;
+        self.with_relative_path(created.to_json())
     }
 
     #[tool(
@@ -688,7 +966,7 @@ impl McServer {
             tags: csv(p.tags),
         };
         let created = new_cmd::create_sprint(&self.cfg, &input).map_err(tool_err)?;
-        json_result(&created.to_json())
+        self.with_relative_path(created.to_json())
     }
 
     #[tool(
@@ -707,7 +985,7 @@ impl McServer {
             supersedes: p.supersedes,
         };
         let created = new_cmd::create_proposal(&self.cfg, &input).map_err(tool_err)?;
-        json_result(&created.to_json())
+        self.with_relative_path(created.to_json())
     }
 
     #[tool(
@@ -727,24 +1005,84 @@ impl McServer {
             tags: csv(p.tags),
         };
         let created = new_cmd::create_contact(&self.cfg, &input).map_err(tool_err)?;
-        json_result(&created.to_json())
+        self.with_relative_path(created.to_json())
     }
 
     #[tool(
-        description = "Move a task to a new status (and optionally assign a sprint). Returns JSON {id, old_status, new_status, path}."
+        description = "Move a task to a new status (and optionally assign a sprint). Returns JSON {id, old_status, new_status, path} (path relative to the repo root)."
     )]
     async fn move_task(
         &self,
         Parameters(params): Parameters<MoveTaskParams>,
     ) -> Result<CallToolResult, McpError> {
-        let result = commands::task::move_task_programmatic(
+        let rec = self.find(&params.id, None)?;
+        if rec.kind != EntityKind::Task {
+            return Err(McpError::invalid_params(
+                format!(
+                    "{} is a {}, not a task (move_task only moves tasks)",
+                    rec.id,
+                    rec.kind.label()
+                ),
+                None,
+            ));
+        }
+        // Same forgiving statuses as `mc task move`: case, `_` and aliases
+        // such as `doing` → in-progress.
+        let status =
+            suggest::resolve_status(&params.status, &self.cfg.statuses.task, EntityKind::Task)
+                .map_err(tool_err)?;
+        let sprint = params
+            .sprint
+            .as_deref()
+            .map(|s| loose_ref(&self.cfg, s, EntityKind::Sprint));
+        let result =
+            commands::task::move_task_programmatic(&self.cfg, &rec.id, &status, sprint.as_deref())
+                .map_err(tool_err)?;
+        self.with_relative_path(result)
+    }
+
+    #[tool(
+        description = "Change a task's fields: title, status, priority, owner, sprint, milestone, due_date, projects, customers, tags, depends_on. Only the fields you pass change; empty strings clear. Values are validated like create_task (references must exist) and nothing is written if any is invalid. Returns JSON {id, changed: [field names that actually changed], old_status, new_status, path} (path relative to the repo root)."
+    )]
+    async fn update_task(
+        &self,
+        Parameters(p): Parameters<UpdateTaskParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let rec = self.find(&p.id, Some(EntityKind::Task))?;
+        let list = |v: Option<String>| v.as_deref().map(parse_comma_list);
+        let update = commands::task::TaskUpdate {
+            title: p.title,
+            status: p.status,
+            priority: p.priority,
+            owner: p.owner,
+            sprint: p.sprint,
+            milestone: p.milestone,
+            due_date: p.due_date,
+            projects: list(p.projects),
+            customers: list(p.customers),
+            tags: list(p.tags),
+            depends_on: list(p.depends_on),
+        };
+        let updated = commands::task::update_task(&self.cfg, &rec.id, &update).map_err(tool_err)?;
+        json_result(&updated.to_json(&self.cfg))
+    }
+
+    #[tool(
+        description = "What to work on next: open tasks (status todo or backlog) whose dependencies are all done or cancelled, best first (todo before backlog, then priority, due date, ID). Returns JSON {tasks: [task objects shaped like list_tasks], actionable: total actionable count, blocked: open tasks waiting on unfinished dependencies}."
+    )]
+    async fn next_tasks(
+        &self,
+        Parameters(p): Parameters<NextTasksParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let next = next_tasks_json(
             &self.cfg,
-            &params.id,
-            &params.status,
-            params.sprint.as_deref(),
+            p.project.as_deref(),
+            p.customer.as_deref(),
+            p.owner.as_deref(),
+            p.limit,
         )
         .map_err(tool_err)?;
-        json_result(&result)
+        json_result(&next)
     }
 
     #[tool(
@@ -754,7 +1092,7 @@ impl McServer {
         &self,
         Parameters(p): Parameters<ListChecklistParams>,
     ) -> Result<CallToolResult, McpError> {
-        let rec = data::find_entity_by_id(&p.id, &self.cfg).map_err(tool_err)?;
+        let rec = self.find(&p.id, None)?;
         let content = std::fs::read_to_string(&rec.source_path).map_err(mc_err)?;
         let items = checklist::entity_items(rec.kind, &content);
         let (done, total) = checklist::progress(&items);
@@ -770,7 +1108,7 @@ impl McServer {
         &self,
         Parameters(p): Parameters<CheckItemParams>,
     ) -> Result<CallToolResult, McpError> {
-        let rec = data::find_entity_by_id(&p.id, &self.cfg).map_err(tool_err)?;
+        let rec = self.find(&p.id, None)?;
         let change = checklist::set_checked(
             &rec,
             checklist::Target::Index(p.item),
@@ -795,68 +1133,83 @@ impl McServer {
         &self,
         Parameters(p): Parameters<AddCommentParams>,
     ) -> Result<CallToolResult, McpError> {
-        let rec = data::find_entity_by_id(&p.id, &self.cfg).map_err(tool_err)?;
+        let rec = self.find(&p.id, None)?;
         let added =
             comments::add(&self.cfg, &rec, &p.text, p.author.as_deref()).map_err(tool_err)?;
         json_result(&added)
     }
 
     #[tool(
-        description = "List tasks across all locations (global, per-project, per-customer) with rich filtering; all filters combine with AND. Returns a JSON array sorted by ID. Use this instead of list_entities for tasks."
+        description = "List tasks across all locations (global, per-project, per-customer) with rich filtering (status, tag, project, customer, priority, sprint, milestone, owner); all filters combine with AND. Returns a JSON array sorted by ID. Use this instead of list_entities for tasks."
     )]
     async fn list_tasks(
         &self,
         Parameters(params): Parameters<ListTasksParams>,
     ) -> Result<CallToolResult, McpError> {
+        let cfg = &self.cfg;
+        let status = params
+            .status
+            .as_deref()
+            .map(|s| status_filter(cfg, EntityKind::Task, s));
+        let id_ref = |v: &Option<String>, kind| v.as_deref().map(|v| loose_ref(cfg, v, kind));
+        let project = id_ref(&params.project, EntityKind::Project);
+        let customer = id_ref(&params.customer, EntityKind::Customer);
+        let sprint = id_ref(&params.sprint, EntityKind::Sprint);
+        let milestone = id_ref(&params.milestone, EntityKind::Milestone);
         let filter = data::TaskFilter {
-            status: params.status.as_deref(),
+            status: status.as_deref(),
             tag: params.tag.as_deref(),
-            project: params.project.as_deref(),
-            customer: params.customer.as_deref(),
+            project: project.as_deref(),
+            customer: customer.as_deref(),
             priority: params.priority,
-            sprint: params.sprint.as_deref(),
+            sprint: sprint.as_deref(),
             owner: params.owner.as_deref(),
+
+            milestone: milestone.as_deref(),
         };
-        let tasks = data::collect_tasks_filtered(&self.cfg, &filter).map_err(tool_err)?;
-        let json: Vec<JsonValue> = tasks.iter().map(|e| entity_to_json(e, &self.cfg)).collect();
+        let tasks = data::collect_tasks_filtered(cfg, &filter).map_err(tool_err)?;
+        let json: Vec<JsonValue> = tasks.iter().map(|e| entity_json(e, &self.cfg)).collect();
         json_result(&json)
     }
 
     #[tool(
-        description = "Export a meeting to a branded PDF (cover page, attendees table, notes). Returns JSON {id, title, path}."
+        description = "Export a meeting to a branded PDF (cover page, attendees table, notes). Returns JSON {id, title, path} (path relative to the repo root, where the PDF is written by default)."
     )]
     async fn print_meeting(
         &self,
         Parameters(params): Parameters<PrintMeetingParams>,
     ) -> Result<CallToolResult, McpError> {
-        let result = commands::print::print_meeting_programmatic(
-            &self.cfg,
-            &params.id,
-            params.output.as_deref(),
-        )
-        .map_err(tool_err)?;
-        json_result(&result)
+        let rec = self.find(&params.id, Some(EntityKind::Meeting))?;
+        let output = self.pdf_output(params.output.as_deref(), &format!("{}.pdf", rec.id));
+        let result = commands::print::print_meeting_programmatic(&self.cfg, &rec.id, Some(&output))
+            .map_err(tool_err)?;
+        self.with_relative_path(result)
     }
 
     #[tool(
-        description = "Export a research topic's final report (files in its final/ folder) to a branded PDF. Returns JSON {id, title, path}."
+        description = "Export a research topic's final report (files in its final/ folder) to a branded PDF. Returns JSON {id, title, path} (path relative to the repo root, where the PDF is written by default)."
     )]
     async fn print_research(
         &self,
         Parameters(params): Parameters<PrintResearchParams>,
     ) -> Result<CallToolResult, McpError> {
+        let rec = self.find(&params.id, Some(EntityKind::Research))?;
+        let output = self.pdf_output(
+            params.output.as_deref(),
+            &format!("{}-final-report.pdf", rec.id),
+        );
         let result = commands::print::print_research_programmatic(
             &self.cfg,
-            &params.id,
-            params.output.as_deref(),
+            &rec.id,
+            Some(&output),
             params.file.as_deref(),
         )
         .map_err(tool_err)?;
-        json_result(&result)
+        self.with_relative_path(result)
     }
 
     #[tool(
-        description = "Generate a branded PDF from any markdown file. Returns JSON {title, path}."
+        description = "Generate a branded PDF from any markdown file. Returns JSON {title, path} (path relative to the repo root, where the PDF is written by default)."
     )]
     async fn print_file(
         &self,
@@ -882,19 +1235,26 @@ impl McServer {
                 ))
             }
         };
+        // Relative paths are read from and written to the repo root.
+        let input = self.cfg.root.join(&params.path);
+        let stem = input
+            .file_stem()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_else(|| "document".into());
+        let output = self.pdf_output(params.output.as_deref(), &format!("{stem}.pdf"));
         let result = commands::print::print_file_programmatic(
             &self.cfg,
-            &params.path,
-            params.output.as_deref(),
+            &input.display().to_string(),
+            Some(&output),
             &template,
             params.title.as_deref(),
         )
         .map_err(tool_err)?;
-        json_result(&result)
+        self.with_relative_path(result)
     }
 
     #[tool(
-        description = "Validate repo structure and frontmatter. Returns the text 'Validation passed: no issues found.' or a JSON array of {path, check, message} issue objects."
+        description = "Validate repo structure and frontmatter. Returns the text 'Validation passed: no issues found.' or a JSON array of {path, check, severity, message} issue objects (severity 'error' or 'warning'; warnings such as links to missing entities don't fail validation)."
     )]
     async fn validate_repo(&self) -> Result<CallToolResult, McpError> {
         let issues = commands::validate::validate_programmatic(&self.cfg).map_err(tool_err)?;
@@ -946,7 +1306,7 @@ impl McServer {
                 serde_json::json!({
                     "id": f.id,
                     "name": f.name,
-                    "path": f.path.display().to_string(),
+                    "path": repo_relative(&self.cfg, &f.path),
                 })
             })
             .collect();
@@ -975,7 +1335,7 @@ impl ServerHandler for McServer {
             .map(|k| k.label_plural())
             .collect();
         let instructions = format!(
-            "MissionControl repo '{}' ({}) at {}. Manage {} in a git-based knowledge repository.\n\nStart with get_status for an overview. Read the mc://config resource for valid status values and ID prefixes. Use list_tasks (not list_entities) for task queries — it supports richer filters.",
+            "MissionControl repo '{}' ({}) at {}. Manage {} in a git-based knowledge repository.\n\nStart with get_status for an overview. Read the mc://config resource for valid status values and ID prefixes. Use list_tasks (not list_entities) for task queries — it supports richer filters. next_tasks answers \"what should I work on next?\"; update_task changes a task's fields.",
             self.cfg.brand.name,
             mode_label,
             self.cfg.root.display(),
@@ -1059,7 +1419,7 @@ impl ServerHandler for McServer {
 
 fn collect_entity_json(kind: EntityKind, cfg: &ResolvedConfig) -> Result<Vec<JsonValue>, McpError> {
     let entities = data::collect_entities(kind, cfg).map_err(tool_err)?;
-    Ok(entities.iter().map(|e| entity_to_json(e, cfg)).collect())
+    Ok(entities.iter().map(|e| entity_json(e, cfg)).collect())
 }
 
 #[cfg(test)]
@@ -1103,6 +1463,7 @@ mod tests {
                 "create_contact",
                 "create_customer",
                 "create_meeting",
+                "create_milestone",
                 "create_project",
                 "create_proposal",
                 "create_research",
@@ -1114,10 +1475,12 @@ mod tests {
                 "list_entities",
                 "list_tasks",
                 "move_task",
+                "next_tasks",
                 "print_file",
                 "print_meeting",
                 "print_research",
                 "read_entity_file",
+                "update_task",
                 "validate_repo",
             ]
         );
@@ -1159,6 +1522,11 @@ mod tests {
         }))
         .await
         .unwrap();
+        crate::commands::new::create_sprint(
+            &srv.cfg,
+            &crate::commands::new::SprintInput::new("S1"),
+        )
+        .unwrap();
         let created = json(
             &srv.create_task(Parameters(CreateTaskParams {
                 title: "Call Acme".into(),
@@ -1171,6 +1539,8 @@ mod tests {
                 sprint: Some("SPR-001".into()),
                 depends_on: None,
                 due_date: None,
+
+                milestone: None,
             }))
             .await
             .unwrap(),
@@ -1186,6 +1556,8 @@ mod tests {
                 priority: Some(2),
                 sprint: Some("SPR-001".into()),
                 owner: None,
+
+                milestone: None,
             }))
             .await
             .unwrap(),
@@ -1222,6 +1594,8 @@ mod tests {
                 sprint: None,
                 depends_on: None,
                 due_date: None,
+
+                milestone: None,
             }))
             .await
             .unwrap_err();
@@ -1262,6 +1636,8 @@ mod tests {
                 sprint: None,
                 depends_on: None,
                 due_date: None,
+
+                milestone: None,
             }))
             .await
             .unwrap(),
@@ -1385,6 +1761,379 @@ mod tests {
         .unwrap();
     }
 
+    fn task_params(title: &str) -> CreateTaskParams {
+        CreateTaskParams {
+            title: title.into(),
+            project: None,
+            customer: None,
+            owner: None,
+            status: None,
+            priority: None,
+            tags: None,
+            sprint: None,
+            depends_on: None,
+            due_date: None,
+
+            milestone: None,
+        }
+    }
+
+    fn update_params(id: &str) -> UpdateTaskParams {
+        UpdateTaskParams {
+            id: id.into(),
+            title: None,
+            status: None,
+            priority: None,
+            owner: None,
+            sprint: None,
+            due_date: None,
+            projects: None,
+            customers: None,
+            tags: None,
+            depends_on: None,
+
+            milestone: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_update_task_and_next_tasks() {
+        let (_tmp, srv) = server(false);
+        for title in ["First", "Second", "Third"] {
+            srv.create_task(Parameters(task_params(title)))
+                .await
+                .unwrap();
+        }
+        crate::commands::new::create_meeting(
+            &srv.cfg,
+            &crate::commands::new::MeetingInput::new("Sync"),
+        )
+        .unwrap();
+
+        // TASK-002 waits on TASK-003; TASK-001 is a todo, so it comes first.
+        let updated = json(
+            &srv.update_task(Parameters(UpdateTaskParams {
+                depends_on: Some("task-3".into()),
+                priority: Some(1),
+                ..update_params("task-2")
+            }))
+            .await
+            .unwrap(),
+        );
+        assert_eq!(
+            updated["changed"],
+            serde_json::json!(["priority", "depends_on"])
+        );
+        assert!(updated["path"].as_str().unwrap().starts_with("tasks/todo/"));
+        srv.update_task(Parameters(UpdateTaskParams {
+            status: Some("TODO".into()),
+            owner: Some("alice".into()),
+            ..update_params("TASK-001")
+        }))
+        .await
+        .unwrap();
+
+        let next = |owner: Option<&str>| NextTasksParams {
+            project: None,
+            customer: None,
+            owner: owner.map(Into::into),
+            limit: None,
+        };
+        let queue = json(&srv.next_tasks(Parameters(next(None))).await.unwrap());
+        let ids: Vec<&str> = queue["tasks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(ids, ["TASK-001", "TASK-003"]);
+        assert_eq!(queue["actionable"], 2);
+        assert_eq!(queue["blocked"], 1);
+        let mine = json(
+            &srv.next_tasks(Parameters(next(Some("Alice"))))
+                .await
+                .unwrap(),
+        );
+        assert_eq!(mine["tasks"].as_array().unwrap().len(), 1);
+
+        // Finishing the dependency unblocks TASK-002.
+        srv.update_task(Parameters(UpdateTaskParams {
+            status: Some("done".into()),
+            ..update_params("TASK-003")
+        }))
+        .await
+        .unwrap();
+        let queue = json(&srv.next_tasks(Parameters(next(None))).await.unwrap());
+        assert_eq!(queue["blocked"], 0);
+        assert_eq!(queue["actionable"], 2);
+
+        // Bad values and other kinds are invalid_params; nothing changes.
+        for params in [
+            update_params("TASK-001"),
+            UpdateTaskParams {
+                priority: Some(9),
+                ..update_params("TASK-001")
+            },
+            UpdateTaskParams {
+                owner: Some("x".into()),
+                ..update_params("MTG-001")
+            },
+        ] {
+            let err = srv.update_task(Parameters(params)).await.unwrap_err();
+            assert_eq!(err.code, ErrorCode::INVALID_PARAMS, "{}", err.message);
+        }
+        // A missing sprint is not found, as in create_task.
+        let err = srv
+            .update_task(Parameters(UpdateTaskParams {
+                sprint: Some("SPR-404".into()),
+                ..update_params("TASK-001")
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, ErrorCode::RESOURCE_NOT_FOUND, "{}", err.message);
+        let err = srv
+            .move_task(Parameters(MoveTaskParams {
+                id: "MTG-001".into(),
+                status: "done".into(),
+                sprint: None,
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, ErrorCode::INVALID_PARAMS);
+        assert!(err.message.contains("not a task"), "{}", err.message);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn test_concurrent_creates_get_distinct_ids() {
+        let (_tmp, srv) = server(false);
+        let calls: Vec<_> = (0..8)
+            .map(|i| {
+                let srv = srv.clone();
+                tokio::spawn(async move {
+                    json(
+                        &srv.create_task(Parameters(task_params(&format!("Race {i}"))))
+                            .await
+                            .unwrap(),
+                    )["id"]
+                        .as_str()
+                        .unwrap()
+                        .to_string()
+                })
+            })
+            .collect();
+        let mut ids = Vec::new();
+        for call in calls {
+            ids.push(call.await.unwrap());
+        }
+        ids.sort();
+        ids.dedup();
+        assert_eq!(ids.len(), 8, "{ids:?}");
+    }
+
+    #[tokio::test]
+    async fn test_ids_and_statuses_are_forgiving() {
+        let (_tmp, srv) = server(false);
+        srv.create_task(Parameters(task_params("Loose")))
+            .await
+            .unwrap();
+        for id in ["TASK-1", "task-001", "task1"] {
+            let entity = json(
+                &srv.get_entity(Parameters(GetEntityParams { id: id.into() }))
+                    .await
+                    .unwrap(),
+            );
+            assert_eq!(entity["id"], "TASK-001", "{id}");
+            assert_eq!(entity["_kind"], "task");
+        }
+        // An unknown ID suggests the closest one and the tool to list them,
+        // not a CLI command.
+        let err = srv
+            .get_entity(Parameters(GetEntityParams {
+                id: "TASK-2".into(),
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, ErrorCode::INVALID_PARAMS);
+        assert!(
+            err.message.contains("did you mean TASK-001 (Loose)"),
+            "{}",
+            err.message
+        );
+        assert!(err.message.contains("list_tasks") && !err.message.contains("mc list"));
+
+        // `doing` means in-progress (the CLI alias), not "did you mean done".
+        let moved = json(
+            &srv.move_task(Parameters(MoveTaskParams {
+                id: "task-1".into(),
+                status: "doing".into(),
+                sprint: None,
+            }))
+            .await
+            .unwrap(),
+        );
+        assert_eq!(moved["new_status"], "in-progress");
+        assert!(moved["path"].as_str().unwrap().starts_with("tasks/todo/"));
+        let err = srv
+            .move_task(Parameters(MoveTaskParams {
+                id: "TASK-001".into(),
+                status: "revew".into(),
+                sprint: None,
+            }))
+            .await
+            .unwrap_err();
+        assert!(
+            err.message.contains("did you mean 'review'"),
+            "{}",
+            err.message
+        );
+
+        let tasks = json(
+            &srv.list_tasks(Parameters(ListTasksParams {
+                status: Some("In_Progress".into()),
+                tag: None,
+                project: None,
+                customer: None,
+                priority: None,
+                sprint: None,
+                owner: None,
+
+                milestone: None,
+            }))
+            .await
+            .unwrap(),
+        );
+        assert_eq!(tasks.as_array().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_paths_are_repo_relative_and_pdfs_land_in_the_repo() {
+        let (tmp, srv) = server(false);
+        let created = json(
+            &srv.create_task(Parameters(task_params("Rel")))
+                .await
+                .unwrap(),
+        );
+        assert!(created["path"].as_str().unwrap().starts_with("tasks/todo/"));
+        let status = json(&srv.get_status().await.unwrap());
+        for entry in status["recent_activity"].as_array().unwrap() {
+            assert!(!entry["path"].as_str().unwrap().starts_with('/'), "{entry}");
+        }
+
+        srv.create_meeting(Parameters(CreateMeetingParams {
+            title: "Kickoff".into(),
+            date: Some("2026-01-05".into()),
+            time: None,
+            duration: None,
+            status: None,
+            tags: None,
+            customers: None,
+            projects: None,
+            attendees: None,
+        }))
+        .await
+        .unwrap();
+        // The server's working directory doesn't matter: the default output
+        // is in the repo root, and the path comes back repo-relative.
+        let printed = json(
+            &srv.print_meeting(Parameters(PrintMeetingParams {
+                id: "mtg-1".into(),
+                output: None,
+            }))
+            .await
+            .unwrap(),
+        );
+        assert_eq!(printed["path"], "MTG-001.pdf");
+        assert!(tmp.path().join("MTG-001.pdf").is_file());
+
+        std::fs::write(tmp.path().join("notes.md"), "# Notes\n\nHello\n").unwrap();
+        let printed = json(
+            &srv.print_file(Parameters(PrintFileParams {
+                path: "notes.md".into(),
+                output: Some("notes-out.pdf".into()),
+                template: None,
+                title: None,
+            }))
+            .await
+            .unwrap(),
+        );
+        assert_eq!(printed["path"], "notes-out.pdf");
+        assert!(tmp.path().join("notes-out.pdf").is_file());
+    }
+
+    #[tokio::test]
+    async fn milestone_tool_creates_and_assigns_a_task() {
+        let (_tmp, srv) = server(false);
+        let created = json(
+            &srv.create_milestone(Parameters(CreateMilestoneParams {
+                title: "AP3".into(),
+                description: Some("Training".into()),
+                start_date: Some("2026-09-01".into()),
+                due_date: Some("2026-11-30".into()),
+                owner: None,
+                status: None,
+                projects: None,
+            }))
+            .await
+            .unwrap(),
+        );
+        assert_eq!(created["id"], "MS-001");
+        let mut input = task_params("Train");
+        input.milestone = Some("MS-001".into());
+        let created = json(&srv.create_task(Parameters(input)).await.unwrap());
+        let rec = resolve_entity(
+            &srv.cfg,
+            created["id"].as_str().unwrap(),
+            Some(EntityKind::Task),
+        )
+        .unwrap();
+        assert_eq!(
+            frontmatter::get_link_str(&rec.frontmatter, "milestone"),
+            Some("MS-001")
+        );
+    }
+
+    #[tokio::test]
+    async fn milestone_can_be_set_filtered_and_cleared_by_update_task() {
+        let (_tmp, srv) = server(false);
+        crate::commands::new::create_milestone(
+            &srv.cfg,
+            &crate::commands::new::MilestoneInput::new("Beta"),
+        )
+        .unwrap();
+        for title in ["First", "Second"] {
+            srv.create_task(Parameters(task_params(title)))
+                .await
+                .unwrap();
+        }
+        let list = |milestone: &str| ListTasksParams {
+            status: None,
+            tag: None,
+            project: None,
+            customer: None,
+            priority: None,
+            sprint: None,
+            owner: None,
+            milestone: Some(milestone.into()),
+        };
+        let mut update = update_params("TASK-001");
+        update.milestone = Some("beta".into()); // unique title, any case
+        let updated = json(&srv.update_task(Parameters(update)).await.unwrap());
+        assert_eq!(updated["changed"], serde_json::json!(["milestone"]));
+        let tasks = json(&srv.list_tasks(Parameters(list("ms-1"))).await.unwrap());
+        assert_eq!(tasks.as_array().unwrap().len(), 1);
+        assert_eq!(tasks[0]["milestone"], "MS-001");
+        let unassigned = json(&srv.list_tasks(Parameters(list(""))).await.unwrap());
+        assert_eq!(unassigned[0]["id"], "TASK-002");
+        assert_eq!(unassigned.as_array().unwrap().len(), 1);
+        assert!(srv.list_tasks(Parameters(list("MS-404"))).await.is_err());
+
+        let mut clear = update_params("TASK-001");
+        clear.milestone = Some(String::new());
+        srv.update_task(Parameters(clear)).await.unwrap();
+        let tasks = json(&srv.list_tasks(Parameters(list("MS-001"))).await.unwrap());
+        assert!(tasks.as_array().unwrap().is_empty());
+    }
+
     #[test]
     fn test_config_resource_json() {
         let (_tmp, srv) = server(false);
@@ -1393,6 +2142,6 @@ mod tests {
         assert_eq!(cfg["mode"], "standalone");
         assert_eq!(cfg["id_prefixes"]["task"], "TASK");
         assert_eq!(cfg["statuses"]["task"][0], "backlog");
-        assert_eq!(cfg["available_kinds"].as_array().unwrap().len(), 8);
+        assert_eq!(cfg["available_kinds"].as_array().unwrap().len(), 9);
     }
 }
