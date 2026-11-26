@@ -365,7 +365,12 @@ pub(crate) fn move_button(id: &str) -> String {
 
 /// Template for the move menu: one item per configured task status.
 pub(crate) fn move_menu_template(page: &Page) -> String {
-    let items: String = EntityKind::Task
+    move_menu_template_for(page, EntityKind::Task)
+}
+
+/// Template for the move menu of a board of `kind` (tasks or leads).
+pub(crate) fn move_menu_template_for(page: &Page, kind: EntityKind) -> String {
+    let items: String = kind
         .statuses(page.cfg)
         .iter()
         .map(|s| {

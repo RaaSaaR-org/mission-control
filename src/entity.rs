@@ -18,11 +18,13 @@ pub enum EntityKind {
     Milestone,
     Proposal,
     Contact,
+    Lead,
+    Event,
 }
 
 impl EntityKind {
     /// Every entity kind, in display order.
-    pub const ALL: [EntityKind; 9] = [
+    pub const ALL: [EntityKind; 11] = [
         EntityKind::Customer,
         EntityKind::Project,
         EntityKind::Meeting,
@@ -32,6 +34,8 @@ impl EntityKind {
         EntityKind::Milestone,
         EntityKind::Proposal,
         EntityKind::Contact,
+        EntityKind::Lead,
+        EntityKind::Event,
     ];
 
     pub fn label(&self) -> &'static str {
@@ -45,6 +49,8 @@ impl EntityKind {
             EntityKind::Milestone => "milestone",
             EntityKind::Proposal => "proposal",
             EntityKind::Contact => "contact",
+            EntityKind::Lead => "lead",
+            EntityKind::Event => "event",
         }
     }
 
@@ -59,6 +65,8 @@ impl EntityKind {
             EntityKind::Milestone => "milestones",
             EntityKind::Proposal => "proposals",
             EntityKind::Contact => "contacts",
+            EntityKind::Lead => "leads",
+            EntityKind::Event => "events",
         }
     }
 
@@ -73,6 +81,8 @@ impl EntityKind {
             EntityKind::Milestone => &cfg.id_prefixes.milestone,
             EntityKind::Proposal => &cfg.id_prefixes.proposal,
             EntityKind::Contact => &cfg.id_prefixes.contact,
+            EntityKind::Lead => &cfg.id_prefixes.lead,
+            EntityKind::Event => &cfg.id_prefixes.event,
         }
     }
 
@@ -87,6 +97,8 @@ impl EntityKind {
             EntityKind::Milestone => &cfg.milestones_dir,
             EntityKind::Proposal => &cfg.proposals_dir,
             EntityKind::Contact => &cfg.customers_dir, // contacts live under customers/*/contacts/
+            EntityKind::Lead => &cfg.leads_dir,
+            EntityKind::Event => &cfg.events_dir,
         }
     }
 
@@ -101,6 +113,8 @@ impl EntityKind {
             EntityKind::Milestone => &cfg.statuses.milestone,
             EntityKind::Proposal => &cfg.statuses.proposal,
             EntityKind::Contact => &cfg.statuses.contact,
+            EntityKind::Lead => &cfg.statuses.lead,
+            EntityKind::Event => &cfg.statuses.event,
         }
     }
 
@@ -115,6 +129,8 @@ impl EntityKind {
             "milestone" | "milestones" => Ok(EntityKind::Milestone),
             "proposal" | "proposals" | "prop" => Ok(EntityKind::Proposal),
             "contact" | "contacts" => Ok(EntityKind::Contact),
+            "lead" | "leads" => Ok(EntityKind::Lead),
+            "event" | "events" => Ok(EntityKind::Event),
             _ => Err(McError::usage(format!("Unknown entity kind: {s}"), None)),
         }
     }
@@ -278,7 +294,9 @@ pub fn next_id(kind: EntityKind, cfg: &ResolvedConfig) -> McResult<EntityId> {
         | EntityKind::Project
         | EntityKind::Research
         | EntityKind::Sprint
-        | EntityKind::Milestone => subdirs(kind.base_dir(cfg))
+        | EntityKind::Milestone
+        | EntityKind::Lead
+        | EntityKind::Event => subdirs(kind.base_dir(cfg))
             .iter()
             .map(|d| name_of(d))
             .collect(),

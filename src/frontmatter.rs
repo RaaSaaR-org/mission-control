@@ -277,6 +277,27 @@ pub fn wrap_wikilink(s: &str) -> String {
     }
 }
 
+/// `[[ID|Label]]`, the labelled wiki-link Obsidian shows as `Label`.
+/// Characters that would break the link (`|`, `[`, `]`, line breaks) are
+/// dropped from the label; an empty label gives plain `[[ID]]`, an empty ID
+/// an empty string.
+pub fn wrap_wikilink_labeled(id: &str, label: &str) -> String {
+    let id = strip_wikilink(id.trim()).trim();
+    if id.is_empty() {
+        return String::new();
+    }
+    let label: String = label
+        .chars()
+        .filter(|c| !matches!(c, '|' | '[' | ']') && !c.is_control())
+        .collect();
+    let label = label.split_whitespace().collect::<Vec<_>>().join(" ");
+    if label.is_empty() || label == id {
+        format!("[[{id}]]")
+    } else {
+        format!("[[{id}|{label}]]")
+    }
+}
+
 /// Get a string field, stripping any wiki-link brackets.
 pub fn get_link_str<'a>(val: &'a Value, key: &str) -> Option<&'a str> {
     get_str(val, key).map(strip_wikilink)
@@ -400,6 +421,24 @@ mod tests {
     fn test_wrap_wikilink() {
         assert_eq!(wrap_wikilink("CUST-001"), "[[CUST-001]]");
         assert_eq!(wrap_wikilink(""), "");
+    }
+
+    #[test]
+    fn test_wrap_wikilink_labeled() {
+        assert_eq!(
+            wrap_wikilink_labeled("CUST-002", "Zema"),
+            "[[CUST-002|Zema]]"
+        );
+        assert_eq!(
+            wrap_wikilink_labeled("[[EVT-001]]", " Hannover | Messe [2026]\n"),
+            "[[EVT-001|Hannover Messe 2026]]"
+        );
+        assert_eq!(wrap_wikilink_labeled("CONT-001", ""), "[[CONT-001]]");
+        assert_eq!(wrap_wikilink_labeled("", "x"), "");
+        assert_eq!(
+            strip_wikilink(&wrap_wikilink_labeled("CUST-002", "Zema")),
+            "CUST-002"
+        );
     }
 
     #[test]

@@ -67,10 +67,12 @@ my-company/
 ├── tasks/
 ├── milestones/
 ├── sprints/
-└── proposals/
+├── proposals/
+├── leads/
+└── events/
 ```
 
-Standalone mode adds **customers**, **contacts**, and **projects** — useful for agencies, freelancers, or anyone managing multiple clients.
+Standalone mode adds **customers**, **contacts**, **projects**, **leads** and **events** — useful for agencies, freelancers, or anyone managing multiple clients.
 
 ## What You Can Track
 
@@ -85,6 +87,8 @@ Standalone mode adds **customers**, **contacts**, and **projects** — useful fo
 | **Contacts** | Per-customer contacts (standalone only) | `mc new contact "Alice Smith" --customer CUST-001` |
 | **Projects** | Project containers (standalone only) | `mc new project "Robot Arm" --customers CUST-001` |
 | **Proposals** | Decision records (BIP/ADR-style) | `mc new proposal "Migrate to Postgres"` |
+| **Leads** | People met at events, in a pipeline until they become contacts (standalone only) | `mc new lead "Jane Doe" --event EVT-001` |
+| **Events** | Trade fairs, conferences, meetups where you meet leads (standalone only) | `mc new event "Hannover Messe" --date 2026-04-20` |
 
 ## Task Management
 
@@ -185,6 +189,24 @@ mc task board --milestone MS-001
 
 A task stores its milestone as `milestone: "[[MS-001]]"`. Milestones live in `milestones/MS-NNN-<slug>/` (`.mc/milestones/` in embedded mode) with the statuses `planned`, `active`, `completed` and `cancelled`; `paths.milestones`, `id_prefixes.milestone` and `statuses.milestone` override the defaults. Repos that have tasks get milestones without a config change. The dashboard's **Milestones** page (`/milestones`) shows them as a Gantt chart; the REST API has `POST /v1/milestones` and the MCP server `create_milestone`.
 
+## Leads and Events (CRM)
+
+Track the people you meet (business cards, LinkedIn), move them through a pipeline and broker introductions to your partners. Leads are separate from contacts; converting one creates a contact under a customer.
+
+```bash
+mc new event "Hannover Messe 2026" --date 2026-04-20 --end-date 2026-04-24 --type trade-fair
+mc new lead "Jane Doe" --company "Acme GmbH" --role CTO --event EVT-001 \
+  --introduce-to CUST-002 --warmth hot --follow-up 2026-12-01
+mc lead log LEAD-001 call "Talked about a pilot" --follow-up 2026-12-10
+mc lead move LEAD-001 intro-planned
+mc lead set LEAD-001 --warmth warm --tags robotics
+mc list leads --follow-up-due              # open leads whose follow-up is due
+mc list leads --event EVT-001              # who we met at the fair
+mc lead convert LEAD-001 --customer CUST-002   # or --new-customer "Acme GmbH"
+```
+
+A lead lives in `leads/LEAD-NNN-<slug>/LEAD-NNN.md`, with room for a `card.jpg` and a `research.md` next to it. Its stages are `new`, `contacted`, `qualified`, `intro-planned`, `introduced`, `converted` and `lost` (`statuses.lead`), and its body keeps an interaction log (`- YYYY-MM-DD · call · note`, newest first). Events live in `events/EVT-NNN-<slug>/`. In a config with a `paths:` section, add `leads: leads/` and `events: events/` to enable them. MCP has `create_lead`, `update_lead`, `move_lead`, `log_interaction`, `convert_lead`, `create_event` and `list_leads`; REST has `/v1/leads` and `/v1/events`. See [docs/crm.md](docs/crm.md) for the data model and every operation.
+
 ### Checklists and Comments
 
 Markdown task lists in any entity (`- [ ] Book room`) are a checklist you can tick from the terminal, the dashboard or an agent. Only the box character changes; nothing else in the file is touched.
@@ -261,6 +283,13 @@ All tools return JSON with documented fields. Parameter descriptions include val
 | `create_project` | Create a project (standalone only) |
 | `create_contact` | Create a contact under a customer (standalone only) |
 | `create_proposal` | Create a proposal / decision record |
+| `create_lead` | Create a lead: a person met at an event (standalone only) |
+| `update_lead` | Change a lead's fields (company, warmth, follow-up, introduce_to, stage, ...) |
+| `move_lead` | Move a lead to another pipeline stage |
+| `log_interaction` | Log a call, email, meeting, ... on a lead; sets last contact and follow-up |
+| `convert_lead` | Turn a lead into a contact under an existing, new or company-matched customer |
+| `list_leads` | List leads by stage, event, owner, warmth, tag, introduce_to, or due follow-ups |
+| `create_event` | Create an event (trade fair, conference, meetup) |
 | `move_task` | Move a task to a new status, optionally assign a sprint |
 | `update_task` | Change a task's title, status, priority, owner, sprint, milestone, due date, projects, customers, tags or dependencies |
 | `next_tasks` | What to work on next: unblocked open tasks, best first, plus how many are blocked |
@@ -289,6 +318,8 @@ Resources provide read-only data snapshots. Start with `mc://config` to discover
 | `mc://entities/milestones` | All milestones |
 | `mc://entities/sprints` | All sprints |
 | `mc://entities/proposals` | All proposals |
+| `mc://entities/leads` | All leads (standalone only) |
+| `mc://entities/events` | All events (standalone only) |
 
 ## Web Dashboard
 
@@ -391,7 +422,7 @@ mc completions fish > ~/.config/fish/completions/mc.fish
 Config lives at `.mc/config.yml` (embedded) or `config/config.yml` (standalone). It controls:
 
 - Directory paths for each entity type
-- ID prefixes (`CUST`, `CONT`, `PROJ`, `MTG`, `RES`, `TASK`, `MS`, `SPR`, `PROP`)
+- ID prefixes (`CUST`, `CONT`, `PROJ`, `MTG`, `RES`, `TASK`, `MS`, `SPR`, `PROP`, `LEAD`, `EVT`)
 - Allowed status values per entity type
 
 The defaults work out of the box. Edit the config when you want to customize status workflows or add new prefixes.
@@ -408,6 +439,10 @@ The defaults work out of the box. Edit the config when you want to customize sta
 | `mc task move <ID> <status>` | Change task status |
 | `mc task set <ID> --field value...` | Change task fields (title, status, priority, owner, sprint, milestone, due date, links, tags, dependencies) |
 | `mc task next [-n N]` | Show next actionable task(s) |
+| `mc lead move <ID> <stage>` | Change a lead's pipeline stage |
+| `mc lead log <ID> <type> "note"` | Log an interaction on a lead (`--date`, `--follow-up`) |
+| `mc lead set <ID> --field value...` | Change lead fields (empty values clear) |
+| `mc lead convert <ID>` | Convert a lead into a contact (`--customer` or `--new-customer`) |
 | `mc check <ID> [N] [--uncheck]` | List an entity's checklist, or tick/untick item N |
 | `mc comment <ID> ["text"]` | Comment on a task or meeting (`-` reads stdin, no text opens `$VISUAL` / `$EDITOR`, `--author` overrides) |
 | `mc validate` | Check repo structure and frontmatter, grouped by file |

@@ -175,6 +175,12 @@ pub fn router(cfg: &ResolvedConfig, opts: &ServeOptions) -> Router {
         .route("/tasks/{id}", get(api::get_task).patch(api::update_task))
         .route("/tasks/{id}/move", post(api::move_task))
         .route("/entities/{id}/checks", post(api::check_item))
+        .route("/leads", post(api::create_lead))
+        .route("/leads/{id}", axum::routing::patch(api::update_lead))
+        .route("/leads/{id}/move", post(api::move_lead))
+        .route("/leads/{id}/interactions", post(api::log_interaction))
+        .route("/leads/{id}/convert", post(api::convert_lead))
+        .route("/events", post(api::create_event))
         .route(
             "/entities/{id}/comments",
             post(api::add_comment).layer(DefaultBodyLimit::max(MAX_COMMENT_BODY_BYTES)),
@@ -196,6 +202,11 @@ pub fn router(cfg: &ResolvedConfig, opts: &ServeOptions) -> Router {
         .route("/milestones", get(handle_milestones))
         .route("/proposals", list(EntityKind::Proposal))
         .route("/contacts", list(EntityKind::Contact))
+        .route("/leads", get(handle_leads_board))
+        .route("/leads/list", get(handle_leads_list))
+        .route("/leads/new", get(handle_lead_new))
+        .route("/events", get(handle_events))
+        .route("/events/new", get(handle_event_new))
         .route("/tasks", get(handle_tasks_board))
         .route("/tasks/list", get(handle_tasks))
         .route("/entity/{id}", get(handle_detail))
@@ -299,6 +310,85 @@ async fn handle_list(
     Ok(state.render_with(&catalog, |page| {
         html::list_page(page, kind, &entities, &query)
     }))
+}
+
+fn lead_query(params: &HashMap<String, String>) -> html::LeadQuery<'_> {
+    html::LeadQuery {
+        event: param(params, "event"),
+        warmth: param(params, "warmth"),
+        owner: param(params, "owner"),
+        tag: param(params, "tag"),
+        status: param(params, "status"),
+        due: matches!(param(params, "due"), Some("1" | "on" | "true")),
+        sort: param(params, "sort"),
+        dir: param(params, "dir").unwrap_or("asc"),
+    }
+}
+
+/// A CRM page, or the "not enabled" page when the repo has no `kind`.
+fn crm_page(
+    state: &AppState,
+    kind: EntityKind,
+    path: &str,
+    f: impl FnOnce(&Page) -> String,
+) -> Result<Html<String>, (StatusCode, Html<String>)> {
+    if !state.cfg.entity_available(&kind) {
+        return Err(not_available(state, kind, path));
+    }
+    Ok(state.render(f))
+}
+
+/// The lead pipeline board. Stage and sort parameters belong to the table.
+async fn handle_leads_board(
+    State(state): State<Arc<AppState>>,
+    Query(params): Params,
+) -> Result<Html<String>, (StatusCode, Html<String>)> {
+    let query = html::LeadQuery {
+        status: None,
+        sort: None,
+        ..lead_query(&params)
+    };
+    crm_page(&state, EntityKind::Lead, "/leads", |page| {
+        html::leads_board_page(page, &query)
+    })
+}
+
+async fn handle_leads_list(
+    State(state): State<Arc<AppState>>,
+    Query(params): Params,
+) -> Result<Html<String>, (StatusCode, Html<String>)> {
+    let query = lead_query(&params);
+    crm_page(&state, EntityKind::Lead, "/leads/list", |page| {
+        html::leads_list_page(page, &query)
+    })
+}
+
+/// Quick capture; `?event=EVT-001` preselects the event.
+async fn handle_lead_new(
+    State(state): State<Arc<AppState>>,
+    Query(params): Params,
+) -> Result<Html<String>, (StatusCode, Html<String>)> {
+    let event = param(&params, "event");
+    crm_page(&state, EntityKind::Lead, "/leads/new", |page| {
+        html::new_lead_page(page, event)
+    })
+}
+
+async fn handle_events(
+    State(state): State<Arc<AppState>>,
+) -> Result<Html<String>, (StatusCode, Html<String>)> {
+    crm_page(&state, EntityKind::Event, "/events", html::events_page)
+}
+
+async fn handle_event_new(
+    State(state): State<Arc<AppState>>,
+) -> Result<Html<String>, (StatusCode, Html<String>)> {
+    crm_page(
+        &state,
+        EntityKind::Event,
+        "/events/new",
+        html::new_event_page,
+    )
 }
 
 /// The meeting calendar for `?month=YYYY-MM` (this month by default);

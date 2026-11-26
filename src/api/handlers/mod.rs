@@ -3,6 +3,7 @@
 pub mod creates;
 pub mod entities;
 pub mod health;
+pub mod leads;
 pub mod maintenance;
 pub mod meta;
 pub mod notes;

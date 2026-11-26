@@ -6,6 +6,7 @@ pub(crate) mod detail;
 pub(crate) mod errors;
 pub(crate) mod files;
 mod flight_plan;
+pub(crate) mod leads;
 pub(crate) mod lists;
 pub(crate) mod preview;
 pub(crate) mod search;

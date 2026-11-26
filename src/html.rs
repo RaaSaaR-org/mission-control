@@ -40,6 +40,10 @@ pub use pages::dashboard::dashboard_page;
 pub use pages::detail::{detail_fragments, detail_page};
 pub use pages::errors::{error_page, not_available_page, not_found_page};
 pub use pages::files::file_page;
+pub use pages::leads::{
+    events_page, lead_card, leads_board_page, leads_list_page, new_event_page, new_lead_page,
+    LeadQuery,
+};
 pub use pages::lists::{list_page, sort_entities, ListQuery};
 pub use pages::milestones::milestones_page;
 pub use pages::preview::{preview_card, preview_not_found};
@@ -101,6 +105,7 @@ const NAV_GROUPS: &[(&str, &[EntityKind])] = &[
             EntityKind::Project,
         ],
     ),
+    ("Network", &[EntityKind::Lead, EntityKind::Event]),
     ("Knowledge", &[EntityKind::Research, EntityKind::Proposal]),
 ];
 
@@ -113,7 +118,10 @@ fn go_key(kind: EntityKind) -> Option<&'static str> {
         EntityKind::Project => "p",
         EntityKind::Research => "r",
         EntityKind::Sprint => "s",
-        EntityKind::Contact | EntityKind::Proposal | EntityKind::Milestone => return None,
+        EntityKind::Lead => "n",
+        EntityKind::Contact | EntityKind::Proposal | EntityKind::Milestone | EntityKind::Event => {
+            return None
+        }
     })
 }
 

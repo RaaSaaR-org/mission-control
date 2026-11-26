@@ -8,7 +8,7 @@ use crate::frontmatter;
 use colored::*;
 use serde_json::{json, Value as JsonValue};
 
-const KINDS: [EntityKind; 9] = [
+const KINDS: [EntityKind; 11] = [
     EntityKind::Customer,
     EntityKind::Project,
     EntityKind::Contact,
@@ -18,6 +18,8 @@ const KINDS: [EntityKind; 9] = [
     EntityKind::Sprint,
     EntityKind::Milestone,
     EntityKind::Proposal,
+    EntityKind::Lead,
+    EntityKind::Event,
 ];
 
 const RECENT: usize = 5;

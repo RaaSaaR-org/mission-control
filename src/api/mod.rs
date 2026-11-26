@@ -145,7 +145,7 @@ impl Modify for SecurityAddon {
     info(
         title = "MissionControl REST API",
         version = env!("CARGO_PKG_VERSION"),
-        description = "HTTP/JSON surface for mc — list, create, and update tasks, customers, projects, meetings, research, sprints, proposals, and contacts.",
+        description = "HTTP/JSON surface for mc — list, create, and update tasks, customers, projects, meetings, research, sprints, proposals, contacts, leads and events.",
         license(name = "MIT")
     ),
     modifiers(&SecurityAddon),
@@ -173,6 +173,13 @@ impl Modify for SecurityAddon {
         handlers::creates::create_milestone,
         handlers::creates::create_proposal,
         handlers::creates::create_contact,
+        handlers::leads::list_leads,
+        handlers::leads::create_lead,
+        handlers::leads::update_lead,
+        handlers::leads::move_lead,
+        handlers::leads::log_interaction,
+        handlers::leads::convert_lead,
+        handlers::leads::create_event,
         handlers::maintenance::rebuild_index,
         handlers::maintenance::run_validate,
     ),
@@ -212,11 +219,21 @@ impl Modify for SecurityAddon {
         crate::api::schemas::AddCommentBody,
         crate::api::schemas::CommentView,
         crate::api::schemas::CommentResult,
+        crate::api::schemas::CreateLead,
+        crate::api::schemas::CreateEvent,
+        crate::api::schemas::UpdateLead,
+        crate::api::schemas::UpdateLeadResult,
+        crate::api::schemas::MoveLeadBody,
+        crate::api::schemas::LogInteractionBody,
+        crate::api::schemas::InteractionResult,
+        crate::api::schemas::ConvertLeadBody,
+        crate::api::schemas::ConvertLeadResult,
     )),
     tags(
         (name = "meta", description = "Repository metadata (config, status)"),
         (name = "entities", description = "Generic entity CRUD"),
         (name = "tasks", description = "Task list, next actionable tasks, field updates and status transitions"),
+        (name = "leads", description = "CRM: leads (people met at events), their pipeline stage, interaction log and conversion into contacts; events"),
         (name = "maintenance", description = "Index rebuild and validation")
     )
 )]
@@ -290,6 +307,22 @@ pub fn build_router(cfg: ResolvedConfig, server_cfg: &ApiServerConfig) -> Router
         .route("/v1/milestones", post(handlers::creates::create_milestone))
         .route("/v1/proposals", post(handlers::creates::create_proposal))
         .route("/v1/contacts", post(handlers::creates::create_contact))
+        // Leads: GET lists with the lead filter set; POST creates.
+        .route(
+            "/v1/leads",
+            get(handlers::leads::list_leads).post(handlers::leads::create_lead),
+        )
+        .route("/v1/leads/{id}", patch(handlers::leads::update_lead))
+        .route("/v1/leads/{id}/move", post(handlers::leads::move_lead))
+        .route(
+            "/v1/leads/{id}/interactions",
+            post(handlers::leads::log_interaction),
+        )
+        .route(
+            "/v1/leads/{id}/convert",
+            post(handlers::leads::convert_lead),
+        )
+        .route("/v1/events", post(handlers::leads::create_event))
         .route("/v1/index", post(handlers::maintenance::rebuild_index))
         // Validation only reads, so GET works with read-only tokens; POST
         // stays for existing clients and is treated as a read too.

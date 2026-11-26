@@ -124,6 +124,13 @@ Default `127.0.0.1`. Only set `--bind 0.0.0.0` behind a trusted reverse proxy th
 | POST | `/v1/contacts` | write | `{name, customer, role?, email?, phone?, status?, tags?}` |
 | PATCH | `/v1/tasks/{id}` | write | `{title?, status?, priority?, owner?, sprint?, milestone?, due_date?, projects?, customers?, tags?, depends_on?}` — change only the given fields (same as `mc task set` and the MCP `update_task` tool). Empty values clear (`""`, `[]`); list fields replace the whole list; `project`/`customer` are accepted for `projects`/`customers`. Validated like a create (references must exist, `404` otherwise) and nothing is written if a value is invalid; unknown fields are a `400`. A status change moves the file like `move`. Returns `{id, changed, old_status, new_status, path}`, `changed` listing the fields whose value actually changed. |
 | POST | `/v1/tasks/{id}/move` | write | `{status, sprint?}` — also moves the file between `todo/` and `done/` if the status crosses the active boundary. Returns `{id, old_status, new_status, path}`. Only tasks can be moved. |
+| GET | `/v1/leads` | read | Leads with the lead filter set: `status`, `tag`, `event`, `owner`, `warmth`, `introduce_to`, `follow_up_due=true` (open leads whose `next_follow_up` is today or earlier, oldest first). Entries are shaped like `/v1/entities/lead`. `403` when leads aren't enabled. |
+| POST | `/v1/leads` | write | `{name, company?, role?, email?, phone?, linkedin?, website?, source?, event?, introduce_to?, warmth?, next_follow_up?, owner?, status?, tags?, notes?}` — a person met at an event (see [crm.md](crm.md)). `event` and `introduce_to` must exist (`404` otherwise); `source` (`event`, `card`, `linkedin`, `referral`, `inbound`, `other`) and `warmth` (`hot`, `warm`, `cold`) are validated. |
+| PATCH | `/v1/leads/{id}` | write | Any subset of the create fields plus `last_contact`, without `notes` — same semantics as `PATCH /v1/tasks/{id}` (empty values clear, lists replace, unknown fields are a `400`). Returns `{id, changed, old_status, new_status, path}`. |
+| POST | `/v1/leads/{id}/move` | write | `{status}` — change the pipeline stage (`statuses.lead`). Returns `{id, changed, old_status, new_status, path}`. |
+| POST | `/v1/leads/{id}/interactions` | write | `{type, note, date?, next_follow_up?}` — prepend `- date · type · note` to the lead's `## Interactions`; sets `last_contact` (not for `note`), moves `new` → `contacted`. Returns `{id, date, type, note, line, last_contact, next_follow_up, old_status, new_status, path}`. |
+| POST | `/v1/leads/{id}/convert` | write | `{customer?, new_customer_name?}` — create a contact from the lead under an existing customer, a new prospect, or (neither given) the customer named like the lead's company. `409` if already converted, `400` when no customer fits. Returns `{id, contact, contact_path, customer, customer_created, old_status, new_status, path}`. |
+| POST | `/v1/events` | write | `{title, date?, end_date?, location?, type?, url?, owner?, status?, tags?}` — `type` is `trade-fair`, `conference`, `meetup`, `workshop` or `other` (default). List events with `GET /v1/entities/events`. |
 | GET | `/v1/entities/{kind}/{id}/checklist` | read | `- [ ]` checklist items `{id, items: [{index, line, checked, text}], done, total}` (code blocks and task/meeting comments excluded). |
 | POST | `/v1/entities/{kind}/{id}/checklist/{item}` | write | `{checked?, expect_text?}` — tick (default) or untick item `item` (1-based). Only the box character changes. A stale `expect_text` is `409 conflict`. |
 | POST | `/v1/entities/{kind}/{id}/comments` | write | `{text, author?}` — comment on a task or meeting; appended under `## Comments` as `### YYYY-MM-DD HH:MM · Author`. `201` with `{id, comment, count, path}`. |
@@ -139,12 +146,13 @@ Create bodies are validated before anything is written:
 - Omitted or blank `status` falls back to the kind's first configured status; any other value must be one of the configured statuses.
 - Dates (`date`, `start_date`, `end_date`, `due_date`) must be `YYYY-MM-DD`; a sprint's `end_date` and a milestone's `due_date` may not be before its `start_date`.
 - `priority` must be 1-4.
+- Lead `source` and `warmth`, event `type` and interaction `type` must be one of their documented values (case-insensitive).
 - Referenced scopes (`project`/`customer` on tasks, `customer` on contacts) must exist. IDs may be given plain (`CUST-001`) or wiki-linked (`[[CUST-001]]`).
 - Two meetings with the same date and title get distinct files (`…-standup.md`, `…-standup-2.md`) instead of overwriting each other.
 
 Violations return `400 bad-request` with a message starting with `Invalid …` (or `404` for a missing scope).
 
-A successful create returns `201 Created` and `{id, name, path}` (`path` relative to the repo root). For kinds whose primary field is `title` (meetings, research, tasks, sprints, milestones, proposals), the `name` field of the response carries the title — the server normalizes the payload so consumers always see `name`.
+A successful create returns `201 Created` and `{id, name, path}` (`path` relative to the repo root). For kinds whose primary field is `title` (meetings, research, tasks, sprints, milestones, proposals, events), the `name` field of the response carries the title — the server normalizes the payload so consumers always see `name`.
 
 ---
 

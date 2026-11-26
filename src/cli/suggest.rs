@@ -7,7 +7,7 @@ use crate::entity::EntityKind;
 use crate::error::{McError, McResult};
 use crate::frontmatter;
 
-const ALL_KINDS: [EntityKind; 9] = [
+const ALL_KINDS: [EntityKind; 11] = [
     EntityKind::Customer,
     EntityKind::Contact,
     EntityKind::Project,
@@ -17,6 +17,8 @@ const ALL_KINDS: [EntityKind; 9] = [
     EntityKind::Sprint,
     EntityKind::Milestone,
     EntityKind::Proposal,
+    EntityKind::Lead,
+    EntityKind::Event,
 ];
 
 /// Edit distance counting insertions, deletions, substitutions and adjacent

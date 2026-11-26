@@ -9,6 +9,12 @@
 //! - `PATCH /api/tasks/{id}`     change title, status, priority, owner, sprint, due date, project or customer
 //! - `POST /api/entities/{id}/checks`   tick or untick a checklist item
 //! - `POST /api/entities/{id}/comments` comment on a task or meeting
+//! - `POST /api/leads`                 create a lead (same logic as `mc new lead`)
+//! - `PATCH /api/leads/{id}`           change lead fields (`mc lead set`)
+//! - `POST /api/leads/{id}/move`       change a lead's stage (`mc lead move`)
+//! - `POST /api/leads/{id}/interactions` log an interaction (`mc lead log`)
+//! - `POST /api/leads/{id}/convert`    convert a lead into a contact (`mc lead convert`)
+//! - `POST /api/events`                create an event (`mc new event`)
 //!
 //! Write responses carry the updated task, freshly rendered HTML fragments
 //! (board card, title block, field rail) so the page can update in place, and
@@ -18,7 +24,7 @@
 
 use super::AppState;
 use crate::checklist::{self, Target};
-use crate::commands::{new as new_cmd, task as task_cmd};
+use crate::commands::{lead as lead_cmd, new as new_cmd, task as task_cmd};
 use crate::comments;
 use crate::config::ResolvedConfig;
 use crate::data::{self, EntityRecord};
@@ -85,7 +91,11 @@ impl ApiError {
 impl From<McError> for ApiError {
     fn from(e: McError) -> Self {
         match e {
-            McError::EntityNotFound(id) => Self::not_found(&id),
+            McError::EntityNotFound(id) => Self::new(
+                StatusCode::NOT_FOUND,
+                "not_found",
+                format!("No entity with ID {id}."),
+            ),
             McError::InvalidId(_) => {
                 Self::new(StatusCode::BAD_REQUEST, "invalid_id", e.to_string())
             }
@@ -228,6 +238,8 @@ pub(super) fn content_version(cfg: &ResolvedConfig) -> String {
         &cfg.sprints_dir,
         &cfg.milestones_dir,
         &cfg.proposals_dir,
+        &cfg.leads_dir,
+        &cfg.events_dir,
     ];
     dirs.sort();
     dirs.dedup();
@@ -809,4 +821,477 @@ pub(super) async fn add_comment(
 
 fn too_long_comment() -> String {
     format!("Keep comments under {MAX_COMMENT} characters.")
+}
+
+// ── Leads and events ────────────────────────────────────────────────────
+
+/// Lead IDs must look exactly like `LEAD-012` before anything is read.
+fn find_lead(cfg: &ResolvedConfig, id: &str) -> Result<EntityRecord, ApiError> {
+    if !cfg.entity_available(&EntityKind::Lead) {
+        return Err(ApiError::forbidden(
+            "not_available",
+            "Leads are not enabled in this repo.",
+        ));
+    }
+    let prefix = &cfg.id_prefixes.lead;
+    let valid = id
+        .strip_prefix(prefix.as_str())
+        .and_then(|rest| rest.strip_prefix('-'))
+        .is_some_and(|n| !n.is_empty() && n.len() <= 9 && n.bytes().all(|b| b.is_ascii_digit()));
+    if !valid {
+        return Err(ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "invalid_id",
+            format!("Lead IDs look like {prefix}-001."),
+        ));
+    }
+    match data::find_entity_by_id(id, cfg) {
+        Ok(rec) if rec.kind == EntityKind::Lead => Ok(rec),
+        Ok(_) | Err(McError::EntityNotFound(_)) => Err(ApiError::new(
+            StatusCode::NOT_FOUND,
+            "not_found",
+            format!("No lead with ID {id}."),
+        )),
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// An optional single-line text field: trimmed, `None` when empty.
+fn opt_text(
+    field: &'static str,
+    v: &Option<String>,
+    max: usize,
+) -> Result<Option<String>, ApiError> {
+    v.as_deref()
+        .map(|s| check_text(field, s, max))
+        .transpose()
+        .map(|s| s.filter(|s| !s.is_empty()))
+}
+
+/// A changed text field for an update: `Some("")` clears it.
+fn upd_text(
+    field: &'static str,
+    v: &Option<String>,
+    max: usize,
+) -> Result<Option<String>, ApiError> {
+    v.as_deref().map(|s| check_text(field, s, max)).transpose()
+}
+
+fn opt_date(field: &'static str, v: &Option<String>) -> Result<Option<String>, ApiError> {
+    match v.as_deref().map(str::trim) {
+        None | Some("") => Ok(None),
+        Some(d) if new_cmd::validate_date(d, field).is_ok() => Ok(Some(d.to_string())),
+        Some(_) => Err(ApiError::invalid(field, "Use a date like 2026-10-31.")),
+    }
+}
+
+/// A changed date for an update: empty clears it.
+fn upd_date(field: &'static str, v: &Option<String>) -> Result<Option<String>, ApiError> {
+    match v.as_deref().map(str::trim) {
+        None => Ok(None),
+        Some("") => Ok(Some(String::new())),
+        Some(_) => opt_date(field, v),
+    }
+}
+
+/// Tags and other short lists: trimmed single-line items.
+fn check_list(field: &'static str, items: &[String]) -> Result<Vec<String>, ApiError> {
+    let mut out = Vec::new();
+    for item in items {
+        let item = check_text(field, item, MAX_OWNER)?;
+        if !item.is_empty() && !out.contains(&item) {
+            out.push(item);
+        }
+    }
+    Ok(out)
+}
+
+/// The lead as JSON plus its freshly rendered board card.
+fn lead_response(
+    state: &AppState,
+    id: &str,
+    mut extra: JsonValue,
+    status: StatusCode,
+) -> ApiResult {
+    let cfg = &state.cfg;
+    let catalog = Catalog::load(cfg);
+    let page = state.page(&catalog);
+    let rec = match catalog
+        .records
+        .iter()
+        .find(|r| r.id == id && r.kind == EntityKind::Lead)
+    {
+        Some(r) => r.clone(),
+        None => find_lead(cfg, id)?,
+    };
+    let fm = &rec.frontmatter;
+    extra["lead"] = json!({
+        "id": rec.id,
+        "name": html::display_name(&rec),
+        "status": frontmatter::get_str_or(fm, "status", ""),
+        "next_follow_up": frontmatter::get_str_or(fm, "next_follow_up", ""),
+        "last_contact": frontmatter::get_str_or(fm, "last_contact", ""),
+        "converted_to": frontmatter::get_link_str(fm, "converted_to").unwrap_or(""),
+    });
+    extra["html"] = json!({
+        "card": html::prefix_base_path(&html::lead_card(&page, &rec), &state.base_path),
+    });
+    extra["href"] = json!(format!("/entity/{}", rec.id));
+    extra["version"] = json!(content_version(cfg));
+    ok(status, extra)
+}
+
+const MAX_NAME: usize = 120;
+const MAX_URL: usize = 300;
+const MAX_NOTE: usize = 4000;
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct CreateLeadBody {
+    name: String,
+    company: Option<String>,
+    role: Option<String>,
+    email: Option<String>,
+    phone: Option<String>,
+    linkedin: Option<String>,
+    website: Option<String>,
+    source: Option<String>,
+    event: Option<String>,
+    #[serde(default)]
+    introduce_to: Vec<String>,
+    warmth: Option<String>,
+    next_follow_up: Option<String>,
+    owner: Option<String>,
+    status: Option<String>,
+    #[serde(default)]
+    tags: Vec<String>,
+    notes: Option<String>,
+}
+
+/// Create a lead with the same logic as `mc new lead`.
+pub(super) async fn create_lead(
+    State(state): State<Arc<AppState>>,
+    body: Result<Json<CreateLeadBody>, JsonRejection>,
+) -> ApiResult {
+    let Json(body) = body?;
+    let cfg = &state.cfg;
+    let name = check_text("name", &body.name, MAX_NAME)?;
+    if name.is_empty() {
+        return Err(ApiError::invalid("name", "Give the lead a name."));
+    }
+    let notes = body
+        .notes
+        .as_deref()
+        .map(str::trim)
+        .filter(|n| !n.is_empty());
+    if notes.is_some_and(|n| n.chars().count() > MAX_NOTE) {
+        return Err(ApiError::invalid(
+            "notes",
+            format!("Keep the note under {MAX_NOTE} characters."),
+        ));
+    }
+    let input = new_cmd::LeadInput {
+        name,
+        company: opt_text("company", &body.company, MAX_NAME)?,
+        role: opt_text("role", &body.role, MAX_NAME)?,
+        email: opt_text("email", &body.email, MAX_NAME)?,
+        phone: opt_text("phone", &body.phone, MAX_OWNER)?,
+        linkedin: opt_text("linkedin", &body.linkedin, MAX_URL)?,
+        website: opt_text("website", &body.website, MAX_URL)?,
+        source: opt_text("source", &body.source, MAX_OWNER)?,
+        event: opt_text("event", &body.event, MAX_OWNER)?,
+        introduce_to: check_list("introduce_to", &body.introduce_to)?,
+        warmth: opt_text("warmth", &body.warmth, MAX_OWNER)?,
+        next_follow_up: opt_date("next_follow_up", &body.next_follow_up)?,
+        owner: opt_text("owner", &body.owner, MAX_OWNER)?,
+        status: opt_text("status", &body.status, MAX_OWNER)?,
+        tags: check_list("tags", &body.tags)?,
+        notes: notes.map(str::to_string),
+    };
+    let _write = state.write_lock.lock().await;
+    let prev = content_version(cfg);
+    let created = new_cmd::create_lead(cfg, &input)?;
+    lead_response(
+        &state,
+        &created.id,
+        json!({"prev_version": prev}),
+        StatusCode::CREATED,
+    )
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct UpdateLeadBody {
+    name: Option<String>,
+    company: Option<String>,
+    role: Option<String>,
+    email: Option<String>,
+    phone: Option<String>,
+    linkedin: Option<String>,
+    website: Option<String>,
+    source: Option<String>,
+    event: Option<String>,
+    introduce_to: Option<Vec<String>>,
+    warmth: Option<String>,
+    next_follow_up: Option<String>,
+    last_contact: Option<String>,
+    owner: Option<String>,
+    status: Option<String>,
+    tags: Option<Vec<String>>,
+}
+
+/// Change lead fields with the same logic as `mc lead set`.
+pub(super) async fn update_lead(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    body: Result<Json<UpdateLeadBody>, JsonRejection>,
+) -> ApiResult {
+    let Json(body) = body?;
+    let cfg = &state.cfg;
+    let name = upd_text("name", &body.name, MAX_NAME)?;
+    if name.as_deref() == Some("") {
+        return Err(ApiError::invalid("name", "A lead needs a name."));
+    }
+    let update = lead_cmd::LeadUpdate {
+        name,
+        company: upd_text("company", &body.company, MAX_NAME)?,
+        role: upd_text("role", &body.role, MAX_NAME)?,
+        email: upd_text("email", &body.email, MAX_NAME)?,
+        phone: upd_text("phone", &body.phone, MAX_OWNER)?,
+        linkedin: upd_text("linkedin", &body.linkedin, MAX_URL)?,
+        website: upd_text("website", &body.website, MAX_URL)?,
+        source: upd_text("source", &body.source, MAX_OWNER)?,
+        event: upd_text("event", &body.event, MAX_OWNER)?,
+        introduce_to: body
+            .introduce_to
+            .as_deref()
+            .map(|l| check_list("introduce_to", l))
+            .transpose()?,
+        warmth: upd_text("warmth", &body.warmth, MAX_OWNER)?,
+        next_follow_up: upd_date("next_follow_up", &body.next_follow_up)?,
+        last_contact: upd_date("last_contact", &body.last_contact)?,
+        owner: upd_text("owner", &body.owner, MAX_OWNER)?,
+        status: upd_text("status", &body.status, MAX_OWNER)?.filter(|s| !s.is_empty()),
+        tags: body
+            .tags
+            .as_deref()
+            .map(|l| check_list("tags", l))
+            .transpose()?,
+    };
+    if update.is_empty() {
+        return Err(ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "empty",
+            "Nothing to change.",
+        ));
+    }
+    let _write = state.write_lock.lock().await;
+    let prev = content_version(cfg);
+    let lead = find_lead(cfg, &id)?;
+    let updated = lead_cmd::update_lead(cfg, &lead.id, &update)?;
+    lead_response(
+        &state,
+        &lead.id,
+        json!({
+            "changed": updated.changed,
+            "old_status": updated.old_status,
+            "prev_version": prev,
+        }),
+        StatusCode::OK,
+    )
+}
+
+/// Move a lead to another stage (the board's drag and drop and the stage route).
+pub(super) async fn move_lead(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    body: Result<Json<MoveBody>, JsonRejection>,
+) -> ApiResult {
+    let Json(body) = body?;
+    let cfg = &state.cfg;
+    let status = body.status.trim().to_string();
+    let valid = EntityKind::Lead.statuses(cfg);
+    if !valid.contains(&status) {
+        return Err(ApiError::invalid(
+            "status",
+            format!(
+                "Unknown stage “{status}”. Use one of: {}.",
+                valid.join(", ")
+            ),
+        ));
+    }
+    let _write = state.write_lock.lock().await;
+    let prev = content_version(cfg);
+    let lead = find_lead(cfg, &id)?;
+    let old = frontmatter::get_str_or(&lead.frontmatter, "status", "").to_string();
+    if old != status {
+        lead_cmd::move_lead(cfg, &lead.id, &status)?;
+    }
+    lead_response(
+        &state,
+        &lead.id,
+        json!({"old_status": old, "prev_version": prev}),
+        StatusCode::OK,
+    )
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct InteractionBody {
+    #[serde(rename = "type")]
+    kind: String,
+    note: String,
+    date: Option<String>,
+    next_follow_up: Option<String>,
+}
+
+/// Log an interaction with the same logic as `mc lead log`.
+pub(super) async fn log_interaction(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    body: Result<Json<InteractionBody>, JsonRejection>,
+) -> ApiResult {
+    let Json(body) = body?;
+    let cfg = &state.cfg;
+    let kind = body.kind.trim().to_ascii_lowercase();
+    if !lead_cmd::INTERACTION_TYPES.contains(&kind.as_str()) {
+        return Err(ApiError::invalid(
+            "type",
+            format!("Pick one of: {}.", lead_cmd::INTERACTION_TYPES.join(", ")),
+        ));
+    }
+    let note = body.note.trim();
+    if note.is_empty() {
+        return Err(ApiError::invalid("note", "Write what happened first."));
+    }
+    if note.chars().count() > MAX_NOTE {
+        return Err(ApiError::invalid(
+            "note",
+            format!("Keep the note under {MAX_NOTE} characters."),
+        ));
+    }
+    let date = opt_date("date", &body.date)?;
+    if date
+        .as_deref()
+        .is_some_and(|d| d > crate::util::today_str().as_str())
+    {
+        return Err(ApiError::invalid(
+            "date",
+            "That date is in the future. Log what already happened; set a next follow-up for what comes next.",
+        ));
+    }
+    let input = lead_cmd::Interaction {
+        date,
+        kind,
+        note: note.to_string(),
+        next_follow_up: opt_date("next_follow_up", &body.next_follow_up)?,
+    };
+    let _write = state.write_lock.lock().await;
+    let prev = content_version(cfg);
+    let lead = find_lead(cfg, &id)?;
+    let logged = lead_cmd::log_interaction(cfg, &lead.id, &input)?;
+    lead_response(
+        &state,
+        &lead.id,
+        json!({
+            "line": logged.line,
+            "old_status": logged.old_status,
+            "prev_version": prev,
+        }),
+        StatusCode::OK,
+    )
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct ConvertBody {
+    customer: Option<String>,
+    new_customer_name: Option<String>,
+    #[serde(default)]
+    link_existing: bool,
+}
+
+/// Convert a lead into a contact with the same logic as `mc lead convert`.
+pub(super) async fn convert_lead(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    body: Result<Json<ConvertBody>, JsonRejection>,
+) -> ApiResult {
+    let Json(body) = body?;
+    let cfg = &state.cfg;
+    let input = lead_cmd::ConvertInput {
+        customer: opt_text("customer", &body.customer, MAX_OWNER)?,
+        new_customer_name: opt_text("new_customer_name", &body.new_customer_name, MAX_NAME)?,
+        link_existing: body.link_existing,
+    };
+    let _write = state.write_lock.lock().await;
+    let prev = content_version(cfg);
+    let lead = find_lead(cfg, &id)?;
+    let converted = lead_cmd::convert_lead(cfg, &lead.id, &input)?;
+    lead_response(
+        &state,
+        &lead.id,
+        json!({
+            "contact": converted.contact,
+            "customer": converted.customer,
+            "customer_created": converted.customer_created,
+            "contact_created": converted.contact_created,
+            "contact_href": format!("/entity/{}", converted.contact),
+            "prev_version": prev,
+        }),
+        StatusCode::OK,
+    )
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct CreateEventBody {
+    title: String,
+    date: Option<String>,
+    end_date: Option<String>,
+    location: Option<String>,
+    #[serde(rename = "type")]
+    event_type: Option<String>,
+    url: Option<String>,
+    owner: Option<String>,
+    status: Option<String>,
+    #[serde(default)]
+    tags: Vec<String>,
+}
+
+/// Create an event with the same logic as `mc new event`.
+pub(super) async fn create_event(
+    State(state): State<Arc<AppState>>,
+    body: Result<Json<CreateEventBody>, JsonRejection>,
+) -> ApiResult {
+    let Json(body) = body?;
+    let cfg = &state.cfg;
+    let title = check_text("title", &body.title, MAX_TITLE)?;
+    if title.is_empty() {
+        return Err(ApiError::invalid("title", "Give the event a title."));
+    }
+    let input = new_cmd::EventInput {
+        title,
+        date: opt_date("date", &body.date)?,
+        end_date: opt_date("end_date", &body.end_date)?,
+        location: opt_text("location", &body.location, MAX_NAME)?,
+        event_type: opt_text("type", &body.event_type, MAX_OWNER)?,
+        url: opt_text("url", &body.url, MAX_URL)?,
+        owner: opt_text("owner", &body.owner, MAX_OWNER)?,
+        status: opt_text("status", &body.status, MAX_OWNER)?,
+        tags: check_list("tags", &body.tags)?,
+    };
+    let _write = state.write_lock.lock().await;
+    let prev = content_version(cfg);
+    let created = new_cmd::create_event(cfg, &input)?;
+    ok(
+        StatusCode::CREATED,
+        json!({
+            "id": created.id,
+            "title": created.name,
+            "href": format!("/entity/{}", created.id),
+            "prev_version": prev,
+            "version": content_version(cfg),
+        }),
+    )
 }

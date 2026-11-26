@@ -27,6 +27,14 @@ pub const DEFAULT_RESEARCH_AGENTS: [&str; 4] = ["claude", "gemini", "chatgpt", "
 pub const PROPOSAL_TYPES: [&str; 3] = ["architecture", "feature", "process"];
 /// Task priority used when none is given (3 = medium).
 pub const DEFAULT_PRIORITY: u32 = 3;
+/// Where a lead came from (`source`).
+pub const LEAD_SOURCES: [&str; 6] = ["event", "card", "linkedin", "referral", "inbound", "other"];
+/// How warm a lead is (`warmth`).
+pub const LEAD_WARMTH: [&str; 3] = ["hot", "warm", "cold"];
+/// Kinds of events (`type`); the first is not the default, `other` is.
+pub const EVENT_TYPES: [&str; 5] = ["trade-fair", "conference", "meetup", "workshop", "other"];
+/// Event type used when none is given.
+pub const DEFAULT_EVENT_TYPE: &str = "other";
 
 // ---------------------------------------------------------------------------
 // Inputs and results
@@ -145,6 +153,51 @@ pub struct ContactInput {
     pub tags: Vec<String>,
 }
 
+/// A person we met (business card, event, LinkedIn), managed in the lead
+/// pipeline until it becomes a contact. See `docs/crm.md`.
+#[derive(Debug, Clone, Default)]
+pub struct LeadInput {
+    pub name: String,
+    pub company: Option<String>,
+    pub role: Option<String>,
+    pub email: Option<String>,
+    pub phone: Option<String>,
+    pub linkedin: Option<String>,
+    pub website: Option<String>,
+    /// One of [`LEAD_SOURCES`]; defaults to `event` when an event is given.
+    pub source: Option<String>,
+    /// Event ID (must exist), stored as `[[EVT-NNN|Title]]`.
+    pub event: Option<String>,
+    /// Customer IDs (partners) to introduce the lead to (must exist).
+    pub introduce_to: Vec<String>,
+    /// One of [`LEAD_WARMTH`].
+    pub warmth: Option<String>,
+    /// `YYYY-MM-DD`.
+    pub next_follow_up: Option<String>,
+    pub owner: Option<String>,
+    pub status: Option<String>,
+    pub tags: Vec<String>,
+    /// Free text for the `## Notes` section.
+    pub notes: Option<String>,
+}
+
+/// A trade fair, conference or meetup where we meet leads.
+#[derive(Debug, Clone, Default)]
+pub struct EventInput {
+    pub title: String,
+    /// `YYYY-MM-DD`, defaults to today.
+    pub date: Option<String>,
+    /// `YYYY-MM-DD`, not before `date`.
+    pub end_date: Option<String>,
+    pub location: Option<String>,
+    /// One of [`EVENT_TYPES`], defaults to [`DEFAULT_EVENT_TYPE`].
+    pub event_type: Option<String>,
+    pub url: Option<String>,
+    pub owner: Option<String>,
+    pub status: Option<String>,
+    pub tags: Vec<String>,
+}
+
 macro_rules! titled_input {
     ($($ty:ident . $field:ident),* $(,)?) => {$(
         impl $ty {
@@ -163,6 +216,8 @@ titled_input!(
     SprintInput.title,
     MilestoneInput.title,
     ProposalInput.title,
+    LeadInput.name,
+    EventInput.title,
 );
 
 impl ContactInput {
@@ -306,6 +361,80 @@ impl ContactInput {
     }
 }
 
+impl LeadInput {
+    pub fn normalize(&mut self, cfg: &ResolvedConfig) -> McResult<()> {
+        self.status = canonical_status(&self.status, EntityKind::Lead, cfg)?;
+        self.source = canonical_choice(&self.source, "lead source", &LEAD_SOURCES)?;
+        self.warmth = canonical_choice(&self.warmth, "warmth", &LEAD_WARMTH)?;
+        if let Some(d) = present(&self.next_follow_up) {
+            validate_date(d, "follow-up date")?;
+        }
+        self.event = resolve_opt_ref(cfg, EntityKind::Event, &self.event)?;
+        self.introduce_to = resolve_refs(cfg, EntityKind::Customer, &self.introduce_to)?;
+        Ok(())
+    }
+}
+
+impl EventInput {
+    pub fn normalize(&mut self, cfg: &ResolvedConfig) -> McResult<()> {
+        self.status = canonical_status(&self.status, EntityKind::Event, cfg)?;
+        self.event_type = canonical_choice(&self.event_type, "event type", &EVENT_TYPES)?;
+        let start = present(&self.date)
+            .map(|d| validate_date(d, "event date"))
+            .transpose()?;
+        if let Some(end_date) = present(&self.end_date) {
+            let end = validate_date(end_date, "end date")?;
+            let start = start.unwrap_or_else(|| chrono::Local::now().date_naive());
+            if end < start {
+                return Err(McError::usage(
+                    format!(
+                        "Invalid end date '{end_date}': it is before the event date '{}'",
+                        start.format("%Y-%m-%d")
+                    ),
+                    None,
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// A fixed-vocabulary value (`source`, `warmth`, event `type`) in its
+/// canonical lower-case spelling; `None` when missing or blank, else a usage
+/// error listing the valid values.
+pub(crate) fn canonical_choice(
+    value: &Option<String>,
+    field: &str,
+    valid: &[&str],
+) -> McResult<Option<String>> {
+    let Some(v) = present(value) else {
+        return Ok(None);
+    };
+    let wanted = v.to_lowercase().replace(['_', ' '], "-");
+    match valid.iter().find(|c| **c == wanted) {
+        Some(c) => Ok(Some(c.to_string())),
+        None => Err(McError::usage(
+            format!("Invalid {field} '{v}'. Valid values: {}", valid.join(", ")),
+            suggest::did_you_mean(v, valid.iter().copied()).map(|s| format!("did you mean '{s}'?")),
+        )),
+    }
+}
+
+/// `[[ID|Name]]` for an existing entity (its name or title as the label),
+/// or plain `[[ID]]` when it has none. Used for the lead's references and
+/// a contact's `customer`.
+pub(crate) fn labeled_link(cfg: &ResolvedConfig, id: &str) -> String {
+    let label = data::find_entity_by_id(id, cfg)
+        .ok()
+        .and_then(|r| {
+            ["name", "title"]
+                .into_iter()
+                .find_map(|k| frontmatter::get_str(&r.frontmatter, k).map(str::to_string))
+        })
+        .unwrap_or_default();
+    frontmatter::wrap_wikilink_labeled(id, &label)
+}
+
 /// A freshly created entity.
 #[derive(Debug, Clone)]
 pub struct Created {
@@ -322,7 +451,9 @@ impl Created {
     /// `name`, everything else `title` (the shape MCP and API clients expect).
     pub fn to_json(&self) -> JsonValue {
         let name_key = match self.kind {
-            EntityKind::Customer | EntityKind::Project | EntityKind::Contact => "name",
+            EntityKind::Customer | EntityKind::Project | EntityKind::Contact | EntityKind::Lead => {
+                "name"
+            }
             _ => "title",
         };
         serde_json::json!({
@@ -337,7 +468,7 @@ impl Created {
 // Validation and normalisation helpers
 // ---------------------------------------------------------------------------
 
-fn check_mode(kind: EntityKind, cfg: &ResolvedConfig) -> McResult<()> {
+pub(crate) fn check_mode(kind: EntityKind, cfg: &ResolvedConfig) -> McResult<()> {
     if !cfg.entity_available(&kind) {
         return Err(McError::not_available(kind, cfg));
     }
@@ -347,7 +478,7 @@ fn check_mode(kind: EntityKind, cfg: &ResolvedConfig) -> McResult<()> {
 /// The given status in its configured spelling (`TODO` -> `todo`, `wip` ->
 /// `in-progress`), `None` when missing or blank, or a usage error listing the
 /// valid statuses.
-fn canonical_status(
+pub(crate) fn canonical_status(
     status: &Option<String>,
     kind: EntityKind,
     cfg: &ResolvedConfig,
@@ -422,7 +553,7 @@ pub(crate) fn validate_priority(priority: u32) -> McResult<()> {
 }
 
 /// Trimmed value, or `None` when missing or blank.
-fn present(v: &Option<String>) -> Option<&str> {
+pub(crate) fn present(v: &Option<String>) -> Option<&str> {
     v.as_deref().map(str::trim).filter(|s| !s.is_empty())
 }
 
@@ -1117,15 +1248,17 @@ pub fn create_contact(cfg: &ResolvedConfig, input: &ContactInput) -> McResult<Cr
     let status = resolve_status(&input.status, kind, cfg)?;
     let _lock = crate::lock::acquire(cfg)?;
     let id = entity::next_id(kind, cfg)?.to_string();
+    let slug = slug_for(name);
     let today = util::today_str();
 
     let mut fields = id_fields(&id);
     fields.extend([
         ("name".into(), s(name)),
+        ("slug".into(), s(slug.as_str())),
         ("role".into(), s(present(&input.role).unwrap_or(""))),
         ("email".into(), s(present(&input.email).unwrap_or(""))),
         ("phone".into(), s(present(&input.phone).unwrap_or(""))),
-        ("customer".into(), s(frontmatter::wrap_wikilink(&customer))),
+        ("customer".into(), s(labeled_link(cfg, &customer))),
         ("status".into(), s(status)),
         ("tags".into(), list(&input.tags)),
         ("created".into(), s(today.as_str())),
@@ -1135,13 +1268,155 @@ pub fn create_contact(cfg: &ResolvedConfig, input: &ContactInput) -> McResult<Cr
 
     let contacts_dir = cust_dir.join("contacts");
     fs::create_dir_all(&contacts_dir)?;
-    let path = contacts_dir.join(format!("{}-{}.md", id, slug_for(name)));
+    let path = contacts_dir.join(format!("{id}-{slug}.md"));
     util::atomic_write(&path, doc.as_bytes())?;
     Ok(Created {
         kind,
         id,
         name: name.to_string(),
         path,
+    })
+}
+
+/// `templates/<name>.md`, or the built-in `fallback` template when the repo
+/// has none (repos initialised before the kind existed need no migration).
+fn template_or_builtin(
+    cfg: &ResolvedConfig,
+    name: &str,
+    fallback: &str,
+) -> McResult<(Value, String)> {
+    if cfg.templates_dir.join(format!("{name}.md")).is_file() {
+        return template::load_template(&cfg.templates_dir, name);
+    }
+    let (fm, body) = frontmatter::split_frontmatter(fallback)
+        .ok_or_else(|| McError::Other(format!("built-in {name} template has no frontmatter")))?;
+    let fm = frontmatter::parse_raw(&fm, Path::new(&format!("<built-in {name}.md>")))?;
+    Ok((fm, body))
+}
+
+pub fn create_lead(cfg: &ResolvedConfig, input: &LeadInput) -> McResult<Created> {
+    let kind = EntityKind::Lead;
+    check_mode(kind, cfg)?;
+    validate_name_not_empty(&input.name, kind)?;
+    let mut input = input.clone();
+    input.normalize(cfg)?;
+    let name = crate::commands::task::single_line("name", &input.name)?;
+    let name = name.as_str();
+    let status = resolve_status(&input.status, kind, cfg)?;
+    let text = |v: &Option<String>| present(v).unwrap_or("").to_string();
+    let source = match (present(&input.source), &input.event) {
+        (Some(s), _) => s.to_string(),
+        (None, Some(_)) => "event".to_string(),
+        (None, None) => String::new(),
+    };
+    let event = input
+        .event
+        .as_deref()
+        .map(|e| labeled_link(cfg, e))
+        .unwrap_or_default();
+    let introduce_to: Vec<Value> = input
+        .introduce_to
+        .iter()
+        .map(|c| s(labeled_link(cfg, c)))
+        .collect();
+    let _lock = crate::lock::acquire(cfg)?;
+    let id = entity::next_id(kind, cfg)?.to_string();
+    let slug = slug_for(name);
+    let today = util::today_str();
+
+    let mut fields = id_fields(&id);
+    fields.extend([
+        ("name".into(), s(name)),
+        ("slug".into(), s(slug.as_str())),
+        ("company".into(), s(text(&input.company))),
+        ("role".into(), s(text(&input.role))),
+        ("email".into(), s(text(&input.email))),
+        ("phone".into(), s(text(&input.phone))),
+        ("linkedin".into(), s(text(&input.linkedin))),
+        ("website".into(), s(text(&input.website))),
+        ("status".into(), s(status)),
+        ("owner".into(), s(text(&input.owner))),
+        ("source".into(), s(source)),
+        ("event".into(), s(event)),
+        ("introduce_to".into(), Value::Sequence(introduce_to)),
+        ("warmth".into(), s(text(&input.warmth))),
+        ("next_follow_up".into(), s(text(&input.next_follow_up))),
+        ("last_contact".into(), s("")),
+        ("converted_to".into(), s("")),
+        ("tags".into(), list(&input.tags)),
+        ("created".into(), s(today.as_str())),
+        ("updated".into(), s(today)),
+    ]);
+    let (tmpl_fm, tmpl_body) =
+        template_or_builtin(cfg, "lead", crate::commands::init::TEMPLATE_LEAD)?;
+    let (fm, mut body) = template::render_template_ordered(
+        tmpl_fm,
+        &tmpl_body,
+        &fields,
+        &[("name", name), ("id", &id)],
+    );
+    if let Some(notes) = present(&input.notes) {
+        body = crate::commands::lead::append_to_section(&body, "Notes", notes);
+    }
+    let doc = frontmatter::serialize_document(&fm, &body);
+    let dir = write_entity_dir(&cfg.leads_dir, &id, &slug, &doc)?;
+    Ok(Created {
+        kind,
+        id,
+        name: name.to_string(),
+        path: dir,
+    })
+}
+
+pub fn create_event(cfg: &ResolvedConfig, input: &EventInput) -> McResult<Created> {
+    let kind = EntityKind::Event;
+    check_mode(kind, cfg)?;
+    validate_name_not_empty(&input.title, kind)?;
+    let mut input = input.clone();
+    input.normalize(cfg)?;
+    let title = crate::commands::task::single_line("title", &input.title)?;
+    let title = title.as_str();
+    let status = resolve_status(&input.status, kind, cfg)?;
+    let today = util::today_str();
+    let date = present(&input.date).unwrap_or(&today).to_string();
+    let text = |v: &Option<String>| present(v).unwrap_or("").to_string();
+    let _lock = crate::lock::acquire(cfg)?;
+    let id = entity::next_id(kind, cfg)?.to_string();
+    let slug = slug_for(title);
+
+    let mut fields = id_fields(&id);
+    fields.extend([
+        ("title".into(), s(title)),
+        ("slug".into(), s(slug.as_str())),
+        ("status".into(), s(status)),
+        (
+            "type".into(),
+            s(present(&input.event_type).unwrap_or(DEFAULT_EVENT_TYPE)),
+        ),
+        ("date".into(), s(date)),
+        ("end_date".into(), s(text(&input.end_date))),
+        ("location".into(), s(text(&input.location))),
+        ("url".into(), s(text(&input.url))),
+        ("owner".into(), s(text(&input.owner))),
+        ("tags".into(), list(&input.tags)),
+        ("created".into(), s(today.as_str())),
+        ("updated".into(), s(today)),
+    ]);
+    let (tmpl_fm, tmpl_body) =
+        template_or_builtin(cfg, "event", crate::commands::init::TEMPLATE_EVENT)?;
+    let (fm, body) = template::render_template_ordered(
+        tmpl_fm,
+        &tmpl_body,
+        &fields,
+        &[("title", title), ("id", &id)],
+    );
+    let doc = frontmatter::serialize_document(&fm, &body);
+    let dir = write_entity_dir(&cfg.events_dir, &id, &slug, &doc)?;
+    Ok(Created {
+        kind,
+        id,
+        name: title.to_string(),
+        path: dir,
     })
 }
 
@@ -1819,6 +2094,123 @@ pub fn run(entity: &NewEntity, cfg: &ResolvedConfig, yes: bool) -> McResult<()> 
             ];
             confirm_and_create(&p, cfg, kind, &fields, || create_contact(cfg, &input))
         }
+        NewEntity::Lead {
+            name,
+            company,
+            role,
+            email,
+            phone,
+            linkedin,
+            website,
+            source,
+            event,
+            introduce_to,
+            warmth,
+            next_follow_up,
+            owner,
+            status,
+            tags,
+            notes,
+        } => {
+            let kind = EntityKind::Lead;
+            check_mode(kind, cfg)?;
+            validate_name_not_empty(name, kind)?;
+            let mut input = LeadInput {
+                name: name.clone(),
+                company: company.clone(),
+                role: role.clone(),
+                email: email.clone(),
+                phone: phone.clone(),
+                linkedin: linkedin.clone(),
+                website: website.clone(),
+                source: source.clone(),
+                event: event.clone(),
+                introduce_to: csv(introduce_to.as_deref()),
+                warmth: warmth.clone(),
+                next_follow_up: next_follow_up.clone(),
+                owner: owner.clone(),
+                status: status.clone(),
+                tags: csv(tags.as_deref()),
+                notes: notes.clone(),
+            };
+            input.normalize(cfg)?;
+            input.company = Some(p.optional(company.as_deref(), "Company"));
+            input.role = Some(p.optional(role.as_deref(), "Role"));
+            input.email = Some(p.optional(email.as_deref(), "Email"));
+            input.status = Some(p.select(input.status.as_deref(), "Status", kind.statuses(cfg)));
+            input.tags = p.list(tags.as_deref(), "Tags (comma-separated)");
+            input.normalize(cfg)?;
+            let fields = [
+                ("Name", input.name.clone()),
+                ("Company", input.company.clone().unwrap_or_default()),
+                ("Role", input.role.clone().unwrap_or_default()),
+                ("Email", input.email.clone().unwrap_or_default()),
+                ("Status", input.status.clone().unwrap_or_default()),
+                (
+                    "Source",
+                    input
+                        .source
+                        .clone()
+                        .or_else(|| input.event.as_ref().map(|_| "event".to_string()))
+                        .unwrap_or_default(),
+                ),
+                ("Event", input.event.clone().unwrap_or_default()),
+                ("Introduce to", input.introduce_to.join(", ")),
+                ("Warmth", input.warmth.clone().unwrap_or_default()),
+                (
+                    "Follow-up",
+                    input.next_follow_up.clone().unwrap_or_default(),
+                ),
+                ("Tags", input.tags.join(", ")),
+            ];
+            confirm_and_create(&p, cfg, kind, &fields, || create_lead(cfg, &input))
+        }
+        NewEntity::Event {
+            title,
+            date,
+            end_date,
+            location,
+            event_type,
+            url,
+            owner,
+            status,
+            tags,
+        } => {
+            let kind = EntityKind::Event;
+            check_mode(kind, cfg)?;
+            validate_name_not_empty(title, kind)?;
+            // The default comes first: it is what a non-interactive run takes.
+            let types: Vec<String> = std::iter::once(DEFAULT_EVENT_TYPE)
+                .chain(EVENT_TYPES.into_iter().filter(|t| *t != DEFAULT_EVENT_TYPE))
+                .map(str::to_string)
+                .collect();
+            let mut input = EventInput {
+                title: title.clone(),
+                date: Some(date.clone().unwrap_or_else(util::today_str)),
+                end_date: end_date.clone(),
+                event_type: event_type.clone(),
+                url: url.clone(),
+                owner: owner.clone(),
+                status: status.clone(),
+                tags: csv(tags.as_deref()),
+                ..Default::default()
+            };
+            input.normalize(cfg)?;
+            input.location = Some(p.optional(location.as_deref(), "Location"));
+            input.event_type = Some(p.select(input.event_type.as_deref(), "Type", &types));
+            input.status = Some(p.select(input.status.as_deref(), "Status", kind.statuses(cfg)));
+            input.normalize(cfg)?;
+            let fields = [
+                ("Title", input.title.clone()),
+                ("Date", input.date.clone().unwrap_or_default()),
+                ("End", input.end_date.clone().unwrap_or_default()),
+                ("Location", input.location.clone().unwrap_or_default()),
+                ("Type", input.event_type.clone().unwrap_or_default()),
+                ("Status", input.status.clone().unwrap_or_default()),
+                ("Tags", input.tags.join(", ")),
+            ];
+            confirm_and_create(&p, cfg, kind, &fields, || create_event(cfg, &input))
+        }
     }
 }
 
@@ -2036,9 +2428,10 @@ mod tests {
             frontmatter::get_str(&fm, "email").unwrap(),
             "alice@acme.com"
         );
+        assert_eq!(frontmatter::get_str(&fm, "slug").unwrap(), "alice-smith");
         assert_eq!(
             frontmatter::get_str(&fm, "customer").unwrap(),
-            "[[CUST-001]]"
+            "[[CUST-001|Acme Inc]]"
         );
         assert_eq!(frontmatter::get_str(&fm, "status").unwrap(), "active");
     }
@@ -2211,7 +2604,7 @@ mod tests {
         let contact = create_contact(&cfg, &ContactInput::new("Ann", "[[CUST-001]]")).unwrap();
         assert_eq!(
             frontmatter::get_str(&read_fm(&contact.path), "customer"),
-            Some("[[CUST-001]]")
+            Some("[[CUST-001|Acme]]")
         );
     }
 
@@ -2288,7 +2681,7 @@ mod tests {
         let contact = create_contact(&cfg, &ContactInput::new("Ann", "cust-1")).unwrap();
         assert_eq!(
             frontmatter::get_str(&read_fm(&contact.path), "customer"),
-            Some("[[CUST-001]]")
+            Some("[[CUST-001|Acme]]")
         );
         assert_eq!(crate::data::collect_tasks(&cfg).unwrap().len(), 2);
         assert!(crate::data::collect_entities(EntityKind::Meeting, &cfg)

@@ -162,6 +162,7 @@ fn supports_json(cmd: &Command) -> bool {
             | Command::Validate
             | Command::Status
             | Command::Task { .. }
+            | Command::Lead { .. }
             | Command::Check { .. }
             | Command::Comment { .. }
             | Command::New { .. }
@@ -213,6 +214,17 @@ fn normalize_ids(cmd: &mut Command, cfg: &ResolvedConfig) -> McResult<()> {
         Command::List {
             entity: ListEntity::Contacts { customer, .. },
         } => canon(customer, EntityKind::Customer)?,
+        Command::List {
+            entity:
+                ListEntity::Leads {
+                    event,
+                    introduce_to,
+                    ..
+                },
+        } => {
+            canon(event, EntityKind::Event)?;
+            canon(introduce_to, EntityKind::Customer)?;
+        }
         Command::Print {
             entity: PrintEntity::Meeting { id, .. },
         } => *id = canonical_id(id, EntityKind::Meeting, cfg)?,
@@ -252,7 +264,7 @@ fn run(cli: &mut Cli) -> McResult<()> {
                 command_name(&cli.command)
             ),
             Some(
-                "JSON output is available for list, show, status, validate, index, export, task, check, comment and new"
+                "JSON output is available for list, show, status, validate, index, export, task, lead, check, comment and new"
                     .into(),
             ),
         ));
@@ -354,5 +366,6 @@ fn run(cli: &mut Cli) -> McResult<()> {
         Command::Mcp => commands::mcp::run(&cfg),
         Command::Api { subcmd } => commands::api::run(subcmd, &cfg),
         Command::Task { subcmd } => commands::task::run(subcmd, &cfg),
+        Command::Lead { subcmd } => commands::lead::run(subcmd, &cfg),
     }
 }

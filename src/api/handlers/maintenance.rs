@@ -36,6 +36,8 @@ pub async fn rebuild_index(State(state): State<AppState>) -> Result<Json<IndexRe
         milestones: r.milestones,
         proposals: r.proposals,
         contacts: r.contacts,
+        leads: r.leads,
+        events: r.events,
     }))
 }
 

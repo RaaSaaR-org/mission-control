@@ -87,6 +87,21 @@ pub struct ContactFilter<'a> {
     pub customer: Option<&'a str>,
 }
 
+/// Filters for lead queries (`mc list leads`, MCP `list_leads`, `GET
+/// /v1/leads`). IDs (`event`, `introduce_to`) must be canonical.
+#[derive(Default)]
+pub struct LeadFilter<'a> {
+    pub status: Option<&'a str>,
+    pub tag: Option<&'a str>,
+    pub event: Option<&'a str>,
+    pub owner: Option<&'a str>,
+    pub warmth: Option<&'a str>,
+    pub introduce_to: Option<&'a str>,
+    /// `YYYY-MM-DD` (today): only open leads (not converted or lost) whose
+    /// `next_follow_up` is set and on or before this date.
+    pub follow_up_due: Option<&'a str>,
+}
+
 /// Read a markdown file and parse its frontmatter.
 ///
 /// Returns `None` for unreadable files, files without a frontmatter block, and
@@ -336,6 +351,51 @@ impl ContactFilter<'_> {
             && self.tag.is_none_or(|t| has_tag(fm, t))
             && self.customer.is_none_or(|c| link_is(fm, "customer", c))
     }
+}
+
+impl LeadFilter<'_> {
+    /// Whether a lead's frontmatter satisfies every set filter (case-insensitive).
+    pub fn matches(&self, fm: &Value) -> bool {
+        let eq = |key: &str, want: &str| {
+            frontmatter::get_str(fm, key).is_some_and(|v| v.trim().eq_ignore_ascii_case(want))
+        };
+        self.status.is_none_or(|s| status_matches(fm, s))
+            && self.tag.is_none_or(|t| has_tag(fm, t))
+            && self.event.is_none_or(|e| link_is(fm, "event", e))
+            && self.owner.is_none_or(|o| eq("owner", o))
+            && self.warmth.is_none_or(|w| eq("warmth", w))
+            && self
+                .introduce_to
+                .is_none_or(|c| links_to(fm, "introduce_to", c))
+            && self.follow_up_due.is_none_or(|today| {
+                let due = frontmatter::get_str_or(fm, "next_follow_up", "").trim();
+                let status = frontmatter::get_str_or(fm, "status", "");
+                !due.is_empty()
+                    && due <= today
+                    && !crate::commands::lead::is_closed_lead_status(status)
+            })
+    }
+}
+
+/// Leads matching `filter`: sorted by ID, or by `next_follow_up` (oldest
+/// first, then ID) when filtering for due follow-ups.
+pub fn collect_leads_filtered(
+    cfg: &ResolvedConfig,
+    filter: &LeadFilter,
+) -> McResult<Vec<EntityRecord>> {
+    let mut leads = collect_entities(EntityKind::Lead, cfg)?;
+    leads.retain(|l| filter.matches(&l.frontmatter));
+    if filter.follow_up_due.is_some() {
+        leads.sort_by(|a, b| {
+            let due = |r: &EntityRecord| {
+                frontmatter::get_str_or(&r.frontmatter, "next_follow_up", "").to_string()
+            };
+            due(a)
+                .cmp(&due(b))
+                .then_with(|| id_sort_key(&a.id).cmp(&id_sort_key(&b.id)))
+        });
+    }
+    Ok(leads)
 }
 
 /// Collect tasks with rich filtering support, sorted by ID.

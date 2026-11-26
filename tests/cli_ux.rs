@@ -1121,3 +1121,77 @@ fn task_set_changes_fields_like_the_dashboard() {
     }
     assert_eq!(std::fs::read_to_string(&file).unwrap(), before);
 }
+
+#[test]
+fn lead_pipeline_from_the_cli() {
+    let tmp = repo();
+    let root = tmp.path();
+    for args in [
+        vec!["-y", "new", "customer", "Zema"],
+        vec![
+            "-y",
+            "new",
+            "event",
+            "Hannover Messe",
+            "--date",
+            "2026-04-20",
+            "--type",
+            "trade-fair",
+        ],
+        vec![
+            "-y",
+            "new",
+            "lead",
+            "Jane Doe",
+            "--company",
+            "Zema",
+            "--event",
+            "evt-1",
+            "--introduce-to",
+            "cust-1",
+            "--follow-up",
+            "2000-01-01",
+        ],
+    ] {
+        let o = run(root, &args);
+        assert!(o.status.success(), "{args:?}: {}", stderr(&o));
+    }
+
+    let o = run(root, &["--json", "list", "leads", "--follow-up-due"]);
+    assert!(o.status.success(), "{}", stderr(&o));
+    let leads: serde_json::Value = serde_json::from_str(&stdout(&o)).unwrap();
+    assert_eq!(leads[0]["id"], "LEAD-001");
+    assert_eq!(leads[0]["event"], "EVT-001");
+    assert_eq!(leads[0]["source"], "event");
+
+    let o = run(
+        root,
+        &[
+            "--json",
+            "lead",
+            "log",
+            "1",
+            "call",
+            "Pilot?",
+            "--follow-up",
+            "2099-01-01",
+        ],
+    );
+    assert!(o.status.success(), "{}", stderr(&o));
+    let logged: serde_json::Value = serde_json::from_str(&stdout(&o)).unwrap();
+    assert_eq!(logged["new_status"], "contacted");
+
+    // A typo in the stage is a usage error with a suggestion.
+    let o = run(root, &["lead", "move", "LEAD-001", "qualifed"]);
+    assert_eq!(o.status.code(), Some(2));
+    assert!(stderr(&o).contains("qualified"), "{}", stderr(&o));
+
+    let o = run(root, &["--json", "lead", "convert", "LEAD-001"]);
+    assert!(o.status.success(), "{}", stderr(&o));
+    let converted: serde_json::Value = serde_json::from_str(&stdout(&o)).unwrap();
+    assert_eq!(converted["customer"], "CUST-001");
+    assert_eq!(converted["contact"], "CONT-001");
+
+    let o = run(root, &["validate"]);
+    assert!(o.status.success(), "{}", stdout(&o));
+}

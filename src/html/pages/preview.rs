@@ -175,6 +175,18 @@ fn fields(rec: &EntityRecord, page: &Page) -> Vec<(&'static str, String)> {
             out.push(("Customer", refs_either("customer", "customers")));
             out.push(("Email", text("email")));
         }
+        EntityKind::Lead => {
+            out.push(("Company", text("company")));
+            out.push(("Role", text("role")));
+            out.push(("Event", str_of("event").map(|s| catalog.ref_html(s))));
+            out.push(("Introduce to", refs("introduce_to")));
+            out.push(("Follow-up", day("next_follow_up")));
+        }
+        EntityKind::Event => {
+            out.push(("Date", day("date")));
+            out.push(("Until", day("end_date")));
+            out.push(("Where", text("location")));
+        }
         EntityKind::Customer => {
             out.push(("Owner", str_of("owner").map(owner_html)));
             out.push(("Industry", text("industry")));

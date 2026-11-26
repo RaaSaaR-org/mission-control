@@ -52,6 +52,8 @@ pub struct IndexResult {
     pub milestones: usize,
     pub proposals: usize,
     pub contacts: usize,
+    pub leads: usize,
+    pub events: usize,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -122,6 +124,8 @@ pub struct PrefixView {
     pub milestone: String,
     pub proposal: String,
     pub contact: String,
+    pub lead: String,
+    pub event: String,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -135,6 +139,8 @@ pub struct StatusView {
     pub milestone: Vec<String>,
     pub proposal: Vec<String>,
     pub contact: Vec<String>,
+    pub lead: Vec<String>,
+    pub event: Vec<String>,
 }
 
 /// A single entity returned by GET endpoints. The `frontmatter` field is
@@ -365,6 +371,199 @@ pub struct CreateContact {
     pub tags: Option<String>,
 }
 
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct CreateLead {
+    pub name: String,
+    #[serde(default)]
+    pub company: Option<String>,
+    #[serde(default)]
+    pub role: Option<String>,
+    #[serde(default)]
+    pub email: Option<String>,
+    #[serde(default)]
+    pub phone: Option<String>,
+    #[serde(default)]
+    pub linkedin: Option<String>,
+    #[serde(default)]
+    pub website: Option<String>,
+    /// `event`, `card`, `linkedin`, `referral`, `inbound` or `other`;
+    /// defaults to `event` when `event` is given.
+    #[serde(default)]
+    pub source: Option<String>,
+    /// Event ID (must exist), e.g. `EVT-001`.
+    #[serde(default)]
+    pub event: Option<String>,
+    /// Customer IDs to introduce the lead to, comma-separated string or array.
+    #[serde(default, deserialize_with = "comma_list")]
+    pub introduce_to: Option<String>,
+    /// `hot`, `warm` or `cold`.
+    #[serde(default)]
+    pub warmth: Option<String>,
+    /// `YYYY-MM-DD`.
+    #[serde(default)]
+    pub next_follow_up: Option<String>,
+    #[serde(default)]
+    pub owner: Option<String>,
+    /// Defaults to the first configured lead status (`new`).
+    #[serde(default)]
+    pub status: Option<String>,
+    /// Comma-separated string or array of strings.
+    #[serde(default, deserialize_with = "comma_list")]
+    pub tags: Option<String>,
+    /// Text for the lead's `## Notes` section.
+    #[serde(default)]
+    pub notes: Option<String>,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct CreateEvent {
+    pub title: String,
+    /// First day, `YYYY-MM-DD` (defaults to today).
+    #[serde(default)]
+    pub date: Option<String>,
+    /// Last day, `YYYY-MM-DD`; must not be before `date`.
+    #[serde(default)]
+    pub end_date: Option<String>,
+    #[serde(default)]
+    pub location: Option<String>,
+    /// `trade-fair`, `conference`, `meetup`, `workshop` or `other` (default).
+    #[serde(default, rename = "type")]
+    pub event_type: Option<String>,
+    #[serde(default)]
+    pub url: Option<String>,
+    #[serde(default)]
+    pub owner: Option<String>,
+    /// Defaults to the first configured event status (`planned`).
+    #[serde(default)]
+    pub status: Option<String>,
+    /// Comma-separated string or array of strings.
+    #[serde(default, deserialize_with = "comma_list")]
+    pub tags: Option<String>,
+}
+
+/// Change some of a lead's fields; omitted fields stay as they are, empty
+/// values clear (not `name` or `status`). Validated like lead creation;
+/// nothing is written if any value is invalid.
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct UpdateLead {
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub company: Option<String>,
+    #[serde(default)]
+    pub role: Option<String>,
+    #[serde(default)]
+    pub email: Option<String>,
+    #[serde(default)]
+    pub phone: Option<String>,
+    #[serde(default)]
+    pub linkedin: Option<String>,
+    #[serde(default)]
+    pub website: Option<String>,
+    #[serde(default)]
+    pub source: Option<String>,
+    /// Event ID (must exist).
+    #[serde(default)]
+    pub event: Option<String>,
+    /// Customer IDs replacing the list, comma-separated string or array.
+    #[serde(default, deserialize_with = "comma_list")]
+    pub introduce_to: Option<String>,
+    #[serde(default)]
+    pub warmth: Option<String>,
+    /// `YYYY-MM-DD`.
+    #[serde(default)]
+    pub next_follow_up: Option<String>,
+    /// `YYYY-MM-DD`.
+    #[serde(default)]
+    pub last_contact: Option<String>,
+    #[serde(default)]
+    pub owner: Option<String>,
+    /// A configured lead status (matched case-insensitively).
+    #[serde(default)]
+    pub status: Option<String>,
+    /// Tags replacing the lead's tags, comma-separated string or array.
+    #[serde(default, deserialize_with = "comma_list")]
+    pub tags: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct UpdateLeadResult {
+    pub id: String,
+    /// Fields whose value actually changed (`status` last).
+    pub changed: Vec<String>,
+    pub old_status: String,
+    pub new_status: String,
+    /// The lead file, relative to the repo root.
+    pub path: String,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct MoveLeadBody {
+    /// Target pipeline stage (`statuses.lead`).
+    pub status: String,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct LogInteractionBody {
+    /// `call`, `email`, `meeting`, `event`, `linkedin`, `intro` or `note`.
+    #[serde(rename = "type")]
+    pub interaction_type: String,
+    /// What happened (one line).
+    pub note: String,
+    /// `YYYY-MM-DD`, defaults to today.
+    #[serde(default)]
+    pub date: Option<String>,
+    /// Also set the next follow-up date, `YYYY-MM-DD`.
+    #[serde(default)]
+    pub next_follow_up: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct InteractionResult {
+    pub id: String,
+    pub date: String,
+    #[serde(rename = "type")]
+    pub interaction_type: String,
+    pub note: String,
+    /// The line written to `## Interactions`.
+    pub line: String,
+    pub last_contact: String,
+    pub next_follow_up: String,
+    pub old_status: String,
+    pub new_status: String,
+    pub path: String,
+}
+
+/// Where the contact goes: `customer`, `new_customer_name`, or neither (the
+/// customer named like the lead's company).
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct ConvertLeadBody {
+    #[serde(default)]
+    pub customer: Option<String>,
+    #[serde(default)]
+    pub new_customer_name: Option<String>,
+    /// When the customer already has a contact for this person (same email,
+    /// or else same name), link the lead to it instead of answering 409.
+    #[serde(default)]
+    pub link_existing: Option<bool>,
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct ConvertLeadResult {
+    pub id: String,
+    /// The contact's ID (new, or the existing one with link_existing).
+    pub contact: String,
+    pub contact_path: String,
+    /// False when the lead was linked to an existing contact.
+    pub contact_created: bool,
+    pub customer: String,
+    pub customer_created: bool,
+    pub old_status: String,
+    pub new_status: String,
+    pub path: String,
+}
+
 // ───────────────────────── query params ─────────────────────────
 
 #[derive(Debug, Deserialize, utoipa::IntoParams)]
@@ -395,6 +594,29 @@ pub struct TaskListQuery {
     pub milestone: Option<String>,
     #[serde(default)]
     pub owner: Option<String>,
+}
+
+#[derive(Debug, Deserialize, utoipa::IntoParams)]
+pub struct LeadListQuery {
+    #[serde(default)]
+    pub status: Option<String>,
+    #[serde(default)]
+    pub tag: Option<String>,
+    /// Event ID, e.g. `EVT-001`.
+    #[serde(default)]
+    pub event: Option<String>,
+    #[serde(default)]
+    pub owner: Option<String>,
+    /// `hot`, `warm` or `cold`.
+    #[serde(default)]
+    pub warmth: Option<String>,
+    /// Customer ID the lead should be introduced to.
+    #[serde(default)]
+    pub introduce_to: Option<String>,
+    /// `true`: only open leads whose `next_follow_up` is today or earlier,
+    /// oldest first.
+    #[serde(default)]
+    pub follow_up_due: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
