@@ -3,7 +3,7 @@ use crate::cli::ui::{self, Col, Table};
 use crate::cli::{ListEntity, TaskSort};
 use crate::commands::index;
 use crate::config::ResolvedConfig;
-use crate::data::{self, ContactFilter, EntityRecord, TaskFilter};
+use crate::data::{self, ContactFilter, EntityRecord, LeadFilter, TaskFilter};
 use crate::entity::EntityKind;
 use crate::error::{McError, McResult};
 use crate::frontmatter;
@@ -18,6 +18,7 @@ pub fn run(entity: &ListEntity, cfg: &ResolvedConfig) -> McResult<()> {
             tag,
             customer,
         } => list_contacts(cfg, status, tag, customer),
+        ListEntity::Leads { .. } => list_leads(cfg, entity),
         _ => {
             let (kind, status_filter, tag_filter) = match entity {
                 ListEntity::Customers { status, tag } => (EntityKind::Customer, status, tag),
@@ -27,7 +28,10 @@ pub fn run(entity: &ListEntity, cfg: &ResolvedConfig) -> McResult<()> {
                 ListEntity::Milestones { status } => (EntityKind::Milestone, status, &None),
                 ListEntity::Sprints { status, tag } => (EntityKind::Sprint, status, tag),
                 ListEntity::Proposals { status, tag } => (EntityKind::Proposal, status, tag),
-                ListEntity::Tasks { .. } | ListEntity::Contacts { .. } => {
+                ListEntity::Events { status, tag } => (EntityKind::Event, status, tag),
+                ListEntity::Tasks { .. }
+                | ListEntity::Contacts { .. }
+                | ListEntity::Leads { .. } => {
                     unreachable!("Handled in outer match arms")
                 }
             };
@@ -311,8 +315,30 @@ fn list_standard(
             }
             t
         }
+        EntityKind::Event => {
+            let mut t = Table::new(vec![
+                Col::new("ID").fixed(),
+                Col::new("Date"),
+                Col::new("Title").flex(16),
+                Col::new("Status"),
+                Col::new("Type").drop(3),
+                Col::new("Location").max(20).drop(2),
+            ]);
+            for e in &entries {
+                t.row(vec![
+                    id_cell(e),
+                    s(e, "date").to_string(),
+                    s(e, "title").to_string(),
+                    ui::status(raw(e, "status")),
+                    s(e, "type").dimmed().to_string(),
+                    s(e, "location").dimmed().to_string(),
+                ]);
+            }
+            t
+        }
         EntityKind::Task => unreachable!("Tasks use list_tasks(), not list_standard()"),
         EntityKind::Contact => unreachable!("Contacts use list_contacts(), not list_standard()"),
+        EntityKind::Lead => unreachable!("Leads use list_leads(), not list_standard()"),
     };
 
     if !table.is_empty() {
@@ -552,5 +578,89 @@ fn list_contacts(
         table.print();
     }
     print_footer(EntityKind::Contact, entries.len(), total, &filters);
+    Ok(())
+}
+
+fn list_leads(cfg: &ResolvedConfig, args: &ListEntity) -> McResult<()> {
+    let ListEntity::Leads {
+        status,
+        tag,
+        event,
+        owner,
+        warmth,
+        introduce_to,
+        follow_up_due,
+    } = args
+    else {
+        unreachable!("list_leads() is only called for `mc list leads`");
+    };
+    if !cfg.entity_available(&EntityKind::Lead) {
+        return Err(McError::not_available(EntityKind::Lead, cfg));
+    }
+    let all = data::collect_entities(EntityKind::Lead, cfg)?;
+    let status = resolve_status_filter(status.as_deref(), EntityKind::Lead, cfg, &all)?;
+    let total = all.len();
+    drop(all);
+
+    let today = crate::util::today_str();
+    let filter = LeadFilter {
+        status: status.as_deref(),
+        tag: tag.as_deref(),
+        event: event.as_deref(),
+        owner: owner.as_deref(),
+        warmth: warmth.as_deref(),
+        introduce_to: introduce_to.as_deref(),
+        follow_up_due: follow_up_due.then_some(today.as_str()),
+    };
+    let entries = data::collect_leads_filtered(cfg, &filter)?;
+
+    if ui::get().json {
+        return print_json(&entries, cfg);
+    }
+
+    let filters = filter_summary(&[
+        ("status", status.clone()),
+        ("tag", tag.clone()),
+        ("event", event.clone()),
+        ("owner", owner.clone()),
+        ("warmth", warmth.clone()),
+        ("introduce-to", introduce_to.clone()),
+        ("follow-up-due", follow_up_due.then(|| "yes".to_string())),
+    ]);
+
+    let mut table = Table::new(vec![
+        Col::new("ID").fixed(),
+        Col::new("Name").flex(14),
+        Col::new("Company").max(24).drop(2),
+        Col::new("Status"),
+        Col::new("Warmth").drop(4),
+        Col::new("Introduce to").max(24).drop(5),
+        Col::new("Follow-up").drop(3),
+    ]);
+    for e in &entries {
+        let due = &*s(e, "next_follow_up");
+        let closed = crate::commands::lead::is_closed_lead_status(raw(e, "status"));
+        let follow_up = if due.is_empty() || closed {
+            due.dimmed().to_string()
+        } else if due <= today.as_str() {
+            due.red().bold().to_string()
+        } else {
+            due.to_string()
+        };
+        table.row(vec![
+            id_cell(e),
+            s(e, "name").to_string(),
+            s(e, "company").dimmed().to_string(),
+            ui::status(raw(e, "status")),
+            s(e, "warmth").to_string(),
+            links(e, "introduce_to").dimmed().to_string(),
+            follow_up,
+        ]);
+    }
+
+    if !table.is_empty() {
+        table.print();
+    }
+    print_footer(EntityKind::Lead, entries.len(), total, &filters);
     Ok(())
 }

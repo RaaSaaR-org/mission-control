@@ -90,6 +90,7 @@ pub fn index_json(catalog: &Catalog) -> String {
             let fm = &r.frontmatter;
             let date = frontmatter::get_str(fm, "due_date")
                 .or_else(|| frontmatter::get_str(fm, "date"))
+                .or_else(|| frontmatter::get_str(fm, "next_follow_up"))
                 .unwrap_or("");
             serde_json::json!({
                 "id": r.id,
@@ -122,6 +123,9 @@ pub fn palette_json(page: &Page) -> String {
         if *kind == EntityKind::Task {
             pages.push(json!({"label": "Task board", "href": "/tasks", "keys": keys}));
             pages.push(json!({"label": "Task list", "href": "/tasks/list", "keys": "g l"}));
+        } else if *kind == EntityKind::Lead {
+            pages.push(json!({"label": "Lead pipeline", "href": "/leads", "keys": keys}));
+            pages.push(json!({"label": "Lead table", "href": "/leads/list", "keys": ""}));
         } else {
             let plural = kind.label_plural();
             pages.push(
@@ -148,6 +152,7 @@ pub fn palette_json(page: &Page) -> String {
             let status = frontmatter::get_str_or(fm, "status", "");
             let date = frontmatter::get_str(fm, "due_date")
                 .or_else(|| frontmatter::get_str(fm, "date"))
+                .or_else(|| frontmatter::get_str(fm, "next_follow_up"))
                 .unwrap_or("");
             let mut tags = frontmatter::get_string_list(fm, "tags");
             tags.truncate(PALETTE_TAGS);

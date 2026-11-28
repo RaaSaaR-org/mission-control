@@ -526,6 +526,11 @@ async fn rest_covers_every_mcp_write_tool() {
         "/v1/sprints",
         "/v1/proposals",
         "/v1/contacts",
+        "/v1/leads",
+        "/v1/events",
+        "/v1/leads/{id}/move",
+        "/v1/leads/{id}/interactions",
+        "/v1/leads/{id}/convert",
         "/v1/tasks/{id}/move",
         "/v1/entities/{kind}/{id}/checklist/{item}",
         "/v1/entities/{kind}/{id}/comments",
@@ -541,6 +546,131 @@ async fn rest_covers_every_mcp_write_tool() {
             "OpenAPI path {p} missing POST operation"
         );
     }
+}
+
+#[tokio::test]
+async fn lead_pipeline_round_trip() {
+    let (r, _t) = router(false);
+    let post = |path: &str, body: Value| authed(Method::POST, path, Some(body));
+    let resp = send(
+        &r,
+        post("/v1/customers", serde_json::json!({"name": "Zema"})),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let resp = send(
+        &r,
+        post(
+            "/v1/events",
+            serde_json::json!({"title": "Hannover Messe", "date": "2026-04-20", "type": "trade-fair"}),
+        ),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    assert_eq!(body_json(resp).await["id"], "EVT-001");
+    let resp = send(
+        &r,
+        post(
+            "/v1/leads",
+            serde_json::json!({
+                "name": "Jane Doe",
+                "company": "Zema",
+                "event": "EVT-001",
+                "introduce_to": ["CUST-001"],
+                "next_follow_up": "2000-01-01",
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let created = body_json(resp).await;
+    assert_eq!(created["id"], "LEAD-001");
+    assert_eq!(created["path"], "leads/LEAD-001-jane-doe");
+
+    let due = body_json(
+        send(
+            &r,
+            authed(
+                Method::GET,
+                "/v1/leads?follow_up_due=true&event=evt-1",
+                None,
+            ),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(due.as_array().unwrap().len(), 1);
+    assert_eq!(due[0]["event"], "EVT-001");
+
+    let resp = send(
+        &r,
+        authed(
+            Method::PATCH,
+            "/v1/leads/lead-1",
+            Some(serde_json::json!({"warmth": "hot", "next_follow_up": ""})),
+        ),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let v = body_json(resp).await;
+    assert_eq!(
+        v["changed"],
+        serde_json::json!(["warmth", "next_follow_up"])
+    );
+
+    let resp = send(
+        &r,
+        post(
+            "/v1/leads/LEAD-001/interactions",
+            serde_json::json!({"type": "call", "note": "Pilot?", "date": "2026-11-20"}),
+        ),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let v = body_json(resp).await;
+    assert_eq!(v["line"], "- 2026-11-20 · call · Pilot?");
+    assert_eq!(v["new_status"], "contacted");
+
+    let resp = send(
+        &r,
+        post(
+            "/v1/leads/LEAD-001/move",
+            serde_json::json!({"status": "nope"}),
+        ),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let resp = send(
+        &r,
+        post(
+            "/v1/leads/LEAD-001/move",
+            serde_json::json!({"status": "qualified"}),
+        ),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // Matched by company name.
+    let resp = send(
+        &r,
+        post("/v1/leads/LEAD-001/convert", serde_json::json!({})),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let v = body_json(resp).await;
+    assert_eq!(v["contact"], "CONT-001");
+    assert_eq!(v["customer"], "CUST-001");
+    let resp = send(
+        &r,
+        post("/v1/leads/LEAD-001/convert", serde_json::json!({})),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::CONFLICT);
+
+    let resp = send(&r, authed(Method::POST, "/v1/index", None)).await;
+    let v = body_json(resp).await;
+    assert_eq!(v["leads"], 1);
+    assert_eq!(v["events"], 1);
 }
 
 // ───────────────────────── input handling ─────────────────────────

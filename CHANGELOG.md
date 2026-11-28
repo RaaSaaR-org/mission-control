@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-11-28
+
+### Added
+- CRM: two new standalone entity kinds for the people you meet at events. **Leads** (`LEAD-NNN`, `leads/LEAD-NNN-<slug>/LEAD-NNN.md`, a folder so a business-card photo and a `research.md` can sit beside it) carry company, role, email, phone, LinkedIn, website, a pipeline stage (`new`, `contacted`, `qualified`, `intro-planned`, `introduced`, `converted`, `lost`; `statuses.lead`), source, event, the partners to introduce them to (`introduce_to`), warmth, next follow-up, last contact and an interaction log in the body. **Events** (`EVT-NNN`, `events/EVT-NNN-<slug>/`) are trade fairs, conferences, meetups and workshops (`planned`, `attended`, `cancelled`). Leads are separate from contacts and never change existing ones; converting a lead creates a contact. See `docs/crm.md`.
+- CLI: `mc new lead`, `mc new event`, `mc list leads` (`--status`, `--event`, `--owner`, `--warmth`, `--introduce-to`, `--tag`, `--follow-up-due`), `mc list events`, and `mc lead move|log|set|convert`.
+- MCP: `create_lead`, `update_lead`, `move_lead`, `log_interaction`, `convert_lead`, `create_event` and `list_leads`; `list_entities`, `get_entity`, `validate_repo`, `build_index`, `get_status` and the `mc://entities/leads|events` resources cover both kinds.
+- REST: `GET`/`POST /v1/leads`, `PATCH /v1/leads/{id}`, `POST /v1/leads/{id}/move`, `/interactions` and `/convert`, `POST /v1/events`, all in the OpenAPI spec; `/v1/config` and `/v1/index` include leads and events.
+- `mc index` writes `data/leads.json` and `data/events.json`; `mc validate` checks lead and event folders, their references (`event`, `introduce_to`, `converted_to`) and warns about unknown `source`/`warmth`/event `type` values and malformed dates.
+- Dashboard: a lead pipeline board at `/leads` (lane per stage, drag-and-drop, warmth, event and follow-up badges, intro avatars, filters for event, warmth, owner, tag and follow-ups due) and a sortable table at `/leads/list`; a lead page with contact links, a clickable stage route, interaction composer and timeline, edit, follow-up, convert and introduce-to panels, the business card and `research.md`; a quick-capture form at `/leads/new` ("New lead" in the palette); `/events` with upcoming and past events, `/events/new`, and per-event lead stats on the event page; "Follow-ups" and "Pipeline" panels on the overview. Writes use new guarded endpoints (`POST /api/leads`, `PATCH /api/leads/{id}`, `POST /api/leads/{id}/move|interactions|convert`, `POST /api/events`) and respect `--read-only`. Sidebar group "Network" (`g n`).
+- Config: `paths.leads`/`paths.events`, `id_prefixes.lead` (`LEAD`)/`event` (`EVT`), `statuses.lead`/`event`. `mc init` writes them and `templates/lead.md`/`event.md`; repos without those templates use built-in ones. In a config with a `paths:` section, add `leads:` and `events:` to enable the kinds.
+
+### Fixed
+- New contacts (`mc new contact`, `create_contact`, and contacts created by `convert_lead`) get a real `slug` and a labelled customer link (`"[[CUST-007|Name]]"`) instead of `slug: ''` and a bare `[[CUST-007]]`.
+
 ## [0.3.0] - 2026-10-08
 
 ### Added
@@ -143,6 +157,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - MCP server for AI assistant integration
 - Standalone repo mode with `config/config.yml`
 
-[Unreleased]: https://github.com/RaaSaaR-org/mission-control/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/RaaSaaR-org/mission-control/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/RaaSaaR-org/mission-control/compare/v0.3.0...v0.4.0
 [0.1.1]: https://github.com/RaaSaaR-org/mission-control/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/RaaSaaR-org/mission-control/releases/tag/v0.1.0

@@ -167,6 +167,23 @@ fn columns_for(kind: EntityKind) -> Vec<Col> {
             Col::Owner,
             Col::Date("due_date", "Due"),
         ],
+        EntityKind::Lead => vec![
+            Col::Id,
+            Col::Name("Name"),
+            Col::Text("company", "Company"),
+            Col::Status,
+            Col::Text("warmth", "Warmth"),
+            Col::Refs("introduce_to", "introduce_to", "Introduce to"),
+            Col::Date("next_follow_up", "Follow-up"),
+        ],
+        EntityKind::Event => vec![
+            Col::Id,
+            Col::Name("Title"),
+            Col::Status,
+            Col::Text("type", "Type"),
+            Col::Text("location", "Location"),
+            Col::Date("date", "Date"),
+        ],
     }
 }
 

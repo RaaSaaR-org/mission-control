@@ -53,7 +53,9 @@ pub fn dashboard_page(page: &Page, recent: &[RecentFile]) -> String {
         ));
     } else {
         body.push_str(&attention_panel(page));
+        body.push_str(&super::leads::follow_ups_panel(page));
         body.push_str(&coming_up_panel(page));
+        body.push_str(&super::leads::pipeline_panel(page));
     }
     body.push_str("</div>");
 

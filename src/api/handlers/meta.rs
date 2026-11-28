@@ -44,6 +44,8 @@ pub async fn get_config(State(state): State<AppState>) -> Json<ConfigResponse> {
             milestone: cfg.id_prefixes.milestone.clone(),
             proposal: cfg.id_prefixes.proposal.clone(),
             contact: cfg.id_prefixes.contact.clone(),
+            lead: cfg.id_prefixes.lead.clone(),
+            event: cfg.id_prefixes.event.clone(),
         },
         statuses: StatusView {
             customer: cfg.statuses.customer.clone(),
@@ -55,6 +57,8 @@ pub async fn get_config(State(state): State<AppState>) -> Json<ConfigResponse> {
             milestone: cfg.statuses.milestone.clone(),
             proposal: cfg.statuses.proposal.clone(),
             contact: cfg.statuses.contact.clone(),
+            lead: cfg.statuses.lead.clone(),
+            event: cfg.statuses.event.clone(),
         },
         configured_entities,
         available_kinds: EntityKind::ALL

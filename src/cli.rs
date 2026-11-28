@@ -57,7 +57,7 @@ pub struct Cli {
     #[arg(short = 'y', long = "yes", global = true, help_heading = GLOBAL)]
     pub yes: bool,
 
-    /// Print machine-readable JSON (list, show, status, validate, index, export, task, check, comment, new)
+    /// Print machine-readable JSON (list, show, status, validate, index, export, task, lead, check, comment, new)
     #[arg(long, global = true, help_heading = GLOBAL)]
     pub json: bool,
 
@@ -80,7 +80,9 @@ pub enum Command {
   mc new research \"LLM Benchmarks\" --agents claude,gemini
   mc new task \"Fix login bug\" --project PROJ-001 --priority 1
   mc new sprint \"2026-W05\" --start-date 2026-01-27 --end-date 2026-02-07 --goal \"Auth module\"
-  mc new proposal \"Use PostgreSQL\" --type architecture --author alice")]
+  mc new proposal \"Use PostgreSQL\" --type architecture --author alice
+  mc new event \"Hannover Messe 2026\" --date 2026-04-20 --type trade-fair
+  mc new lead \"Jane Doe\" --company Acme --event EVT-001 --introduce-to CUST-002")]
     New {
         #[command(subcommand)]
         entity: NewEntity,
@@ -95,6 +97,8 @@ pub enum Command {
   mc list tasks --status in-progress --project PROJ-001
   mc list sprints --status active
   mc list proposals --status accepted
+  mc list leads --follow-up-due
+  mc list events
   mc list tasks --json")]
     #[command(visible_alias = "ls")]
     List {
@@ -292,6 +296,18 @@ Press ? in the dashboard for keyboard shortcuts.")]
     Task {
         #[command(subcommand)]
         subcmd: TaskSubcommand,
+    },
+    /// Lead pipeline: change fields and stage, log interactions, convert to a contact
+    #[command(after_help = "\x1b[1mExamples:\x1b[0m
+  mc lead move LEAD-001 qualified          Change the pipeline stage
+  mc lead log LEAD-001 call \"Talked about a pilot\" --follow-up 2026-12-01
+  mc lead set 1 --warmth hot --introduce-to CUST-002
+  mc lead convert LEAD-001 --customer CUST-002
+  mc lead convert LEAD-001 --new-customer \"Acme GmbH\"
+  mc list leads --follow-up-due            Leads whose follow-up is due")]
+    Lead {
+        #[command(subcommand)]
+        subcmd: LeadSubcommand,
     },
     /// Print a shell completion script
     #[command(after_help = "\x1b[1mInstall:\x1b[0m
@@ -598,6 +614,93 @@ pub enum NewEntity {
         #[arg(long)]
         tags: Option<String>,
     },
+    /// Create a new lead (someone we met; standalone mode only)
+    #[command(after_help = "\x1b[1mExamples:\x1b[0m
+  mc new lead \"Jane Doe\" --company \"Acme GmbH\" --role CTO --email jane@acme.example
+  mc new lead \"Max Muster\" --event EVT-001 --introduce-to CUST-002 --warmth hot
+  mc new lead \"Erika Beispiel\" --source linkedin --follow-up 2026-12-01")]
+    Lead {
+        /// Full name
+        name: String,
+        /// Company the person works for
+        #[arg(long)]
+        company: Option<String>,
+        /// Role / job title
+        #[arg(long)]
+        role: Option<String>,
+        /// Email address
+        #[arg(long)]
+        email: Option<String>,
+        /// Phone number
+        #[arg(long)]
+        phone: Option<String>,
+        /// LinkedIn profile URL
+        #[arg(long)]
+        linkedin: Option<String>,
+        /// Company or personal website
+        #[arg(long)]
+        website: Option<String>,
+        /// Where the lead came from: event, card, linkedin, referral, inbound, other
+        /// (default: event when --event is given)
+        #[arg(long)]
+        source: Option<String>,
+        /// Event where we met (e.g. EVT-001)
+        #[arg(long)]
+        event: Option<String>,
+        /// Customer/partner IDs to introduce the lead to (comma-separated)
+        #[arg(long)]
+        introduce_to: Option<String>,
+        /// hot, warm or cold
+        #[arg(long)]
+        warmth: Option<String>,
+        /// Next follow-up date YYYY-MM-DD
+        #[arg(long = "follow-up", visible_alias = "next-follow-up")]
+        next_follow_up: Option<String>,
+        /// Owner
+        #[arg(long)]
+        owner: Option<String>,
+        /// Pipeline stage (default: new)
+        #[arg(long)]
+        status: Option<String>,
+        /// Comma-separated tags
+        #[arg(long)]
+        tags: Option<String>,
+        /// Notes for the lead's Notes section
+        #[arg(long)]
+        notes: Option<String>,
+    },
+    /// Create a new event (trade fair, conference, meetup; standalone mode only)
+    #[command(after_help = "\x1b[1mExamples:\x1b[0m
+  mc new event \"Hannover Messe 2026\" --date 2026-04-20 --end-date 2026-04-24 --type trade-fair
+  mc new event \"Robotics Meetup Saar\" --date 2026-12-03 --location Saarbrücken --type meetup")]
+    Event {
+        /// Event title
+        title: String,
+        /// Date YYYY-MM-DD (default: today)
+        #[arg(long)]
+        date: Option<String>,
+        /// Last day YYYY-MM-DD
+        #[arg(long)]
+        end_date: Option<String>,
+        /// Location
+        #[arg(long)]
+        location: Option<String>,
+        /// trade-fair, conference, meetup, workshop or other (default: other)
+        #[arg(long = "type")]
+        event_type: Option<String>,
+        /// Event website
+        #[arg(long)]
+        url: Option<String>,
+        /// Owner
+        #[arg(long)]
+        owner: Option<String>,
+        /// Status (default: planned; values: planned, attended, cancelled)
+        #[arg(long)]
+        status: Option<String>,
+        /// Comma-separated tags
+        #[arg(long)]
+        tags: Option<String>,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -713,6 +816,50 @@ pub enum ListEntity {
         /// Filter by customer ID
         #[arg(long)]
         customer: Option<String>,
+    },
+    /// List leads (standalone mode only)
+    #[command(after_help = "\x1b[1mExamples:\x1b[0m
+  mc list leads
+  mc list leads --status qualified
+  mc list leads --follow-up-due          Open leads whose follow-up date has come
+  mc list leads --event EVT-001 --warmth hot
+  mc list leads --introduce-to CUST-002")]
+    #[command(alias = "lead")]
+    Leads {
+        /// Filter by pipeline stage
+        #[arg(long)]
+        status: Option<String>,
+        /// Filter by tag
+        #[arg(long)]
+        tag: Option<String>,
+        /// Filter by event ID
+        #[arg(long)]
+        event: Option<String>,
+        /// Filter by owner
+        #[arg(long)]
+        owner: Option<String>,
+        /// Filter by warmth (hot, warm, cold)
+        #[arg(long)]
+        warmth: Option<String>,
+        /// Filter by a customer/partner the lead should be introduced to
+        #[arg(long)]
+        introduce_to: Option<String>,
+        /// Only open leads whose next follow-up is today or earlier (oldest first)
+        #[arg(long)]
+        follow_up_due: bool,
+    },
+    /// List events (standalone mode only)
+    #[command(after_help = "\x1b[1mExamples:\x1b[0m
+  mc list events
+  mc list events --status planned")]
+    #[command(alias = "event")]
+    Events {
+        /// Filter by status
+        #[arg(long)]
+        status: Option<String>,
+        /// Filter by tag
+        #[arg(long)]
+        tag: Option<String>,
     },
     /// List tasks
     #[command(after_help = "\x1b[1mExamples:\x1b[0m
@@ -885,6 +1032,121 @@ pub enum TaskSubcommand {
         /// How many tasks to show
         #[arg(short = 'n', long, default_value_t = 1, value_name = "N")]
         limit: usize,
+    },
+}
+
+// Parsed once per run; `Set`'s many optional fields don't matter here.
+#[allow(clippy::large_enum_variant)]
+#[derive(Subcommand, Debug)]
+pub enum LeadSubcommand {
+    /// Change a lead's pipeline stage
+    #[command(after_help = "\x1b[1mExamples:\x1b[0m
+  mc lead move LEAD-001 contacted
+  mc lead move 1 intro-planned            Loose ID")]
+    Move {
+        /// Lead ID (LEAD-001, lead-1 or just 1)
+        id: String,
+        /// New stage (new, contacted, qualified, intro-planned, introduced, converted, lost)
+        status: String,
+    },
+    /// Log an interaction (newest first under "## Interactions")
+    #[command(after_help = "\x1b[1mExamples:\x1b[0m
+  mc lead log LEAD-001 call \"Discussed a pilot at their plant\"
+  mc lead log 1 email \"Sent the deck\" --follow-up 2026-12-05
+  mc lead log 1 event \"Met at the booth\" --date 2026-04-21
+
+Types: call, email, meeting, event, linkedin, intro, note. Every type but
+note sets last_contact; a lead still in 'new' moves to 'contacted'.")]
+    Log {
+        /// Lead ID (LEAD-001, lead-1 or just 1)
+        id: String,
+        /// call, email, meeting, event, linkedin, intro or note
+        #[arg(value_name = "TYPE")]
+        interaction: String,
+        /// What happened (one line)
+        note: String,
+        /// Date YYYY-MM-DD (default: today)
+        #[arg(long)]
+        date: Option<String>,
+        /// Set the next follow-up date YYYY-MM-DD
+        #[arg(long = "follow-up", visible_alias = "next-follow-up")]
+        next_follow_up: Option<String>,
+    },
+    /// Convert a lead into a contact under a customer
+    #[command(after_help = "\x1b[1mExamples:\x1b[0m
+  mc lead convert LEAD-001 --customer CUST-002
+  mc lead convert LEAD-001 --new-customer \"Acme GmbH\"   Creates the customer as a prospect
+  mc lead convert LEAD-001                 Uses the customer named like the lead's company")]
+    Convert {
+        /// Lead ID (LEAD-001, lead-1 or just 1)
+        id: String,
+        /// Existing customer ID
+        #[arg(long, conflicts_with = "new_customer")]
+        customer: Option<String>,
+        /// Create this customer (status prospect) and add the contact there
+        #[arg(long)]
+        new_customer: Option<String>,
+        /// If the customer already has this person as a contact (same email
+        /// or name), link the lead to it instead of refusing
+        #[arg(long)]
+        link_existing: bool,
+    },
+    /// Change a lead's fields
+    #[command(after_help = "\x1b[1mExamples:\x1b[0m
+  mc lead set LEAD-001 --warmth hot --follow-up 2026-12-01
+  mc lead set 1 --introduce-to CUST-002,CUST-005 --event EVT-001
+  mc lead set 1 --email \"\"                Empty values clear a field")]
+    Set {
+        /// Lead ID (LEAD-001, lead-1 or just 1)
+        id: String,
+        /// Full name (also replaces the note's `# Name` heading)
+        #[arg(long)]
+        name: Option<String>,
+        #[arg(long)]
+        /// Company
+        company: Option<String>,
+        /// Role / job title
+        #[arg(long)]
+        role: Option<String>,
+        /// Email address
+        #[arg(long)]
+        email: Option<String>,
+        /// Phone number
+        #[arg(long)]
+        phone: Option<String>,
+        /// LinkedIn profile URL
+        #[arg(long)]
+        linkedin: Option<String>,
+        /// Website
+        #[arg(long)]
+        website: Option<String>,
+        /// event, card, linkedin, referral, inbound or other
+        #[arg(long)]
+        source: Option<String>,
+        /// Event ID ("" clears)
+        #[arg(long)]
+        event: Option<String>,
+        /// Comma-separated customer IDs; replaces the list ("" clears)
+        #[arg(long)]
+        introduce_to: Option<String>,
+        /// hot, warm or cold
+        #[arg(long)]
+        warmth: Option<String>,
+        /// Next follow-up YYYY-MM-DD ("" clears)
+        #[arg(long = "follow-up", visible_alias = "next-follow-up")]
+        next_follow_up: Option<String>,
+        /// Last contact YYYY-MM-DD ("" clears)
+        #[arg(long)]
+        last_contact: Option<String>,
+        /// Owner ("" clears)
+        #[arg(long)]
+        owner: Option<String>,
+        /// Pipeline stage (same as mc lead move)
+        #[arg(long)]
+        status: Option<String>,
+        /// Comma-separated tags; replaces the tags ("" clears)
+        #[arg(long)]
+        tags: Option<String>,
     },
 }
 

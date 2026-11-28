@@ -31,6 +31,16 @@ pub(crate) const ICON_SPRITE: &str = r#"<svg class="icon-sprite" xmlns="http://w
 <symbol id="i-chevron" viewBox="0 0 16 16"><path d="m6 3.5 4.5 4.5L6 12.5"/></symbol>
 <symbol id="i-refresh" viewBox="0 0 16 16"><path d="M13 8a5 5 0 1 1-1.5-3.6"/><path d="M13 2.5v3h-3"/></symbol>
 <symbol id="i-calendar" viewBox="0 0 16 16"><rect x="2.5" y="3.5" width="11" height="10" rx="1.5"/><path d="M2.5 6.5h11M5.5 2v3M10.5 2v3"/></symbol>
+<symbol id="i-mail" viewBox="0 0 16 16"><rect x="2" y="3.5" width="12" height="9" rx="1.5"/><path d="m2.5 4.5 5.5 4.5 5.5-4.5"/></symbol>
+<symbol id="i-phone" viewBox="0 0 16 16"><path d="M5.5 2.5 3.5 3a1 1 0 0 0-.7 1.1 10 10 0 0 0 9.1 9.1 1 1 0 0 0 1.1-.7l.5-2-2.6-1.2-1.2 1.2a6.5 6.5 0 0 1-3.2-3.2l1.2-1.2z"/></symbol>
+<symbol id="i-globe" viewBox="0 0 16 16"><circle cx="8" cy="8" r="5.5"/><path d="M2.5 8h11M8 2.5c1.6 1.6 2.3 3.4 2.3 5.5S9.6 11.9 8 13.5M8 2.5C6.4 4.1 5.7 5.9 5.7 8s.7 3.9 2.3 5.5"/></symbol>
+<symbol id="i-linkedin" viewBox="0 0 16 16"><rect x="2.5" y="2.5" width="11" height="11" rx="2"/><path d="M5.5 7v4M5.5 5v.01M8 11V7m0 1.8c0-1 .8-1.8 1.8-1.8s1.7.8 1.7 1.8V11"/></symbol>
+<symbol id="i-note" viewBox="0 0 16 16"><path d="M3.5 2.5h6l3 3v8h-9z"/><path d="M9.5 2.5v3h3M5.5 8.5h5M5.5 11h3.5"/></symbol>
+<symbol id="i-users" viewBox="0 0 16 16"><circle cx="6" cy="6" r="2.25"/><path d="M2 13c.4-2.2 2-3.5 4-3.5s3.6 1.3 4 3.5"/><path d="M10.5 4a2.2 2.2 0 0 1 0 4.2M12 9.8c1 .5 1.8 1.6 2 3.2"/></symbol>
+<symbol id="i-flag" viewBox="0 0 16 16"><path d="M3.5 14V2.5M3.5 3h8l-1.5 3 1.5 3h-8"/></symbol>
+<symbol id="i-intro" viewBox="0 0 16 16"><path d="M2.5 5.5h9M9 3l2.5 2.5L9 8M13.5 10.5h-9M7 8l-2.5 2.5L7 13"/></symbol>
+<symbol id="i-check" viewBox="0 0 16 16"><path d="m3.5 8.5 3 3 6-7"/></symbol>
+<symbol id="i-clock" viewBox="0 0 16 16"><circle cx="8" cy="8" r="5.5"/><path d="M8 5v3.2l2 1.3"/></symbol>
 </svg>"#;
 
 /// An icon from the sprite. Decorative; pair it with text or an `aria-label`.
@@ -101,9 +111,11 @@ pub(crate) fn kbd(keys: &str) -> String {
 /// Semantic tone for a status value, used for badge and bar colors.
 pub fn status_tone(status: &str) -> &'static str {
     match status.to_ascii_lowercase().as_str() {
-        "active" | "done" | "completed" | "final" | "accepted" | "won" => "positive",
-        "in-progress" | "review" | "scheduled" | "planning" | "proposed" | "sent" => "progress",
-        "todo" | "draft" | "prospect" | "on-hold" | "pending" | "waiting" => "pending",
+        "active" | "done" | "completed" | "final" | "accepted" | "won" | "converted"
+        | "attended" => "positive",
+        "in-progress" | "review" | "scheduled" | "planning" | "proposed" | "sent" | "contacted"
+        | "qualified" | "intro-planned" | "introduced" => "progress",
+        "todo" | "draft" | "prospect" | "on-hold" | "pending" | "waiting" | "planned" => "pending",
         "cancelled" | "canceled" | "churned" | "rejected" | "lost" | "blocked" => "negative",
         _ => "neutral",
     }

@@ -53,6 +53,8 @@ pub struct ResolvedConfig {
     pub sprints_dir: PathBuf,
     pub milestones_dir: PathBuf,
     pub proposals_dir: PathBuf,
+    pub leads_dir: PathBuf,
+    pub events_dir: PathBuf,
     pub data_dir: PathBuf,
     pub templates_dir: PathBuf,
     pub archive_dir: PathBuf,
@@ -68,6 +70,16 @@ pub struct ResolvedConfig {
 pub const DEFAULT_PRIMARY: [u8; 3] = [0, 82, 155];
 /// Default accent color (gray).
 pub const DEFAULT_ACCENT: [u8; 3] = [102, 102, 102];
+/// Default lead pipeline stages, in order (`statuses.lead` overrides them).
+pub const DEFAULT_LEAD_STATUSES: &[&str] = &[
+    "new",
+    "contacted",
+    "qualified",
+    "intro-planned",
+    "introduced",
+    "converted",
+    "lost",
+];
 /// Display name used when neither `brand.name` nor `site.name` is configured.
 pub const DEFAULT_BRAND_NAME: &str = "MissionControl";
 
@@ -95,6 +107,8 @@ pub struct IdPrefixes {
     pub milestone: String,
     pub proposal: String,
     pub contact: String,
+    pub lead: String,
+    pub event: String,
 }
 
 #[derive(Debug, Clone)]
@@ -108,6 +122,8 @@ pub struct StatusConfig {
     pub milestone: Vec<String>,
     pub proposal: Vec<String>,
     pub contact: Vec<String>,
+    pub lead: Vec<String>,
+    pub event: Vec<String>,
 }
 
 impl ResolvedConfig {
@@ -238,6 +254,8 @@ pub fn load_config(root: &Path, mode: RepoMode) -> McResult<ResolvedConfig> {
         sprints_dir: resolve("sprints", "sprints/"),
         milestones_dir: resolve("milestones", "milestones/"),
         proposals_dir: resolve("proposals", "proposals/"),
+        leads_dir: resolve("leads", "leads/"),
+        events_dir: resolve("events", "events/"),
         data_dir: resolve("data", "data/"),
         templates_dir: resolve("templates", "templates/"),
         archive_dir: resolve("archive", "archive/"),
@@ -251,6 +269,8 @@ pub fn load_config(root: &Path, mode: RepoMode) -> McResult<ResolvedConfig> {
             milestone: prefix("milestone", "MS"),
             proposal: prefix("proposal", "PROP"),
             contact: prefix("contact", "CONT"),
+            lead: prefix("lead", "LEAD"),
+            event: prefix("event", "EVT"),
         },
         statuses: StatusConfig {
             customer: status_list("customer", &["active", "inactive"]),
@@ -288,6 +308,8 @@ pub fn load_config(root: &Path, mode: RepoMode) -> McResult<ResolvedConfig> {
                 ],
             ),
             contact: status_list("contact", &["active", "inactive"]),
+            lead: status_list("lead", DEFAULT_LEAD_STATUSES),
+            event: status_list("event", &["planned", "attended", "cancelled"]),
         },
         brand: resolve_brand(&base_dir, raw_brand, site_name),
         configured_entities,
@@ -314,6 +336,8 @@ fn validate_status_config(statuses: &StatusConfig) -> McResult<()> {
         ("milestone", &statuses.milestone),
         ("proposal", &statuses.proposal),
         ("contact", &statuses.contact),
+        ("lead", &statuses.lead),
+        ("event", &statuses.event),
     ];
     for (name, list) in checks {
         if list.is_empty() {
@@ -375,6 +399,8 @@ mod tests {
             milestone: vec!["planned".into()],
             proposal: vec!["draft".into()],
             contact: vec!["active".into()],
+            lead: vec!["new".into()],
+            event: vec!["planned".into()],
         }
     }
 

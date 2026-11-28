@@ -951,7 +951,7 @@ impl TaskUpdated {
 }
 
 /// One line of text: trimmed, no control characters.
-fn single_line(field: &str, value: &str) -> McResult<String> {
+pub(crate) fn single_line(field: &str, value: &str) -> McResult<String> {
     let value = value.trim();
     if value.chars().any(char::is_control) {
         return Err(McError::usage(
@@ -1165,7 +1165,7 @@ pub fn update_task(cfg: &ResolvedConfig, id: &str, update: &TaskUpdate) -> McRes
 
 /// Replace the body's first line `# {old}` with `# {new}`; any other
 /// opening is left alone.
-fn retitle_body(path: &std::path::Path, old: &str, new: &str) -> McResult<()> {
+pub(crate) fn retitle_body(path: &std::path::Path, old: &str, new: &str) -> McResult<()> {
     let content = std::fs::read_to_string(path)?;
     let Some((_, body)) = frontmatter::split_frontmatter(&content) else {
         return Ok(());

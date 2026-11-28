@@ -276,6 +276,76 @@ updated: "YYYY-MM-DD"
 <!-- Notes about this contact. -->
 "#;
 
+/// Built-in lead template; also used by `mc new lead` when the repo has no
+/// `templates/lead.md` (repos initialised before leads existed).
+pub(crate) const TEMPLATE_LEAD: &str = r#"---
+id: "LEAD-NNN"
+aliases: []
+name: ""
+slug: ""
+company: ""
+role: ""
+email: ""
+phone: ""
+linkedin: ""
+website: ""
+status: "new"             # new | contacted | qualified | intro-planned | introduced | converted | lost
+owner: ""
+source: ""                # event | card | linkedin | referral | inbound | other
+event: ""                 # e.g., "[[EVT-001|Hannover Messe]]"
+introduce_to: []          # e.g., ["[[CUST-002|Zema]]"]
+warmth: ""                # hot | warm | cold
+next_follow_up: ""        # YYYY-MM-DD
+last_contact: ""          # YYYY-MM-DD
+converted_to: ""          # e.g., "[[CONT-016|Jane Doe]]" once converted
+tags: []
+created: "YYYY-MM-DD"
+updated: "YYYY-MM-DD"
+---
+
+# {{ name }}
+
+## Summary
+
+<!-- Who they are, what they need, why they matter to us or our partners. -->
+
+## Interactions
+
+<!-- Newest first: - YYYY-MM-DD · call|email|meeting|event|linkedin|intro|note · what happened -->
+
+## Notes
+"#;
+
+/// Built-in event template; also used by `mc new event` when the repo has no
+/// `templates/event.md`.
+pub(crate) const TEMPLATE_EVENT: &str = r#"---
+id: "EVT-NNN"
+aliases: []
+title: ""
+slug: ""
+status: "planned"         # planned | attended | cancelled
+type: "other"             # trade-fair | conference | meetup | workshop | other
+date: "YYYY-MM-DD"
+end_date: ""
+location: ""
+url: ""
+owner: ""
+tags: []
+created: "YYYY-MM-DD"
+updated: "YYYY-MM-DD"
+---
+
+# {{ title }}
+
+## Goals
+
+<!-- Who do we want to meet, what do we want to learn or show? -->
+
+## Debrief
+
+<!-- Takeaways and follow-ups. The people we met are the leads whose event is this event. -->
+"#;
+
 // ---------------------------------------------------------------------------
 // Embedded repo files
 // ---------------------------------------------------------------------------
@@ -368,6 +438,8 @@ paths:
   milestones: milestones/
   sprints: sprints/
   proposals: proposals/
+  leads: leads/
+  events: events/
   notes: notes/
   data: data/
   templates: templates/
@@ -384,6 +456,8 @@ id_prefixes:
   sprint: SPR
   proposal: PROP
   contact: CONT
+  lead: LEAD
+  event: EVT
 
 statuses:
   customer:
@@ -433,6 +507,18 @@ statuses:
   contact:
     - active
     - inactive
+  lead:
+    - new
+    - contacted
+    - qualified
+    - intro-planned
+    - introduced
+    - converted
+    - lost
+  event:
+    - planned
+    - attended
+    - cancelled
 
 priorities:
   1: critical
@@ -579,6 +665,8 @@ const FULL_DIRS: &[&str] = &[
     "sprints",
     "milestones",
     "proposals",
+    "leads",
+    "events",
     "notes/how-tos",
     "notes/playbooks",
     "data",
@@ -749,6 +837,8 @@ pub fn run(
             TEMPLATE_CONTACT,
             &mut kept,
         )?;
+        write_if_missing(&templates_dir.join("lead.md"), TEMPLATE_LEAD, &mut kept)?;
+        write_if_missing(&templates_dir.join("event.md"), TEMPLATE_EVENT, &mut kept)?;
     }
 
     // Write .gitignore and .gitattributes

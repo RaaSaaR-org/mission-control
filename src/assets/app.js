@@ -92,8 +92,13 @@
       x.addEventListener("click", close);
       t.appendChild(x);
     }
+    // Keep toasts clear of a sticky action bar (quick capture's "Save
+    // lead"), so the next tap on it can't land on the last toast's action.
+    var bar = $(".capture-actions");
+    region.style.bottom = bar ? (bar.offsetHeight + 16) + "px" : "";
     region.appendChild(t);
-    function arm() { if (tone !== "negative") timer = setTimeout(close, action ? 8000 : 4000); }
+    var wait = (action && action.duration) || (action ? 8000 : 4000);
+    function arm() { if (tone !== "negative") timer = setTimeout(close, wait); }
     t.addEventListener("mouseenter", function () { clearTimeout(timer); });
     t.addEventListener("mouseleave", arm);
     t.addEventListener("focusin", function () { clearTimeout(timer); });
@@ -213,8 +218,15 @@
       btn.setAttribute("aria-pressed", String(root.classList.contains("density-compact")));
     });
     if (navigator.clipboard) $$(".copy-id", scope).forEach(function (b) { b.hidden = false; });
+    // A stage route wider than the screen starts at the current stage.
+    $$(".stage-route", scope).forEach(function (r) {
+      var cur = $(".stage.is-current", r);
+      if (cur && r.scrollWidth > r.clientWidth) r.scrollLeft = cur.offsetLeft - (r.clientWidth - cur.offsetWidth) / 2;
+    });
     if (!editable) return;
-    $$("[data-new-task], [data-edit-open], .card-move", scope).forEach(function (b) { b.hidden = false; });
+    $$("[data-new-task], [data-edit-open], .card-move, [data-toggle], .lead-composer", scope).forEach(function (b) {
+      if (b.tagName !== "FORM" || b.classList.contains("lead-composer")) b.hidden = false;
+    });
     $$(".kanban-item", scope).forEach(function (item) { item.draggable = true; });
     $$(".task-check[data-line]", scope).forEach(function (b) { b.disabled = false; });
     $$("[data-comment-form]", scope).forEach(function (f) {
@@ -445,6 +457,8 @@
   function paletteActions() {
     var acts = [];
     if (editable && $("dialog.new-task")) acts.push({ label: "New task", keys: "c", icon: "plus", run: function () { newTask({}); } });
+    if (editable && $('.main-nav a[href="' + base + '/leads"]')) acts.push({ label: "New lead", keys: "", icon: "plus", run: function () { go("/leads/new"); } });
+    if (editable && $('.main-nav a[href="' + base + '/events"]')) acts.push({ label: "New event", keys: "", icon: "calendar", run: function () { go("/events/new"); } });
     if (!themeLocked && themeSwitch) acts.push({ label: "Switch light and dark", keys: "t", icon: "moon", run: toggleTheme });
     acts.push({ label: "Keyboard shortcuts", keys: "?", icon: "list", run: openSheet });
     acts.push({ label: "Reload data", keys: "", icon: "refresh", run: function () { location.reload(); } });
@@ -830,7 +844,7 @@
   doc.addEventListener("keydown", function (e) {
     if (e.key !== "Enter" || !(e.metaKey || e.ctrlKey) || !e.target.form) return;
     var form = e.target.form;
-    if (form.matches("form[data-new-task-form], form[data-edit-task], form[data-comment-form]")) {
+    if (form.matches("form[data-new-task-form], form[data-edit-task], form[data-comment-form], form[data-lead-form]")) {
       e.preventDefault();
       form.requestSubmit ? form.requestSubmit() : form.dispatchEvent(new Event("submit", { cancelable: true }));
     }
@@ -842,10 +856,16 @@
     if (!board) return null;
     return $$(".kanban-column", board).filter(function (l) { return l.dataset.status === status; })[0] || null;
   }
-  function isDoneLane(lane) { return /^(done|completed)$/.test(lane.dataset.status); }
+  // Compact lanes (done tasks, converted or lost leads) show one-line cards, newest on top.
+  function isDoneLane(lane) { return lane.hasAttribute("data-compact") || /^(done|completed)$/.test(lane.dataset.status); }
+  function boardApi() { var b = $("#board"); return (b && b.dataset.api) || "/tasks"; }
   function sortKey(item) {
     var num = parseInt((item.dataset.id.match(/(\d+)$/) || [0, 0])[1], 10);
-    return [parseInt(item.dataset.pri || "3", 10), item.dataset.due || "9999-99-99", num];
+    var pri = parseInt(item.dataset.pri || "3", 10), due = item.dataset.due || "9999-99-99";
+    var board = $("#board");
+    // Leads: soonest follow-up first, then warmest.
+    if (board && board.dataset.order === "due") return [due, pri, num];
+    return [pri, due, num];
   }
   function compareKeys(a, b) {
     for (var i = 0; i < a.length; i++) { if (a[i] < b[i]) return -1; if (a[i] > b[i]) return 1; }
@@ -870,20 +890,35 @@
     var head = $(".kanban-head", lane);
     var late = isDoneLane(lane) ? 0 : $$("[data-row]:not([hidden]) .kanban-card.is-overdue", lane).length;
     var lateEl = $(".kanban-late", head);
+    var board = $("#board");
+    var word = (board && board.dataset.lateWord) || "late";
     if (late && !lateEl) {
       lateEl = doc.createElement("span");
       lateEl.className = "kanban-late";
       head.insertBefore(lateEl, $(".lane-add", head));
     }
-    if (lateEl) { if (late) lateEl.textContent = late + " late"; else lateEl.parentNode.removeChild(lateEl); }
+    if (lateEl) { if (late) lateEl.textContent = late + " " + word; else lateEl.parentNode.removeChild(lateEl); }
     var cards = $(".kanban-cards", lane);
     var empty = $(".kanban-empty", cards);
     if (!$$("[data-row]", lane).length && !empty) {
       empty = doc.createElement("div");
       empty.className = "kanban-empty";
-      empty.textContent = "Nothing in " + statusLabel(lane.dataset.status).toLowerCase() + ".";
+      empty.textContent = (boardApi() === "/leads" ? "No leads at " : "Nothing in ") + statusLabel(lane.dataset.status).toLowerCase() + ".";
       cards.appendChild(empty);
     }
+    syncShares();
+  }
+  // Lead lanes: each open lane's funnel meter is its share of all open
+  // leads on the board (closed lanes have no meter), as rendered server-side.
+  function syncShares() {
+    var meters = $$("#board .lane-share");
+    if (!meters.length) return;
+    var open = $$("#board .kanban-column:not([data-compact])");
+    var total = open.reduce(function (n, l) { return n + $$("[data-row]", l).length; }, 0) || 1;
+    open.forEach(function (l) {
+      var m = $(".lane-share", l);
+      if (m) m.style.setProperty("--share", Math.floor($$("[data-row]", l).length * 100 / total) + "%");
+    });
   }
   function insertCard(html, status) {
     var lane = laneFor(status);
@@ -902,6 +937,12 @@
     var id = item.dataset.id;
     var from = item.dataset.status;
     if (!status || status === from || item.classList.contains("is-pending")) return;
+    // Converting creates (or links) a contact: send the lead to its convert
+    // form instead of just moving the card.
+    if (boardApi() === "/leads" && status === "converted") {
+      location.href = base + "/entity/" + encodeURIComponent(id) + "#convert";
+      return;
+    }
     var origParent = item.parentNode;
     var origNext = item.nextSibling;
     var fromLane = item.closest(".kanban-column");
@@ -916,7 +957,7 @@
     refocus(item);
     syncLane(fromLane);
     syncLane(toLane);
-    api("POST", "/tasks/" + encodeURIComponent(id) + "/move", { status: status }).then(function (data) {
+    api("POST", boardApi() + "/" + encodeURIComponent(id) + "/move", { status: status }).then(function (data) {
       item.classList.remove("is-pending");
       var current = item;
       if (item.parentNode && data.html && data.html.card) {
@@ -1237,6 +1278,197 @@
     if (form.matches("form[data-comment-form]")) { e.preventDefault(); if (editable) postComment(form); }
   });
 
+
+  // ── Leads and events ──────────────────────────────────────────────
+  // Panels on a lead's page open from [data-toggle] buttons; every form
+  // posts to /api/leads… and the page refreshes in place from the server.
+  function togglePanel(id, open) {
+    var panel = doc.getElementById(id);
+    if (!panel || !editable) return;
+    // The composer is always open: its button just takes you there.
+    if (panel.classList.contains("lead-composer")) {
+      panel.scrollIntoView({ block: "center", behavior: "smooth" });
+      var t = $("textarea", panel);
+      if (t) t.focus({ preventScroll: true });
+      return;
+    }
+    if (open === undefined) open = panel.hidden;
+    $$("form[data-lead-form]:not(.lead-composer)").forEach(function (f) {
+      if (f !== panel && !f.hidden) closePanel(f);
+    });
+    if (!open) { closePanel(panel); return; }
+    panel.hidden = false;
+    clearErrors(panel);
+    $$('[data-toggle="' + id + '"]').forEach(function (b) { b.setAttribute("aria-expanded", "true"); });
+    var first = $("input:not([type=hidden]):not([type=radio]):not([type=checkbox]), select, textarea", panel) || $("input", panel);
+    if (first) first.focus({ preventScroll: true });
+    panel.scrollIntoView({ block: "nearest", behavior: "smooth" });
+  }
+  function closePanel(panel) {
+    panel.reset();
+    clearErrors(panel);
+    panel.hidden = true;
+    $$('[data-toggle="' + panel.id + '"]').forEach(function (b) { b.setAttribute("aria-expanded", "false"); });
+  }
+  mc.togglePanel = togglePanel;
+  // `/entity/LEAD-001#convert` (the board's Converted lane) opens the form.
+  if (location.hash === "#convert" && doc.getElementById("lead-convert")) togglePanel("lead-convert", true);
+
+  function initialValue(f) {
+    if (f.tagName === "SELECT") {
+      var o = $$("option", f).filter(function (x) { return x.defaultSelected; })[0] || f.options[0];
+      return o ? o.value : "";
+    }
+    return f.defaultValue;
+  }
+  // The body for a lead form. Checkbox groups become lists, `data-list`
+  // inputs ("a, b") too; with data-diff only changed fields are sent.
+  function leadBody(form) {
+    var diff = form.hasAttribute("data-diff");
+    var body = {}, lists = {};
+    Array.prototype.forEach.call(form.elements, function (f) {
+      if (!f.name || f.type === "submit" || f.type === "button" || f.name === "another" || f.name === "mode") return;
+      if (f.type === "checkbox") {
+        lists[f.name] = lists[f.name] || [];
+        if (f.checked) lists[f.name].push(f.value);
+        return;
+      }
+      if (f.type === "radio") {
+        if (!f.checked) return;
+        var was = $$('input[type=radio][name="' + f.name + '"]', form).filter(function (r) { return r.defaultChecked; })[0];
+        if (diff ? (was ? was.value : "") === f.value : f.value === "") return;
+        body[f.name] = f.value;
+        return;
+      }
+      var v = f.value.trim();
+      if (diff && v === String(initialValue(f) || "").trim()) return;
+      if (!diff && v === "") return;
+      body[f.name] = f.hasAttribute("data-list") ? v.split(",").map(function (x) { return x.trim(); }).filter(Boolean) : v;
+    });
+    Object.keys(lists).forEach(function (k) { body[k] = lists[k]; });
+    return body;
+  }
+  function leadDone(message, action) {
+    if (doc.activeElement && doc.activeElement.blur) doc.activeElement.blur();
+    invalidatePalette();
+    softRefresh(true);
+    mc.toast(message, "positive", action);
+  }
+  function submitLeadForm(form) {
+    if (!editable) return;
+    var kind = form.dataset.leadForm;
+    var body = leadBody(form);
+    var id = ($(".detail[data-entity-id]") || { dataset: {} }).dataset.entityId;
+    if (kind === "convert") {
+      var mode = (form.elements.mode && $$("input[name=mode]", form).filter(function (r) { return r.checked; })[0] || {}).value;
+      if (mode === "new") delete body.customer; else delete body.new_customer_name;
+      body.link_existing = !!(body.link_existing && body.link_existing.length);
+    }
+    if (kind === "create" && !body.name) { form.elements.name.focus(); return; }
+    if (kind === "create-event" && !body.title) { form.elements.title.focus(); return; }
+    if (kind === "log" && !body.note) { form.elements.note.focus(); return; }
+    if (form.hasAttribute("data-diff") && !Object.keys(body).length) { closePanel(form); return; }
+    clearErrors(form);
+    busy(form, true);
+    api(form.dataset.method || "POST", form.dataset.endpoint, body).then(function (data) {
+      busy(form, false);
+      if (kind === "create") {
+        var lead = data.lead;
+        var open = { label: "Open", href: base + data.href };
+        if (form.elements.another && form.elements.another.checked) {
+          // Keep the event and warmth: the next card is from the same fair.
+          ["name", "company", "email", "phone", "notes", "role", "linkedin", "website", "next_follow_up"].forEach(function (n) {
+            if (form.elements[n]) form.elements[n].value = "";
+          });
+          form.elements.name.focus();
+          open.duration = 5000;
+          mc.toast("Saved " + lead.id + ": " + lead.name, "positive", open);
+          invalidatePalette();
+        } else {
+          location.href = base + data.href;
+        }
+        return;
+      }
+      if (kind === "create-event") { location.href = base + data.href; return; }
+      if (kind === "log") {
+        form.elements.note.value = "";
+        var moved = data.old_status !== data.lead.status ? " and moved to " + statusLabel(data.lead.status).toLowerCase() : "";
+        leadDone("Logged" + moved);
+        return;
+      }
+      if (kind === "convert") {
+        closePanel(form);
+        leadDone((data.contact_created === false ? "Linked to " : "Converted to ") + data.contact, { label: "Open contact", href: base + data.contact_href });
+        return;
+      }
+      closePanel(form);
+      leadDone(kind === "follow-up" ? "Follow-up saved" : kind === "intro" ? "Introductions saved" : "Saved " + (id || ""));
+    }, function (err) {
+      busy(form, false);
+      showError(form, err);
+    });
+  }
+  function moveLeadStage(btn) {
+    var route = btn.closest("[data-lead-id]");
+    var id = route ? route.dataset.leadId : null;
+    if (!id || !editable) return;
+    if (btn.dataset.opens) { togglePanel(btn.dataset.opens, true); return; }
+    var stage = btn.dataset.leadStage;
+    btn.classList.add("is-pending");
+    api("POST", "/leads/" + encodeURIComponent(id) + "/move", { status: stage }).then(function (data) {
+      btn.classList.remove("is-pending");
+      var from = data.old_status;
+      leadDone("Moved to " + statusLabel(stage).toLowerCase(), from && from !== stage ? {
+        label: "Undo",
+        onClick: function () {
+          api("POST", "/leads/" + encodeURIComponent(id) + "/move", { status: from }).then(function () {
+            leadDone("Moved back to " + statusLabel(from).toLowerCase());
+          }, function (err) { mc.toast(err.message, "negative"); });
+        }
+      } : undefined);
+    }, function (err) {
+      btn.classList.remove("is-pending");
+      mc.toast("Couldn't move " + id + ". " + err.message, "negative");
+    });
+  }
+  doc.addEventListener("click", function (e) {
+    var t = e.target;
+    if (!t.closest) return;
+    var b;
+    if ((b = t.closest("[data-toggle]"))) {
+      e.preventDefault();
+      togglePanel(b.dataset.toggle);
+    } else if ((b = t.closest("[data-lead-stage]"))) {
+      e.preventDefault();
+      moveLeadStage(b);
+    } else if ((b = t.closest("[data-set-date]"))) {
+      var input = doc.getElementById(b.dataset.target);
+      if (input) { input.value = b.dataset.setDate; input.dispatchEvent(new Event("input", { bubbles: true })); }
+      $$(".chip-btn", b.parentNode).forEach(function (c) { c.classList.toggle("chip-active", c === b); });
+    } else if ((b = t.closest("[data-clear-date]"))) {
+      var target = doc.getElementById(b.dataset.clearDate);
+      if (target) { target.value = ""; var f = target.form; if (f) f.requestSubmit ? f.requestSubmit() : submitLeadForm(f); }
+    }
+  });
+  doc.addEventListener("submit", function (e) {
+    var form = e.target;
+    if (form.matches("form[data-lead-form]")) { e.preventDefault(); submitLeadForm(form); }
+  });
+  doc.addEventListener("keydown", function (e) {
+    if (e.key !== "Escape" || !e.target.closest) return;
+    var form = e.target.closest("form[data-lead-form]:not(.lead-composer)");
+    if (form && !form.hidden && form.id) { e.preventDefault(); togglePanel(form.id, false); var b = $('[data-toggle="' + form.id + '"]'); if (b) b.focus(); }
+  });
+  // The convert form: typing a new customer name picks that option.
+  doc.addEventListener("input", function (e) {
+    var f = e.target;
+    if (f.name === "new_customer_name" && f.form) { var r = $("input[name=mode][value=new]", f.form); if (r) r.checked = true; }
+  });
+  doc.addEventListener("change", function (e) {
+    var f = e.target;
+    if (f.name === "customer" && f.form && f.form.matches("[data-lead-form=convert]")) { var r = $("input[name=mode][value=existing]", f.form); if (r) r.checked = true; }
+  });
+
   // ── Row cursor (j / k) ────────────────────────────────────────────
   var cursor = -1;
   function cursorRows() {
@@ -1335,6 +1567,7 @@
       case "t": toggleTheme(); break;
       case "e":
         if (editable && $("form[data-edit-task]")) { e.preventDefault(); toggleEdit(true); }
+        else if (editable && $("#lead-edit")) { e.preventDefault(); togglePanel("lead-edit", true); }
         break;
       case "m":
         if (editable && focusedItem) {
@@ -1555,7 +1788,8 @@
     return dialogOpen() || menu || dragItem ||
       (editForm && !editForm.hidden) ||
       (active && typing(active) && main && main.contains(active)) ||
-      $$("[data-comment-form] textarea").some(function (t) { return t.value.trim() !== ""; }) ||
+      $$("[data-comment-form] textarea, .lead-composer textarea").some(function (t) { return t.value.trim() !== ""; }) ||
+      $$("form[data-lead-form]:not(.lead-composer)").some(function (f) { return !f.hidden && f.offsetParent; }) ||
       $(".is-pending");
   }
   function softRefresh(quiet) {

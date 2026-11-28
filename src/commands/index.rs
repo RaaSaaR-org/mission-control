@@ -18,6 +18,9 @@ const WIKILINK_FIELDS: &[&str] = &[
     "supersedes",
     "superseded_by",
     "customer",
+    "event",
+    "introduce_to",
+    "converted_to",
 ];
 
 /// Strip wiki-link brackets from known cross-reference fields in a JSON object.
@@ -80,7 +83,7 @@ pub fn run(cfg: &ResolvedConfig) -> McResult<()> {
 }
 
 /// Order of the per-kind counts in `mc index` output.
-const DISPLAY_ORDER: [EntityKind; 9] = [
+const DISPLAY_ORDER: [EntityKind; 11] = [
     EntityKind::Customer,
     EntityKind::Contact,
     EntityKind::Project,
@@ -90,6 +93,8 @@ const DISPLAY_ORDER: [EntityKind; 9] = [
     EntityKind::Sprint,
     EntityKind::Milestone,
     EntityKind::Proposal,
+    EntityKind::Lead,
+    EntityKind::Event,
 ];
 
 fn rel_path(path: &std::path::Path, cfg: &ResolvedConfig) -> String {
@@ -124,6 +129,8 @@ pub struct IndexResult {
     pub milestones: usize,
     pub proposals: usize,
     pub contacts: usize,
+    pub leads: usize,
+    pub events: usize,
 }
 
 impl IndexResult {
@@ -138,6 +145,8 @@ impl IndexResult {
             EntityKind::Milestone => self.milestones,
             EntityKind::Proposal => self.proposals,
             EntityKind::Contact => self.contacts,
+            EntityKind::Lead => self.leads,
+            EntityKind::Event => self.events,
         }
     }
 }
@@ -180,6 +189,8 @@ pub fn run_quiet(cfg: &ResolvedConfig) -> McResult<IndexResult> {
         milestones: count(EntityKind::Milestone),
         proposals: count(EntityKind::Proposal),
         contacts: count(EntityKind::Contact),
+        leads: count(EntityKind::Lead),
+        events: count(EntityKind::Event),
     };
     write("index.json", &JsonValue::Object(index))?;
     Ok(result)

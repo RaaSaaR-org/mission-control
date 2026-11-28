@@ -34,6 +34,8 @@ const RELATED_ORDER: &[EntityKind] = &[
     EntityKind::Research,
     EntityKind::Sprint,
     EntityKind::Milestone,
+    EntityKind::Lead,
+    EntityKind::Event,
 ];
 
 /// Scalar fields that may be promoted into the title block, in order.
@@ -339,6 +341,9 @@ fn title_block(entity: &EntityRecord, page: &Page) -> (String, Vec<&'static str>
 
 /// Render a detail page for a single entity.
 pub fn detail_page(page: &Page, entity: &EntityRecord) -> String {
+    if entity.kind == EntityKind::Lead {
+        return super::leads::lead_detail_page(page, entity);
+    }
     let fm = &entity.frontmatter;
     let name = display_name(entity);
     let plural = entity.kind.label_plural();
@@ -393,6 +398,10 @@ pub fn detail_page(page: &Page, entity: &EntityRecord) -> String {
     // Hub entities (customers, projects, sprints) lead with what's linked to
     // them; documents (meetings, research, tasks) lead with their notes.
     let related = related_sections(entity, page).concat();
+    // An event leads with the people met there (instead of a plain list).
+    if entity.kind == EntityKind::Event {
+        body.push_str(&super::leads::event_summary(page, entity));
+    }
     let hub_first = matches!(
         entity.kind,
         EntityKind::Customer | EntityKind::Project | EntityKind::Sprint | EntityKind::Milestone
@@ -440,7 +449,7 @@ pub fn detail_fragments(page: &Page, entity: &EntityRecord) -> (String, String) 
 }
 
 /// The field rail: every remaining frontmatter field plus the source path.
-fn rail(entity: &EntityRecord, page: &Page, promoted: &[&str]) -> String {
+pub(crate) fn rail(entity: &EntityRecord, page: &Page, promoted: &[&str]) -> String {
     let mut html = String::from(
         r#"<aside class="detail-sidebar" aria-label="Details"><h2 class="rail-title">Details</h2><dl class="fields">"#,
     );
@@ -517,6 +526,10 @@ fn related_sections(entity: &EntityRecord, page: &Page) -> Vec<String> {
         let Some(i) = RELATED_ORDER.iter().position(|k| *k == rec.kind) else {
             continue;
         };
+        // An event's leads are listed by its lead summary.
+        if entity.kind == EntityKind::Event && rec.kind == EntityKind::Lead {
+            continue;
+        }
         if linked {
             buckets[i].push(rec);
         } else if catalog.record_mentions(rec, &entity.id) {

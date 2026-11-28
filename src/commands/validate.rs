@@ -146,6 +146,8 @@ pub fn validate_programmatic(cfg: &ResolvedConfig) -> McResult<Vec<ValidationIss
         validate_entity_dirs(EntityKind::Customer, cfg, &mut issues, &mut ids)?;
         validate_entity_dirs(EntityKind::Project, cfg, &mut issues, &mut ids)?;
         validate_contacts(cfg, &mut issues, &mut ids)?;
+        validate_entity_dirs(EntityKind::Lead, cfg, &mut issues, &mut ids)?;
+        validate_entity_dirs(EntityKind::Event, cfg, &mut issues, &mut ids)?;
     }
     validate_meetings(cfg, &mut issues, &mut ids)?;
     validate_entity_dirs(EntityKind::Research, cfg, &mut issues, &mut ids)?;
@@ -630,7 +632,7 @@ fn validate_frontmatter_file(
 
     // Check 6: required name/title field
     let has_name = match kind {
-        EntityKind::Customer | EntityKind::Project | EntityKind::Contact => {
+        EntityKind::Customer | EntityKind::Project | EntityKind::Contact | EntityKind::Lead => {
             frontmatter::get_str(&fm, "name").is_some()
         }
         EntityKind::Meeting
@@ -638,11 +640,14 @@ fn validate_frontmatter_file(
         | EntityKind::Task
         | EntityKind::Sprint
         | EntityKind::Milestone
-        | EntityKind::Proposal => frontmatter::get_str(&fm, "title").is_some(),
+        | EntityKind::Proposal
+        | EntityKind::Event => frontmatter::get_str(&fm, "title").is_some(),
     };
     if !has_name {
         let field = match kind {
-            EntityKind::Customer | EntityKind::Project | EntityKind::Contact => "name",
+            EntityKind::Customer | EntityKind::Project | EntityKind::Contact | EntityKind::Lead => {
+                "name"
+            }
             _ => "title",
         };
         issues.push(ValidationIssue {
@@ -668,6 +673,12 @@ fn validate_frontmatter_file(
                 ),
             });
         }
+    }
+
+    // Check 7b: CRM vocabularies and dates (warnings: hand edits are common)
+    issues.extend(crm_field_issues(path, kind, &fm));
+    if kind == EntityKind::Lead {
+        issues.extend(lead_conversion_issue(path, &fm, cfg));
     }
 
     // Check 8: slug consistency (for directory-based entities)
@@ -696,6 +707,72 @@ fn validate_frontmatter_file(
         }
     }
     Some(id)
+}
+
+/// Leads and events: `source`, `warmth`, event `type` outside their
+/// vocabularies and malformed dates are warnings (`field-value`). Empty
+/// values are fine.
+fn crm_field_issues(path: &Path, kind: EntityKind, fm: &Value) -> Vec<ValidationIssue> {
+    use crate::commands::new::{EVENT_TYPES, LEAD_SOURCES, LEAD_WARMTH};
+    let (choices, dates): (&[(&str, &[&str])], &[&str]) = match kind {
+        EntityKind::Lead => (
+            &[("source", &LEAD_SOURCES), ("warmth", &LEAD_WARMTH)],
+            &["next_follow_up", "last_contact"],
+        ),
+        EntityKind::Event => (&[("type", &EVENT_TYPES)], &["date", "end_date"]),
+        _ => return Vec::new(),
+    };
+    let mut out = Vec::new();
+    let mut warn = |message: String| {
+        out.push(ValidationIssue {
+            path: path.display().to_string(),
+            check: "field-value".into(),
+            severity: Severity::Warning,
+            message,
+        })
+    };
+    for (field, valid) in choices {
+        let v = frontmatter::get_str_or(fm, field, "").trim();
+        if !v.is_empty() && !valid.contains(&v) {
+            warn(format!("{field}: '{v}' is not one of {}", valid.join(", ")));
+        }
+    }
+    for field in dates {
+        let v = frontmatter::get_str_or(fm, field, "").trim();
+        if !v.is_empty() && crate::commands::new::validate_date(v, field).is_err() {
+            warn(format!("{field}: '{v}' is not a YYYY-MM-DD date"));
+        }
+    }
+    out
+}
+
+/// A lead's `converted` stage and `converted_to` must agree (`lead-conversion`
+/// warning): status `converted` without a contact, or a contact with the lead
+/// still in another stage. Skipped when `converted` isn't a configured stage.
+fn lead_conversion_issue(path: &Path, fm: &Value, cfg: &ResolvedConfig) -> Option<ValidationIssue> {
+    if !cfg.statuses.lead.iter().any(|s| s == "converted") {
+        return None;
+    }
+    let status = frontmatter::get_str_or(fm, "status", "").trim();
+    let converted_to = frontmatter::get_link_str(fm, "converted_to")
+        .unwrap_or("")
+        .trim();
+    let message = match (status == "converted", converted_to.is_empty()) {
+        (true, true) => {
+            "status is 'converted' but converted_to is empty (convert it with `mc lead convert`)"
+                .to_string()
+        }
+        (false, false) => {
+            format!("converted_to is {converted_to} but status is '{status}', not 'converted'")
+        }
+        _ => return None,
+    };
+    Some(ValidationIssue {
+        path: path.display().to_string(),
+        check: "lead-conversion".into(),
+        severity: Severity::Warning,
+        message,
+    })
 }
 
 /// Report every file whose ID another file also uses. Collection keeps only
@@ -736,6 +813,9 @@ const REFERENCE_FIELDS: &[(&str, EntityKind)] = &[
     ("milestone", EntityKind::Milestone),
     ("supersedes", EntityKind::Proposal),
     ("superseded_by", EntityKind::Proposal),
+    ("event", EntityKind::Event),
+    ("introduce_to", EntityKind::Customer),
+    ("converted_to", EntityKind::Contact),
 ];
 
 /// `[[target|alias]]` → (`target`, `Some(alias)`); plain values have no alias.
@@ -935,6 +1015,81 @@ mod tests {
 
     fn checks<'a>(issues: &'a [ValidationIssue], check: &str) -> Vec<&'a ValidationIssue> {
         issues.iter().filter(|i| i.check == check).collect()
+    }
+
+    #[test]
+    fn leads_and_events_are_validated() {
+        let (_tmp, cfg) = setup();
+        let lead_dir = cfg.leads_dir.join("LEAD-001-jane");
+        std::fs::create_dir_all(&lead_dir).unwrap();
+        std::fs::write(
+            lead_dir.join("LEAD-001.md"),
+            "---\nid: LEAD-001\nname: Jane\nslug: jane\nstatus: won\nwarmth: lukewarm\n\
+             next_follow_up: soon\nevent: \"[[EVT-009]]\"\nintroduce_to: [\"[[CUST-404]]\"]\n---\n",
+        )
+        .unwrap();
+        // Side files (research, card photo) don't need frontmatter.
+        std::fs::write(lead_dir.join("research.md"), "# Research\n").unwrap();
+        let bad_dir = cfg.events_dir.join("EVT-001_Bad");
+        std::fs::create_dir_all(&bad_dir).unwrap();
+        std::fs::write(
+            bad_dir.join("EVT-001.md"),
+            "---\nid: EVT-001\ntype: party\nstatus: planned\n---\n",
+        )
+        .unwrap();
+
+        let issues = validate_programmatic(&cfg).unwrap();
+        let msgs = |check: &str| -> Vec<String> {
+            checks(&issues, check)
+                .iter()
+                .map(|i| i.message.clone())
+                .collect()
+        };
+        assert!(msgs("status-validity").iter().any(|m| m.contains("'won'")));
+        let fields = msgs("field-value");
+        assert!(
+            fields.iter().any(|m| m.starts_with("warmth:")),
+            "{fields:?}"
+        );
+        assert!(fields.iter().any(|m| m.starts_with("next_follow_up:")));
+        assert!(fields.iter().any(|m| m.starts_with("type:")));
+        assert!(msgs("required-fields")
+            .iter()
+            .any(|m| m.contains("'title'")));
+        assert_eq!(msgs("folder-naming").len(), 1);
+        let refs = msgs("broken-reference");
+        assert!(refs.iter().any(|m| m.starts_with("event:")), "{refs:?}");
+        assert!(refs.iter().any(|m| m.starts_with("introduce_to:")));
+        assert!(issues.iter().all(|i| !i.path.ends_with("research.md")));
+    }
+
+    #[test]
+    fn converted_status_and_converted_to_must_agree() {
+        let (_tmp, cfg) = setup();
+        for (n, extra) in [
+            (1, "status: converted\nconverted_to: \"\""),
+            (2, "status: qualified\nconverted_to: \"[[CONT-001|Jane]]\""),
+            (3, "status: converted\nconverted_to: \"[[CONT-001|Jane]]\""),
+            (4, "status: new\nconverted_to: \"\""),
+        ] {
+            let dir = cfg.leads_dir.join(format!("LEAD-00{n}-jane"));
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(
+                dir.join(format!("LEAD-00{n}.md")),
+                format!("---\nid: LEAD-00{n}\nname: Jane\nslug: jane\n{extra}\n---\n"),
+            )
+            .unwrap();
+        }
+        let issues = validate_programmatic(&cfg).unwrap();
+        let found = checks(&issues, "lead-conversion");
+        assert_eq!(found.len(), 2);
+        assert!(found
+            .iter()
+            .any(|i| i.path.contains("LEAD-001") && i.message.contains("converted_to is empty")));
+        assert!(found
+            .iter()
+            .any(|i| i.path.contains("LEAD-002") && i.message.contains("'qualified'")));
+        assert!(found.iter().all(|i| !i.is_error()));
     }
 
     #[test]

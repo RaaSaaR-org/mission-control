@@ -40,6 +40,9 @@ const WIKILINK_FIELDS: &[&str] = &[
     "supersedes",
     "superseded_by",
     "customer",
+    "event",
+    "introduce_to",
+    "converted_to",
 ];
 
 /// Strip wiki-link brackets from known cross-reference fields in a JSON object.
@@ -209,6 +212,42 @@ pub(crate) fn next_tasks_json(
     }))
 }
 
+/// Lead list filters as MCP and REST receive them (loose IDs and statuses).
+pub(crate) struct LeadQuery<'a> {
+    pub status: Option<&'a str>,
+    pub event: Option<&'a str>,
+    pub tag: Option<&'a str>,
+    pub owner: Option<&'a str>,
+    pub warmth: Option<&'a str>,
+    pub introduce_to: Option<&'a str>,
+    pub follow_up_due: bool,
+}
+
+/// Leads matching `q` as a JSON array of entity objects. Shared by the MCP
+/// `list_leads` tool and `GET /v1/leads`.
+pub(crate) fn leads_json(cfg: &ResolvedConfig, q: &LeadQuery) -> Result<Vec<JsonValue>, McError> {
+    if !cfg.entity_available(&EntityKind::Lead) {
+        return Err(McError::not_available(EntityKind::Lead, cfg));
+    }
+    let status = q.status.map(|s| status_filter(cfg, EntityKind::Lead, s));
+    let event = q.event.map(|e| loose_ref(cfg, e, EntityKind::Event));
+    let introduce_to = q
+        .introduce_to
+        .map(|c| loose_ref(cfg, c, EntityKind::Customer));
+    let today = crate::util::today_str();
+    let filter = data::LeadFilter {
+        status: status.as_deref(),
+        tag: q.tag,
+        event: event.as_deref(),
+        owner: q.owner,
+        warmth: q.warmth,
+        introduce_to: introduce_to.as_deref(),
+        follow_up_due: q.follow_up_due.then_some(today.as_str()),
+    };
+    let leads = data::collect_leads_filtered(cfg, &filter)?;
+    Ok(leads.iter().map(|l| entity_json(l, cfg)).collect())
+}
+
 /// Helper: convert any error into an internal rmcp error.
 fn mc_err(e: impl std::fmt::Display) -> McpError {
     McpError::internal_error(e.to_string(), None)
@@ -304,7 +343,7 @@ fn require_available(kind: EntityKind, cfg: &ResolvedConfig) -> Result<(), McpEr
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct ListEntitiesParams {
     #[schemars(
-        description = "Entity kind: customers, contacts, projects, meetings, research, tasks, milestones, sprints, or proposals (singular forms also accepted). Kinds not enabled in this repo are rejected; read mc://config for the list."
+        description = "Entity kind: customers, contacts, projects, meetings, research, tasks, milestones, sprints, proposals, leads or events (singular forms also accepted). Kinds not enabled in this repo are rejected; read mc://config for the list."
     )]
     pub kind: String,
     #[schemars(
@@ -318,7 +357,7 @@ pub struct ListEntitiesParams {
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct GetEntityParams {
     #[schemars(
-        description = "Entity ID with the repo's prefix, e.g. CUST-001, CONT-001, PROJ-001, MTG-001, RES-001, TASK-001, SPR-001, PROP-001 (prefixes are in mc://config). Case and zero-padding are forgiven: task-7 means TASK-007."
+        description = "Entity ID with the repo's prefix, e.g. CUST-001, CONT-001, PROJ-001, MTG-001, RES-001, TASK-001, SPR-001, PROP-001, LEAD-001, EVT-001 (prefixes are in mc://config). Case and zero-padding are forgiven: task-7 means TASK-007."
     )]
     pub id: String,
 }
@@ -513,6 +552,190 @@ pub struct CreateContactParams {
     pub status: Option<String>,
     #[schemars(description = "Comma-separated tags")]
     pub tags: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct CreateLeadParams {
+    #[schemars(description = "Full name of the person (required, non-empty)")]
+    pub name: String,
+    #[schemars(description = "Company the person works for")]
+    pub company: Option<String>,
+    #[schemars(description = "Role or job title")]
+    pub role: Option<String>,
+    #[schemars(description = "Email address")]
+    pub email: Option<String>,
+    #[schemars(description = "Phone number")]
+    pub phone: Option<String>,
+    #[schemars(description = "LinkedIn profile URL")]
+    pub linkedin: Option<String>,
+    #[schemars(description = "Company or personal website")]
+    pub website: Option<String>,
+    #[schemars(
+        description = "Where the lead came from: event, card, linkedin, referral, inbound or other (default: event when an event is given, else empty)"
+    )]
+    pub source: Option<String>,
+    #[schemars(
+        description = "Event where we met, e.g. EVT-001 (must exist; stored as [[EVT-001|Title]])"
+    )]
+    pub event: Option<String>,
+    #[schemars(
+        description = "Comma-separated customer/partner IDs we want to introduce this lead to, e.g. CUST-002 (must exist)"
+    )]
+    pub introduce_to: Option<String>,
+    #[schemars(description = "hot, warm or cold")]
+    pub warmth: Option<String>,
+    #[schemars(description = "Next follow-up date YYYY-MM-DD")]
+    pub next_follow_up: Option<String>,
+    #[schemars(description = "Owner (who handles this lead)")]
+    pub owner: Option<String>,
+    #[schemars(
+        description = "Pipeline stage (default: first in mc://config statuses.lead, usually 'new'; stages: new, contacted, qualified, intro-planned, introduced, converted, lost)"
+    )]
+    pub status: Option<String>,
+    #[schemars(description = "Comma-separated tags")]
+    pub tags: Option<String>,
+    #[schemars(description = "Free text for the lead's '## Notes' section")]
+    pub notes: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct UpdateLeadParams {
+    #[schemars(description = "Lead ID, e.g. LEAD-001 (lead-1 works too)")]
+    pub id: String,
+    #[schemars(description = "New full name (also replaces the note's '# Name' heading)")]
+    pub name: Option<String>,
+    #[schemars(description = "Company; empty string clears it")]
+    pub company: Option<String>,
+    #[schemars(description = "Role or job title; empty string clears it")]
+    pub role: Option<String>,
+    #[schemars(description = "Email address; empty string clears it")]
+    pub email: Option<String>,
+    #[schemars(description = "Phone number; empty string clears it")]
+    pub phone: Option<String>,
+    #[schemars(description = "LinkedIn profile URL; empty string clears it")]
+    pub linkedin: Option<String>,
+    #[schemars(description = "Website; empty string clears it")]
+    pub website: Option<String>,
+    #[schemars(
+        description = "event, card, linkedin, referral, inbound or other; empty string clears it"
+    )]
+    pub source: Option<String>,
+    #[schemars(description = "Event ID, e.g. EVT-001 (must exist); empty string clears it")]
+    pub event: Option<String>,
+    #[schemars(
+        description = "Comma-separated customer IDs that replace the introduce_to list (must exist); empty string clears it"
+    )]
+    pub introduce_to: Option<String>,
+    #[schemars(description = "hot, warm or cold; empty string clears it")]
+    pub warmth: Option<String>,
+    #[schemars(description = "Next follow-up date YYYY-MM-DD; empty string clears it")]
+    pub next_follow_up: Option<String>,
+    #[schemars(
+        description = "Date of the last contact YYYY-MM-DD (log_interaction sets it for you); empty string clears it"
+    )]
+    pub last_contact: Option<String>,
+    #[schemars(description = "Owner; empty string clears it")]
+    pub owner: Option<String>,
+    #[schemars(
+        description = "Pipeline stage (valid values in mc://config statuses.lead; case-insensitive)"
+    )]
+    pub status: Option<String>,
+    #[schemars(
+        description = "Comma-separated tags that replace the lead's tags; empty string clears them"
+    )]
+    pub tags: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct MoveLeadParams {
+    #[schemars(description = "Lead ID, e.g. LEAD-001")]
+    pub id: String,
+    #[schemars(
+        description = "Target pipeline stage (valid values in mc://config statuses.lead, default new, contacted, qualified, intro-planned, introduced, converted, lost). Case-insensitive; 'Intro Planned' works. Prefer convert_lead over moving to converted by hand."
+    )]
+    pub status: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct LogInteractionParams {
+    #[schemars(description = "Lead ID, e.g. LEAD-001")]
+    pub id: String,
+    #[schemars(
+        description = "Interaction type: call, email, meeting, event, linkedin, intro or note"
+    )]
+    #[serde(rename = "type")]
+    pub interaction_type: String,
+    #[schemars(description = "What happened, one line (line breaks become spaces)")]
+    pub note: String,
+    #[schemars(description = "Date YYYY-MM-DD (default: today)")]
+    pub date: Option<String>,
+    #[schemars(description = "Also set the next follow-up date YYYY-MM-DD")]
+    pub next_follow_up: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ConvertLeadParams {
+    #[schemars(description = "Lead ID, e.g. LEAD-001")]
+    pub id: String,
+    #[schemars(
+        description = "Existing customer ID to add the contact to, e.g. CUST-002. Omit both customer and new_customer_name to use the customer whose name matches the lead's company."
+    )]
+    pub customer: Option<String>,
+    #[schemars(
+        description = "Create a new customer with this name (status 'prospect') and add the contact there. Refused if a customer with that name exists."
+    )]
+    pub new_customer_name: Option<String>,
+    #[schemars(
+        description = "If the customer already has a contact for this person (same email, or else same name), link the lead to that contact instead of refusing. Default false."
+    )]
+    pub link_existing: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct CreateEventParams {
+    #[schemars(description = "Event title, e.g. 'Hannover Messe 2026' (required, non-empty)")]
+    pub title: String,
+    #[schemars(description = "Date YYYY-MM-DD (first day)")]
+    pub date: String,
+    #[schemars(description = "Last day YYYY-MM-DD (not before date)")]
+    pub end_date: Option<String>,
+    #[schemars(description = "Location, e.g. 'Hannover'")]
+    pub location: Option<String>,
+    #[schemars(description = "trade-fair, conference, meetup, workshop or other (default: other)")]
+    #[serde(rename = "type")]
+    pub event_type: Option<String>,
+    #[schemars(description = "Event website")]
+    pub url: Option<String>,
+    #[schemars(description = "Owner")]
+    pub owner: Option<String>,
+    #[schemars(
+        description = "Status (default: first in mc://config statuses.event, usually 'planned'; values planned, attended, cancelled)"
+    )]
+    pub status: Option<String>,
+    #[schemars(description = "Comma-separated tags")]
+    pub tags: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ListLeadsParams {
+    #[schemars(
+        description = "Filter by pipeline stage (mc://config statuses.lead), case-insensitive"
+    )]
+    pub status: Option<String>,
+    #[schemars(description = "Only leads met at this event ID, e.g. EVT-001")]
+    pub event: Option<String>,
+    #[schemars(description = "Filter by tag (case-insensitive exact match)")]
+    pub tag: Option<String>,
+    #[schemars(description = "Filter by owner (case-insensitive)")]
+    pub owner: Option<String>,
+    #[schemars(description = "Filter by warmth: hot, warm or cold")]
+    pub warmth: Option<String>,
+    #[schemars(
+        description = "true: only open leads (not converted/lost) whose next_follow_up is today or earlier, oldest first"
+    )]
+    pub follow_up_due: Option<bool>,
+    #[schemars(description = "Only leads to be introduced to this customer ID, e.g. CUST-002")]
+    pub introduce_to: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -715,6 +938,7 @@ impl McServer {
                 let missing_kind = kind.or_else(|| EntityKind::from_id(missing, &self.cfg).ok());
                 let tool = match missing_kind {
                     Some(EntityKind::Task) => "list_tasks",
+                    Some(EntityKind::Lead) => "list_leads",
                     _ => "list_entities",
                 };
                 let hint = match closest_id(&self.cfg, missing) {
@@ -775,6 +999,8 @@ impl McServer {
                 "sprints": cfg.sprints_dir.display().to_string(),
                 "milestones": cfg.milestones_dir.display().to_string(),
                 "proposals": cfg.proposals_dir.display().to_string(),
+                "leads": cfg.leads_dir.display().to_string(),
+                "events": cfg.events_dir.display().to_string(),
             },
         })
     }
@@ -1140,6 +1366,162 @@ impl McServer {
     }
 
     #[tool(
+        description = "Create a lead: a person we met (business card, event, LinkedIn) whom we may introduce to partners/customers. Stored in leads/LEAD-NNN-<slug>/LEAD-NNN.md; put a card photo (card.jpg) or research.md next to it. Leads are separate from contacts; convert_lead turns one into a contact. Not available in embedded repos. Returns JSON {id, name, path}."
+    )]
+    async fn create_lead(
+        &self,
+        Parameters(p): Parameters<CreateLeadParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let input = new_cmd::LeadInput {
+            name: p.name,
+            company: p.company,
+            role: p.role,
+            email: p.email,
+            phone: p.phone,
+            linkedin: p.linkedin,
+            website: p.website,
+            source: p.source,
+            event: p.event,
+            introduce_to: csv(p.introduce_to),
+            warmth: p.warmth,
+            next_follow_up: p.next_follow_up,
+            owner: p.owner,
+            status: p.status,
+            tags: csv(p.tags),
+            notes: p.notes,
+        };
+        let created = new_cmd::create_lead(&self.cfg, &input).map_err(tool_err)?;
+        self.with_relative_path(created.to_json())
+    }
+
+    #[tool(
+        description = "Change a lead's fields (name, company, role, email, phone, linkedin, website, source, event, introduce_to, warmth, next_follow_up, last_contact, owner, status, tags). Only the fields you pass change; empty strings clear. Values are validated like create_lead and nothing is written if any is invalid. Returns JSON {id, changed: [fields that changed], old_status, new_status, path}."
+    )]
+    async fn update_lead(
+        &self,
+        Parameters(p): Parameters<UpdateLeadParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let rec = self.find(&p.id, Some(EntityKind::Lead))?;
+        let list = |v: Option<String>| v.as_deref().map(parse_comma_list);
+        let update = commands::lead::LeadUpdate {
+            name: p.name,
+            company: p.company,
+            role: p.role,
+            email: p.email,
+            phone: p.phone,
+            linkedin: p.linkedin,
+            website: p.website,
+            source: p.source,
+            event: p.event,
+            introduce_to: list(p.introduce_to),
+            warmth: p.warmth,
+            next_follow_up: p.next_follow_up,
+            last_contact: p.last_contact,
+            owner: p.owner,
+            status: p.status,
+            tags: list(p.tags),
+        };
+        let updated = commands::lead::update_lead(&self.cfg, &rec.id, &update).map_err(tool_err)?;
+        json_result(&updated.to_json(&self.cfg))
+    }
+
+    #[tool(
+        description = "Move a lead to another pipeline stage. Returns JSON {id, changed, old_status, new_status, path}."
+    )]
+    async fn move_lead(
+        &self,
+        Parameters(p): Parameters<MoveLeadParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let rec = self.find(&p.id, Some(EntityKind::Lead))?;
+        let updated = commands::lead::move_lead(&self.cfg, &rec.id, &p.status).map_err(tool_err)?;
+        json_result(&updated.to_json(&self.cfg))
+    }
+
+    #[tool(
+        description = "Log an interaction with a lead: adds '- YYYY-MM-DD · <type> · <note>' to its '## Interactions' section (newest first). Every type except note sets last_contact (never backwards) and moves a lead in 'new' to 'contacted'; next_follow_up is set when given. Returns JSON {id, date, type, note, line, last_contact, next_follow_up, old_status, new_status, path}."
+    )]
+    async fn log_interaction(
+        &self,
+        Parameters(p): Parameters<LogInteractionParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let rec = self.find(&p.id, Some(EntityKind::Lead))?;
+        let input = commands::lead::Interaction {
+            date: p.date,
+            kind: p.interaction_type,
+            note: p.note,
+            next_follow_up: p.next_follow_up,
+        };
+        let logged =
+            commands::lead::log_interaction(&self.cfg, &rec.id, &input).map_err(tool_err)?;
+        json_result(&logged.to_json(&self.cfg))
+    }
+
+    #[tool(
+        description = "Convert a lead into a contact (CONT-NNN) under a customer: an existing customer, a new prospect customer (new_customer_name), or by default the customer named like the lead's company (refused if none or several match). The contact gets the lead's name, role, email, phone and tags; the lead gets converted_to and status 'converted'. Refused if the lead is already converted, or if the customer already has a contact with the same email or name (pass link_existing=true to link the lead to that contact instead; the contact is not changed). Returns JSON {id, contact, contact_path, contact_created, customer, customer_created, old_status, new_status, path}."
+    )]
+    async fn convert_lead(
+        &self,
+        Parameters(p): Parameters<ConvertLeadParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let rec = self.find(&p.id, Some(EntityKind::Lead))?;
+        let input = commands::lead::ConvertInput {
+            customer: p.customer,
+            new_customer_name: p.new_customer_name,
+            link_existing: p.link_existing.unwrap_or(false),
+        };
+        let converted =
+            commands::lead::convert_lead(&self.cfg, &rec.id, &input).map_err(tool_err)?;
+        json_result(&converted.to_json(&self.cfg))
+    }
+
+    #[tool(
+        description = "Create an event (trade fair, conference, meetup, workshop) where we meet leads, in events/EVT-NNN-<slug>/. Attach leads with create_lead/update_lead's event field; list them with list_leads(event=...). Not available in embedded repos. Returns JSON {id, title, path}."
+    )]
+    async fn create_event(
+        &self,
+        Parameters(p): Parameters<CreateEventParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let input = new_cmd::EventInput {
+            title: p.title,
+            date: Some(p.date),
+            end_date: p.end_date,
+            location: p.location,
+            event_type: p.event_type,
+            url: p.url,
+            owner: p.owner,
+            status: p.status,
+            tags: csv(p.tags),
+        };
+        let created = new_cmd::create_event(&self.cfg, &input).map_err(tool_err)?;
+        self.with_relative_path(created.to_json())
+    }
+
+    #[tool(
+        description = "List leads with filters (status, event, tag, owner, warmth, introduce_to, follow_up_due); all filters combine with AND. Returns a JSON array of lead objects (frontmatter with wiki-links stripped, plus _kind and _source), sorted by ID, or by next_follow_up when follow_up_due is true."
+    )]
+    async fn list_leads(
+        &self,
+        Parameters(p): Parameters<ListLeadsParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let cfg = &self.cfg;
+        require_available(EntityKind::Lead, cfg)?;
+        let leads = leads_json(
+            cfg,
+            &LeadQuery {
+                status: p.status.as_deref(),
+                event: p.event.as_deref(),
+                tag: p.tag.as_deref(),
+                owner: p.owner.as_deref(),
+                warmth: p.warmth.as_deref(),
+                introduce_to: p.introduce_to.as_deref(),
+                follow_up_due: p.follow_up_due.unwrap_or(false),
+            },
+        )
+        .map_err(tool_err)?;
+        json_result(&leads)
+    }
+
+    #[tool(
         description = "List tasks across all locations (global, per-project, per-customer) with rich filtering (status, tag, project, customer, priority, sprint, milestone, owner); all filters combine with AND. Returns a JSON array sorted by ID. Use this instead of list_entities for tasks."
     )]
     async fn list_tasks(
@@ -1272,8 +1654,8 @@ impl McServer {
     async fn build_index(&self) -> Result<CallToolResult, McpError> {
         let result = commands::index::run_quiet(&self.cfg).map_err(tool_err)?;
         let text = format!(
-            "Index built: {} customers, {} projects, {} meetings, {} research, {} tasks, {} sprints, {} proposals, {} contacts",
-            result.customers, result.projects, result.meetings, result.research, result.tasks, result.sprints, result.proposals, result.contacts,
+            "Index built: {} customers, {} projects, {} meetings, {} research, {} tasks, {} sprints, {} milestones, {} proposals, {} contacts, {} leads, {} events",
+            result.customers, result.projects, result.meetings, result.research, result.tasks, result.sprints, result.milestones, result.proposals, result.contacts, result.leads, result.events,
         );
         Ok(CallToolResult::success(vec![Content::text(text)]))
     }
@@ -1335,11 +1717,16 @@ impl ServerHandler for McServer {
             .map(|k| k.label_plural())
             .collect();
         let instructions = format!(
-            "MissionControl repo '{}' ({}) at {}. Manage {} in a git-based knowledge repository.\n\nStart with get_status for an overview. Read the mc://config resource for valid status values and ID prefixes. Use list_tasks (not list_entities) for task queries — it supports richer filters. next_tasks answers \"what should I work on next?\"; update_task changes a task's fields.",
+            "MissionControl repo '{}' ({}) at {}. Manage {} in a git-based knowledge repository.\n\nStart with get_status for an overview. Read the mc://config resource for valid status values and ID prefixes. Use list_tasks (not list_entities) for task queries — it supports richer filters. next_tasks answers \"what should I work on next?\"; update_task changes a task's fields.{}",
             self.cfg.brand.name,
             mode_label,
             self.cfg.root.display(),
             kinds.join(", "),
+            if self.cfg.entity_available(&EntityKind::Lead) {
+                " For people met at events (CRM): create_event, create_lead, log_interaction, move_lead/update_lead, list_leads (follow_up_due=true for due follow-ups) and convert_lead to turn a lead into a contact."
+            } else {
+                ""
+            },
         );
         ServerInfo {
             instructions: Some(instructions),
@@ -1460,8 +1847,11 @@ mod tests {
                 "add_comment",
                 "build_index",
                 "check_item",
+                "convert_lead",
                 "create_contact",
                 "create_customer",
+                "create_event",
+                "create_lead",
                 "create_meeting",
                 "create_milestone",
                 "create_project",
@@ -1473,13 +1863,17 @@ mod tests {
                 "get_status",
                 "list_checklist",
                 "list_entities",
+                "list_leads",
                 "list_tasks",
+                "log_interaction",
+                "move_lead",
                 "move_task",
                 "next_tasks",
                 "print_file",
                 "print_meeting",
                 "print_research",
                 "read_entity_file",
+                "update_lead",
                 "update_task",
                 "validate_repo",
             ]
@@ -1748,6 +2142,21 @@ mod tests {
         let instructions = info.instructions.unwrap();
         assert!(instructions.contains("Ops HQ") && !instructions.contains("contacts"));
 
+        assert!(!instructions.contains("create_lead"));
+        let err = srv
+            .list_leads(Parameters(ListLeadsParams {
+                status: None,
+                event: None,
+                tag: None,
+                owner: None,
+                warmth: None,
+                follow_up_due: None,
+                introduce_to: None,
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, ErrorCode::INVALID_PARAMS);
+
         // Proposals are available in embedded repos.
         srv.create_proposal(Parameters(CreateProposalParams {
             title: "Adopt mc".into(),
@@ -1759,6 +2168,169 @@ mod tests {
         }))
         .await
         .unwrap();
+    }
+
+    fn lead_query() -> ListLeadsParams {
+        ListLeadsParams {
+            status: None,
+            event: None,
+            tag: None,
+            owner: None,
+            warmth: None,
+            follow_up_due: None,
+            introduce_to: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn crm_tools_cover_the_lead_lifecycle() {
+        let (_tmp, srv) = server(false);
+        assert!(srv.get_info().instructions.unwrap().contains("create_lead"));
+        srv.create_customer(Parameters(CreateCustomerParams {
+            name: "Zema".into(),
+            owner: None,
+            status: None,
+            tags: None,
+        }))
+        .await
+        .unwrap();
+        let ev = json(
+            &srv.create_event(Parameters(CreateEventParams {
+                title: "Hannover Messe".into(),
+                date: "2026-04-20".into(),
+                end_date: Some("2026-04-24".into()),
+                location: Some("Hannover".into()),
+                event_type: Some("trade-fair".into()),
+                url: None,
+                owner: None,
+                status: None,
+                tags: None,
+            }))
+            .await
+            .unwrap(),
+        );
+        assert_eq!(ev["id"], "EVT-001");
+        assert_eq!(ev["path"], "events/EVT-001-hannover-messe");
+
+        let lead = json(
+            &srv.create_lead(Parameters(CreateLeadParams {
+                name: "Jane Doe".into(),
+                company: Some("Acme".into()),
+                role: Some("CTO".into()),
+                email: Some("jane@acme.example".into()),
+                phone: None,
+                linkedin: None,
+                website: None,
+                source: None,
+                event: Some("evt-1".into()),
+                introduce_to: Some("CUST-001".into()),
+                warmth: Some("hot".into()),
+                next_follow_up: Some("2000-01-01".into()),
+                owner: Some("seb".into()),
+                status: None,
+                tags: Some("robotics".into()),
+                notes: None,
+            }))
+            .await
+            .unwrap(),
+        );
+        assert_eq!(lead["id"], "LEAD-001");
+        assert_eq!(lead["name"], "Jane Doe");
+
+        // Wiki-links are stripped in JSON; filters accept loose IDs.
+        let mut q = lead_query();
+        q.event = Some("EVT-1".into());
+        q.introduce_to = Some("cust-1".into());
+        q.follow_up_due = Some(true);
+        let leads = json(&srv.list_leads(Parameters(q)).await.unwrap());
+        assert_eq!(leads.as_array().unwrap().len(), 1);
+        assert_eq!(leads[0]["event"], "EVT-001");
+        assert_eq!(leads[0]["introduce_to"][0], "CUST-001");
+        assert_eq!(leads[0]["_kind"], "lead");
+        let mut q = lead_query();
+        q.warmth = Some("cold".into());
+        let none = json(&srv.list_leads(Parameters(q)).await.unwrap());
+        assert!(none.as_array().unwrap().is_empty());
+
+        let logged = json(
+            &srv.log_interaction(Parameters(LogInteractionParams {
+                id: "lead-1".into(),
+                interaction_type: "email".into(),
+                note: "Sent the deck".into(),
+                date: None,
+                next_follow_up: Some("2099-01-01".into()),
+            }))
+            .await
+            .unwrap(),
+        );
+        assert_eq!(logged["new_status"], "contacted");
+        assert_eq!(logged["path"], "leads/LEAD-001-jane-doe/LEAD-001.md");
+        let mut q = lead_query();
+        q.follow_up_due = Some(true);
+        let due = json(&srv.list_leads(Parameters(q)).await.unwrap());
+        assert!(due.as_array().unwrap().is_empty());
+
+        let moved = json(
+            &srv.move_lead(Parameters(MoveLeadParams {
+                id: "LEAD-001".into(),
+                status: "qualified".into(),
+            }))
+            .await
+            .unwrap(),
+        );
+        assert_eq!(moved["old_status"], "contacted");
+        let err = srv
+            .move_lead(Parameters(MoveLeadParams {
+                id: "LEAD-001".into(),
+                status: "won".into(),
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, ErrorCode::INVALID_PARAMS);
+
+        let converted = json(
+            &srv.convert_lead(Parameters(ConvertLeadParams {
+                id: "LEAD-001".into(),
+                customer: Some("CUST-001".into()),
+                new_customer_name: None,
+                link_existing: None,
+            }))
+            .await
+            .unwrap(),
+        );
+        assert_eq!(converted["contact"], "CONT-001");
+        assert_eq!(converted["new_status"], "converted");
+        let got = json(
+            &srv.get_entity(Parameters(GetEntityParams {
+                id: "LEAD-001".into(),
+            }))
+            .await
+            .unwrap(),
+        );
+        assert_eq!(got["converted_to"], "CONT-001");
+        let err = srv
+            .convert_lead(Parameters(ConvertLeadParams {
+                id: "LEAD-001".into(),
+                customer: Some("CUST-001".into()),
+                new_customer_name: None,
+                link_existing: None,
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, ErrorCode::INVALID_PARAMS);
+
+        let events = json(
+            &srv.list_entities(Parameters(ListEntitiesParams {
+                kind: "events".into(),
+                status: None,
+                tag: None,
+            }))
+            .await
+            .unwrap(),
+        );
+        assert_eq!(events[0]["type"], "trade-fair");
+        let index = text(&srv.build_index().await.unwrap());
+        assert!(index.contains("1 leads, 1 events"), "{index}");
     }
 
     fn task_params(title: &str) -> CreateTaskParams {
@@ -2142,6 +2714,9 @@ mod tests {
         assert_eq!(cfg["mode"], "standalone");
         assert_eq!(cfg["id_prefixes"]["task"], "TASK");
         assert_eq!(cfg["statuses"]["task"][0], "backlog");
-        assert_eq!(cfg["available_kinds"].as_array().unwrap().len(), 9);
+        assert_eq!(cfg["available_kinds"].as_array().unwrap().len(), 11);
+        assert_eq!(cfg["id_prefixes"]["lead"], "LEAD");
+        assert_eq!(cfg["statuses"]["lead"][0], "new");
+        assert_eq!(cfg["statuses"]["event"][0], "planned");
     }
 }
