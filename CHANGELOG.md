@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-11-28
+
 ### Added
 - CRM: two new standalone entity kinds for the people you meet at events. **Leads** (`LEAD-NNN`, `leads/LEAD-NNN-<slug>/LEAD-NNN.md`, a folder so a business-card photo and a `research.md` can sit beside it) carry company, role, email, phone, LinkedIn, website, a pipeline stage (`new`, `contacted`, `qualified`, `intro-planned`, `introduced`, `converted`, `lost`; `statuses.lead`), source, event, the partners to introduce them to (`introduce_to`), warmth, next follow-up, last contact and an interaction log in the body. **Events** (`EVT-NNN`, `events/EVT-NNN-<slug>/`) are trade fairs, conferences, meetups and workshops (`planned`, `attended`, `cancelled`). Leads are separate from contacts and never change existing ones; converting a lead creates a contact. See `docs/crm.md`.
 - CLI: `mc new lead`, `mc new event`, `mc list leads` (`--status`, `--event`, `--owner`, `--warmth`, `--introduce-to`, `--tag`, `--follow-up-due`), `mc list events`, and `mc lead move|log|set|convert`.
@@ -155,6 +157,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - MCP server for AI assistant integration
 - Standalone repo mode with `config/config.yml`
 
-[Unreleased]: https://github.com/RaaSaaR-org/mission-control/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/RaaSaaR-org/mission-control/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/RaaSaaR-org/mission-control/compare/v0.3.0...v0.4.0
 [0.1.1]: https://github.com/RaaSaaR-org/mission-control/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/RaaSaaR-org/mission-control/releases/tag/v0.1.0
